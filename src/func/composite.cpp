@@ -132,7 +132,7 @@ int run_composite(const Opts& o) {
     int rc = 0;
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
-            if (!in[n * per + s].open(inst, in_flow_id(n, s), 15000, stop, err, nullptr)) {
+            if (!in[n * per + s].open(inst, in_flow_id(n, s), 15000, stop, err, static_cast<const vramflow::gfx::Raster*>(nullptr))) {
                 st.fatal = "in " + std::to_string(n) + "/" + std::to_string(s) + ": " + err;
                 rc = 4;
             }
@@ -208,7 +208,7 @@ int run_composite(const Opts& o) {
             next_reopen[a] = now_tai() + 100'000'000ull;
             VideoIn fresh;
             std::string e;
-            if (fresh.open(inst, in[a].id, 0, stop, e, nullptr)) {
+            if (fresh.open(inst, in[a].id, 0, stop, e, static_cast<const vramflow::gfx::Raster*>(nullptr))) {
                 if (fresh.raster == want_r[a] && fresh.cuda == static_cast<bool>(want_cuda[a])) {
                     in[a] = fresh;
                     closed[a] = 0;

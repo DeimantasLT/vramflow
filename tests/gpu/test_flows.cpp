@@ -237,3 +237,72 @@ TEST_CASE("upload_h2d: grįžus duomenys matomi kitam non-blocking srautui (page
     cudaFree(dev);
     cudaFree(dev2);
 }
+
+// --- P2: formatui neutralūs flow'ai -----------------------------------------------------------------------------------
+#include "common/format.hpp"
+
+TEST_CASE("flows: create/open tikrina grainRate prieš formatą", "[flows][mxl][format]") {
+    std::atomic<bool> stop{false};
+    std::string err;
+    vramflow::VideoFormat p25{}, p50{};
+    REQUIRE(vramflow::parse_format("1080p25", p25, err));
+    REQUIRE(vramflow::parse_format("1080p50", p50, err));
+    Domain d(20);
+    const std::string id = flow_id(kRoleGen, 0);
+    VideoOut o;
+    REQUIRE(o.create(d.inst, video_def(kRoleGen, 0, 1, p25), "", err, p25));
+    CHECK(o.fmt == p25);
+    VideoIn in;
+    REQUIRE(in.open(d.inst, id, 1000, stop, err, &p25));
+    CHECK(in.cfg.common.grainRate.numerator == 25);
+    CHECK(in.cfg.common.grainRate.denominator == 1);
+    CHECK(in.fmt == p25);
+    in.release(d.inst);
+    VideoIn any;  // be lūkesčio: formatas iš flow aprašo
+    REQUIRE(any.open(d.inst, id, 1000, stop, err, static_cast<const vramflow::VideoFormat*>(nullptr)));
+    CHECK(any.fmt == p25);
+    CHECK(any.raster == p25.raster);
+    any.release(d.inst);
+    VideoIn bad;  // lūkestis 1080p50 → klaida su abiem dažniais
+    CHECK_FALSE(bad.open(d.inst, id, 1000, stop, err, &p50));
+    INFO(err);
+    CHECK(err.find("25/1") != std::string::npos);
+    CHECK(err.find("50/1") != std::string::npos);
+    bad.release(d.inst);
+    o.release(d.inst);
+    // writer'is: aprašo dažnis neatitinka formato → klaida
+    Domain d2(21);
+    VideoOut o2;
+    CHECK_FALSE(o2.create(d2.inst, video_def(kRoleGen, 0, 1, p25), "", err, p50));
+    CHECK(err.find("grainRate") != std::string::npos);
+    o2.release(d2.inst);
+    // 1080i50: grain'o ritmas 50/1, flow apraše 25/1
+    Domain d3(22);
+    VideoOut o3;
+    REQUIRE(o3.create(d3.inst, video_def(kRoleGen, 0, 1, vramflow::kFmt1080i50), "", err, vramflow::kFmt1080i50));
+    VideoIn i3;
+    REQUIRE(i3.open(d3.inst, id, 1000, stop, err, &vramflow::kFmt1080i50));
+    CHECK(i3.cfg.common.grainRate.numerator == 50);
+    i3.release(d3.inst);
+    o3.release(d3.inst);
+}
+
+TEST_CASE("flows: AudioOut priima ilgiausią grain'ą (25/1 → 1920, 59,94 → 801 mėginių)", "[flows][mxl][format]") {
+    std::string err;
+    for (const vramflow::Rational r : {vramflow::Rational{50, 1}, vramflow::Rational{25, 1}, vramflow::Rational{60000, 1001}}) {
+        Domain d(23);
+        AudioOut a;
+        INFO(r.num << "/" << r.den);
+        CHECK(a.create(d.inst, audio_def(0, 1), err, r));
+        a.release(d.inst);
+    }
+}
+
+TEST_CASE("flows: wait_until(rate) laukia indekso laiko pagal dažnį", "[flows][format]") {
+    std::atomic<bool> stop{false};
+    const mxlRational r25{25, 1};
+    const std::uint64_t i = mxlGetCurrentIndex(&r25) + 2;
+    CHECK_FALSE(wait_until(r25, i, 0, stop));
+    CHECK(now_tai() >= mxlIndexToTimestamp(&r25, i));
+    CHECK(mxl_rate(vramflow::Rational{60000, 1001}).numerator == 60000);
+}
