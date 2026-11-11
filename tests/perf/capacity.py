@@ -248,7 +248,7 @@ def flow_sum(summary, keys):
     return tot
 
 
-LOSS_KEYS = ["late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "late_frames",
+LOSS_KEYS = ["late_fields", "missing_fields", "missing_frames", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "late_frames",
              "frames_dropped_queue", "late_skips_frames", "audio_underrun_frames", "encode_errors", "mux_errors",
              "underrun_fields", "pkts_corrupt", "decode_errors", "overrun_frames", "overflow_drops", "pitch_mismatch",
              "frame_alloc_errors", "audio_write_errors"]
