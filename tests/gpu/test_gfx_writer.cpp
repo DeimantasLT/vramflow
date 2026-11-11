@@ -488,3 +488,116 @@ TEST_CASE("gfx_writer: pavėlavusi gija — vėluojantis indeksas įrašomas, pr
     CHECK(gi::pacing_stats(w).late_skips >= 2);
     vfgfx_writer_destroy(w, d.inst);
 }
+
+// --- Fix round 1 ---------------------------------------------------------------------------------------------------------
+
+TEST_CASE("gfx_writer: offset_ns +60 ms / -20 ms — indeksai iš eilės, be praleidimų pastovioje būsenoje", "[gfx_writer][mxl][offset]") {
+    const std::int64_t off = GENERATE(60'000'000, -20'000'000);
+    Domain d(8);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    Recorder rec;
+    gi::PacingHooks hk;
+    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    REQUIRE(vfgfx_start_pacing(w, off) == 0);
+    std::this_thread::sleep_for(700ms);
+    vfgfx_stop_pacing(w);
+    const auto all = rec.snapshot();
+    CHECK(all.size() >= 25);
+    expect_strictly_consecutive(all);
+    CHECK(gi::pacing_stats(w).late_skips == 0);
+    CHECK(gi::pacing_stats(w).errors == 0);
+    // commit'as ties index laiku + offset: +60 ms -> grain'as pasirodo ne anksčiau nei laikas
+    vfgfx_writer_destroy(w, d.inst);
+}
+
+TEST_CASE("gfx_writer: stop -> start su neigiamu offset — indeksai nesikartoja", "[gfx_writer][mxl][offset]") {
+    Domain d(9);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    Recorder rec;
+    gi::PacingHooks hk;
+    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    for (int round = 0; round < 3; ++round) {
+        REQUIRE(vfgfx_start_pacing(w, -30'000'000) == 0);
+        std::this_thread::sleep_for(150ms);
+        REQUIRE(vfgfx_stop_pacing(w) == 0);
+    }
+    const auto all = rec.snapshot();
+    REQUIRE(all.size() >= 6);
+    for (std::size_t k = 1; k < all.size(); ++k) REQUIRE(all[k] > all[k - 1]);
+    CHECK(gi::pacing_stats(w).errors == 0);
+    vfgfx_writer_destroy(w, d.inst);
+}
+
+TEST_CASE("gfx_writer: lygiagretūs vfgfx_write ir vfgfx_submit (bendri staging buferiai)", "[gfx_writer][mxl][race]") {
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio (kryžminė atmintis)");
+    const bool cuda_store = GENERATE(false, true);
+    const gfx::Raster r{640, 360, true, true};
+    Domain d(10);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 640, 360, true).c_str(), storage_opts(cuda_store).c_str(), &w) == 0);
+    Checker chk(d.inst, fid.id, r);
+    Frame f(640, 360, 21, VFGFX_ALPHA_STRAIGHT, !cuda_store);  // priešinga atmintis: naudojamas staging
+    std::atomic<int> sub_bad{0}, wr_bad{0};
+    const std::uint64_t base = mxlGetCurrentIndex(&kRate) & ~1ull;
+    std::thread ts([&] {
+        for (int k = 0; k < 40; ++k)
+            if (vfgfx_submit(w, &f.f) != 0) ++sub_bad;
+    });
+    std::thread tw([&] {
+        for (int k = 0; k < 8; ++k)
+            if (vfgfx_write(w, base + k, &f.f) != 0) ++wr_bad;
+    });
+    ts.join();
+    tw.join();
+    CHECK(sub_bad == 0);
+    CHECK(wr_bad == 0);
+    for (int k = 0; k < 8; ++k) {
+        bool present = false;
+        CHECK(chk.matches(base + k, f.ref(r, (base + k) & 1), &present));
+        CHECK(present);
+    }
+    vfgfx_writer_destroy(w, d.inst);
+}
+
+TEST_CASE("gfx_writer: flow jau egzistuoja -> STATE; nežinomas deviceUuid -> INVALID_ARG", "[gfx_writer][mxl]") {
+    Domain d(11);
+    FlowId fid;
+    vfgfx_writer w = nullptr, w2 = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &w) == 0);
+    CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &w2) == VFGFX_ERR_STATE);
+    CHECK(w2 == nullptr);
+    FlowId f2;
+    CHECK(vfgfx_writer_create(d.inst, def(f2.id, 64, 16, false).c_str(),
+                              R"({"payload":{"backend":"cuda-linear","deviceUuid":"GPU-00000000-0000-0000-0000-000000000000"}})",
+                              &w2) == VFGFX_ERR_INVALID_ARG);
+    vfgfx_writer_destroy(w, d.inst);
+}
+
+TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksuota", "[gfx_writer][mxl]") {
+    Domain d(12);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    gi::PacingHooks hk;
+    hk.on_commit = [](std::uint64_t) { throw std::runtime_error("testinė išimtis"); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    std::this_thread::sleep_for(200ms);
+    CHECK(vfgfx_stop_pacing(w) == 0);
+    CHECK(std::string(vfgfx_last_error(w)).find("ritmo gija nutrūko") != std::string::npos);
+    CHECK(gi::pacing_stats(w).errors >= 1);
+    vfgfx_writer_destroy(w, d.inst);
+}

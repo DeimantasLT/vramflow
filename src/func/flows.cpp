@@ -116,7 +116,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
         err = "mxlCreateFlowWriter status " + std::to_string(st) + (st == MXL_ERR_CONFLICT ? " (CONFLICT)" : "");
         return false;
     }
-    if (!created) { err = "flow jau egzistavo (created=false)"; return false; }
+    if (!created) { existed = true; err = "flow jau egzistavo (created=false)"; return false; }
     if (const std::string bad = check_rate(cfg.common.grainRate); !bad.empty()) { err = bad; return false; }
     if ((st = mxlFlowWriterGetStorageLayout(w, &layout)) != MXL_STATUS_OK) { err = "GetStorageLayout " + std::to_string(st); return false; }
     slots.assign(layout.slotCount, mxlGrainStorage{});

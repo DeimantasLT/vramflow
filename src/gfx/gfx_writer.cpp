@@ -16,6 +16,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <exception>
 #include <atomic>
 #include <cctype>
 #include <cstdint>
@@ -39,7 +40,6 @@ namespace gfx = vramflow::gfx;
 namespace func = mxlv::func;
 namespace gi = vramflow::gfx::internal;
 
-enum { VFGFX_ERR_INVALID_ARG = 2001, VFGFX_ERR_GEOMETRY = 2002, VFGFX_ERR_CUDA = 2003, VFGFX_ERR_STATE = 2004 };
 
 namespace {
 
@@ -101,7 +101,7 @@ struct vfgfx_writer_s {
     bool cuda_store = false;
     int device = -1;
     int fields = 1;  // paruoštų grain'ų skaičius vienoje aibėje (2 interlaced, 1 progresyviam)
-    cudaStream_t s_conv = nullptr;  // create / write / submit (po op_m arba sub_m)
+    cudaStream_t s_conv = nullptr;  // create / write / submit (po conv_m)
     cudaStream_t s_pace = nullptr;  // tik ritmo gija
 
     // Tarpiniai buferiai (kuriami pirmą kartą prireikus)
@@ -113,6 +113,7 @@ struct vfgfx_writer_s {
     std::atomic<std::uint64_t> committed{0};
     std::mutex op_m;   // write / start_pacing / stop_pacing serializacija
     std::mutex sub_m;  // submit serializacija
+    std::mutex conv_m;  // convert(): bendri staging buferiai ir s_conv (write ir submit gali veikti lygiagrečiai)
     std::mutex lat_m;  // cur / has + paruoštų laukų skaitymas ritmo gijoje
     int cur = 0;
     bool has = false;
@@ -126,11 +127,16 @@ struct vfgfx_writer_s {
     gi::PacingStats stats;
 
     std::mutex err_m;
-    std::string err;
+    std::string err;   // paskutinė kviečiančios gijos (create/write/submit/...) klaida
+    std::string perr;  // paskutinė ritmo gijos klaida (atskirai, kad nesimaišytų su kviečiančiosios)
 
     void set_error(std::string m) {
         std::lock_guard<std::mutex> l(err_m);
         err = std::move(m);
+    }
+    void set_pace_error(std::string m) {
+        std::lock_guard<std::mutex> l(err_m);
+        perr = std::move(m);
     }
     int fail(int code, std::string m) {
         set_error(std::move(m));
@@ -159,6 +165,7 @@ struct vfgfx_writer_s {
     // Konvertuoja kadro `n` laukų (paritetai par[k]) į dst[k] (paskirties saugyklos atmintis: device jei cuda_store, kitaip
     // host). Naudoja s_conv. 0 arba klaidos kodas. Kviečiama po op_m arba sub_m.
     int convert(const vfgfx_frame* f, int n, const int* par, std::uint8_t* const* dst) {
+        std::lock_guard<std::mutex> cl(conv_m);
         const gfx::AlphaIn mode = f->alpha == VFGFX_ALPHA_PREMULTIPLIED ? gfx::AlphaIn::Premultiplied : gfx::AlphaIn::Straight;
         const int w = r.w, h = r.h;
         const std::size_t stride = f->stride;
@@ -213,15 +220,40 @@ struct vfgfx_writer_s {
     }
 
     std::uint64_t now() const { return hooks.now ? hooks.now() : func::now_tai(); }
-    std::uint64_t now_index() const { return mxlTimestampToIndex(&func::kFieldRate, now()); }
+    // Indeksas, kurio commit'o laikas (indekso laikas + offset_ns) jau atėjo: index_of(now − offset_ns), saugu be ženklo.
+    std::uint64_t due_index() const {
+        std::uint64_t t = now();
+        if (offset_ns >= 0) {
+            const std::uint64_t o = static_cast<std::uint64_t>(offset_ns);
+            t = t > o ? t - o : 0;
+        } else {
+            t += static_cast<std::uint64_t>(-offset_ns);
+        }
+        return mxlTimestampToIndex(&func::kFieldRate, t);
+    }
 
     void pace_loop();
+    void pace_loop_body();
     void free_all();
 };
 
 void vfgfx_writer_s::pace_loop() {
+    try {
+        pace_loop_body();
+    } catch (const std::exception& e) {
+        set_pace_error(std::string("ritmo gija nutrūko: ") + e.what());
+        bump(&gi::PacingStats::errors);
+    } catch (...) {
+        set_pace_error("ritmo gija nutrūko: nežinoma išimtis");
+        bump(&gi::PacingStats::errors);
+    }
+    out.cancel();
+}
+
+void vfgfx_writer_s::pace_loop_body() {
     DeviceScope dev(device);  // gija nauja: numatytasis įrenginys 0; čia įrenginys pastovus iki gijos pabaigos
-    std::uint64_t i = now_index() + 1;
+    std::uint64_t i = due_index() + 1;
+    if (committed.load() > 0) i = std::max(i, out.last_committed + 1);  // restartas: niekada nekartoti commit'into indekso
     func::ClockWatch cw;
     cw.stepped();
     const std::size_t gb = gfx::grain_bytes(r);
@@ -239,7 +271,7 @@ void vfgfx_writer_s::pace_loop() {
                 std::uint32_t* dst = out.open(i, st);
                 if (!dst) {
                     bump(&gi::PacingStats::errors);
-                    set_error("OpenGrainSlot " + std::to_string(i) + " status " + std::to_string(st));
+                    set_pace_error("OpenGrainSlot " + std::to_string(i) + " status " + std::to_string(st));
                 } else {
                     const std::uint8_t* src = prep[cur][r.interlaced ? (i & 1) : 0];
                     bool ok = true;
@@ -248,7 +280,7 @@ void vfgfx_writer_s::pace_loop() {
                         if (e == cudaSuccess) e = cudaStreamSynchronize(s_pace);
                         if (e != cudaSuccess) {
                             ok = false;
-                            set_error(std::string("D2D: ") + cudaGetErrorString(e));
+                            set_pace_error(std::string("D2D: ") + cudaGetErrorString(e));
                         }
                     } else {
                         std::memcpy(dst, src, gb);
@@ -266,13 +298,12 @@ void vfgfx_writer_s::pace_loop() {
         if (wrote) bump(&gi::PacingStats::committed);
         ++i;
         cw.stepped();
-        const std::uint64_t ni = now_index();
+        const std::uint64_t ni = due_index();
         if (ni > i) {  // pavėlavome: praleisti laukai neįrašomi, tęsiama nuo einamojo (kaip gen)
             bump(&gi::PacingStats::late_skips, ni - i);
             i = ni;
         }
     }
-    out.cancel();
 }
 
 void vfgfx_writer_s::free_all() {
@@ -291,10 +322,25 @@ void vfgfx_writer_s::free_all() {
     s_conv = s_pace = nullptr;
 }
 
+template <class F>
+static int guarded(vfgfx_writer w, F&& f) noexcept {
+    try {
+        return f();
+    } catch (const std::exception& e) {
+        try {
+            if (w) w->set_error(std::string("vidinė išimtis: ") + e.what());
+            else g_create_error = std::string("vidinė išimtis: ") + e.what();
+        } catch (...) {
+        }
+    } catch (...) {
+    }
+    return VFGFX_ERR_INTERNAL;
+}
+
 // --- C ABI -------------------------------------------------------------------------------------------------------------
 extern "C" {
 
-int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out) {
+static int create_impl(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out) {
     auto fail = [&](int code, const std::string& m) {
         g_create_error = m;
         return code;
@@ -313,8 +359,15 @@ int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char*
     w->inst = inst;
     w->r = r;
     w->fields = r.interlaced ? 2 : 1;
+    {   // deviceUuid nurodytas, bet tokio įrenginio nėra: aiški klaida, ne tylus kitas įrenginys
+        std::string u;
+        if (gfx::detail::json_str(opts, "deviceUuid", u) && device_from_options(opts) < 0)
+            return fail(VFGFX_ERR_INVALID_ARG, "deviceUuid " + u + " neatitinka jokio CUDA įrenginio");
+    }
     if (!w->out.create(inst, def, opts, err, r)) {
-        const int code = w->out.create_status != MXL_STATUS_OK ? static_cast<int>(w->out.create_status) : VFGFX_ERR_GEOMETRY;
+        const int code = w->out.create_status != MXL_STATUS_OK ? static_cast<int>(w->out.create_status)
+                         : w->out.existed                       ? VFGFX_ERR_STATE
+                                                                : VFGFX_ERR_GEOMETRY;
         w->out.release(inst);
         return fail(code, err);
     }
@@ -368,7 +421,7 @@ int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char*
     return 0;
 }
 
-int vfgfx_write(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f) {
+static int write_impl(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
     if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "vfgfx_write negalimas, kol veikia ritmo režimas");
@@ -388,7 +441,7 @@ int vfgfx_write(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f) {
     return c;
 }
 
-int vfgfx_start_pacing(vfgfx_writer w, std::int64_t offset_ns) {
+static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
     if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "ritmo režimas jau paleistas");
@@ -404,7 +457,7 @@ int vfgfx_start_pacing(vfgfx_writer w, std::int64_t offset_ns) {
     return 0;
 }
 
-int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f) {
+static int submit_impl(vfgfx_writer w, const vfgfx_frame* f) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> sl(w->sub_m);
     if (const int c = w->check_frame(f)) return c;
@@ -423,7 +476,7 @@ int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f) {
     return 0;
 }
 
-int vfgfx_stop_pacing(vfgfx_writer w) {
+static int stop_pacing_impl(vfgfx_writer w) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
     if (!w->pacing.load()) return 0;
@@ -433,23 +486,56 @@ int vfgfx_stop_pacing(vfgfx_writer w) {
     return 0;
 }
 
-std::uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
 
-const char* vfgfx_last_error(vfgfx_writer w) {
-    // Rodyklė galioja iki kito to paties writer'io iškvietimo, galinčio nustatyti klaidą (thread_local kopija).
-    static thread_local std::string copy;
-    if (!w) return g_create_error.c_str();
-    std::lock_guard<std::mutex> l(w->err_m);
-    copy = w->err;
-    return copy.c_str();
-}
-
-void vfgfx_writer_destroy(vfgfx_writer w, mxlInstance inst) {
+static void destroy_impl(vfgfx_writer w, mxlInstance inst) {
     if (!w) return;
-    vfgfx_stop_pacing(w);
+    stop_pacing_impl(w);
     w->out.release(inst ? inst : w->inst);
     w->free_all();
     delete w;
+}
+
+// --- Eksportuojami apvalkalai: jokia C++ išimtis neperženg C ABI ribos --------------------------------------------------
+int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out) {
+    const int rc = guarded(nullptr, [&] { return create_impl(inst, flow_def_json, writer_options_json, out); });
+    if (rc != 0 && out) *out = nullptr;  // išimtis po dalinio sukūrimo: nelaikom pusiau sukurto writer'io
+    return rc;
+}
+int vfgfx_write(vfgfx_writer w, uint64_t index, const vfgfx_frame* f) {
+    return guarded(w, [&] { return write_impl(w, index, f); });
+}
+int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns) {
+    return guarded(w, [&] { return start_pacing_impl(w, offset_ns); });
+}
+int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f) {
+    return guarded(w, [&] { return submit_impl(w, f); });
+}
+int vfgfx_stop_pacing(vfgfx_writer w) {
+    return guarded(w, [&] { return stop_pacing_impl(w); });
+}
+uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
+
+const char* vfgfx_last_error(vfgfx_writer w) {
+    // Rodyklė — thread_local kopija: galioja iki kito vfgfx_last_error iškvietimo TOJE PAČIOJE gijoje.
+    static thread_local std::string copy;
+    try {
+        if (!w) {
+            copy = g_create_error;
+        } else {
+            std::lock_guard<std::mutex> l(w->err_m);
+            copy = !w->err.empty() ? w->err : w->perr;  // kviečiančiosios klaida turi pirmenybę; kitaip ritmo gijos
+        }
+        return copy.c_str();
+    } catch (...) {
+        return "";
+    }
+}
+
+void vfgfx_writer_destroy(vfgfx_writer w, mxlInstance inst) {
+    try {
+        destroy_impl(w, inst);
+    } catch (...) {
+    }
 }
 
 }  // extern "C"

@@ -59,6 +59,7 @@ endif()
 # Reikia MXL srauto pagalbininkų (mxlv_flows, R4: statinė PIC biblioteka iš flows.cpp) ir abiejų konvertavimo variantų.
 # Tas pats gfx_writer.cpp kompiliuojamas du kartus: į .so ir į statinę biblioteką testams (testai naudoja vidinius kabliukus; .so eksportuoja tik vfgfx_*, žr. vramflow-gfx.map).
 if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
+  include(GNUInstallDirs)
   add_library(mxlv_gfx_writer STATIC src/gfx/gfx_writer.cpp)
   target_include_directories(mxlv_gfx_writer PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
                              ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
@@ -68,12 +69,14 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   add_library(vramflow-gfx SHARED src/gfx/gfx_writer.cpp)
   target_include_directories(vramflow-gfx PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
                              ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
-  target_link_libraries(vramflow-gfx PRIVATE mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
-  target_include_directories(vramflow-gfx INTERFACE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
+  # mxl::mxl PUBLIC: antraštė gfx.h įtraukia <mxl/mxl.h>, vartotojas gauna jo include kelią.
+  target_link_libraries(vramflow-gfx PUBLIC mxl::mxl PRIVATE mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
+  target_include_directories(vramflow-gfx INTERFACE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   target_link_options(vramflow-gfx PRIVATE -Wl,--version-script=${CMAKE_SOURCE_DIR}/cmake/vramflow-gfx.map)
   set_target_properties(vramflow-gfx PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib" VERSION 0.1.0 SOVERSION 0)
-  install(TARGETS vramflow-gfx LIBRARY DESTINATION lib)
-  install(FILES include/vramflow/gfx.h DESTINATION include/vramflow)
+  # Pastaba: INSTALL_RPATH nenustatytas — įdiegtą .so vartotojas turi rasti libmxl per LD_LIBRARY_PATH / ldconfig.
+  install(TARGETS vramflow-gfx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+  install(FILES include/vramflow/gfx.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vramflow)
 
   if(MXLV_BUILD_TESTS)
     # Antraštė turi kompiliuotis kaip C (-std=c11 -pedantic -Werror) ir ją naudojanti programa — susilinkuoti su .so.

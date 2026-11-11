@@ -55,6 +55,7 @@ struct VideoOut {
     bool open_grain = false;
     std::string id;
     vramflow::gfx::Raster raster = vramflow::gfx::kHd1080i;
+    bool existed = false;                      // create: flow jau egzistavo (created == false)
     mxlStatus create_status = MXL_STATUS_OK;  // paskutinis mxlCreateFlowWriter statusas (create klaidai diagnozuoti)
     // Sukuria flow ir patikrina rastro geometriją bei grainRate == 50/1 (visada, R9) (numatytoji — 1080i50 v210).
     // Klaida → tekstas į err, false.

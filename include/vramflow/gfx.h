@@ -19,8 +19,23 @@
  * kiekvieną lauką. CUDA kadras turi priklausyti tam pačiam įrenginiui kaip cuda-linear saugykla (deviceUuid iš
  * writer_options_json; kitaip — kviečiančios gijos dabartiniam), rodyklė ir stride — kartotiniai 4 B.
  *
- * Gijų sauga: vienas vfgfx_writer — vienu metu viena kviečianti gija (submit leidžiamas kviesti iš kelių gijų,
- * jis serializuojamas). Laiko žymės: indeksai iš TAI (mxlGetTime), grain'ų ritmas 50/1.
+ * CUDA kadro tvarka: prieš vfgfx_write / vfgfx_submit kviečiantysis privalo būti BAIGĘS rašyti į f->rgba (pvz. cudaStreamSynchronize
+ * arba cudaDeviceSynchronize); šaltinio kernel'ų biblioteka nelaukia. Iškvietimas sinchroninis: grįžus, f->rgba buferį
+ * (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
+ *
+ * Ritmo laikas: vfgfx_start_pacing(offset_ns) — grain indeksas i commit'inamas laiku T(i) + offset_ns, kur T(i) — indekso
+ * pradžios TAI laikas (50/1). offset_ns > 0 = vėliau, < 0 = anksčiau (iš anksto). Pirmas indeksas — pirmas, kurio laikas
+ * dar nepraėjo; sustabdžius ir vėl paleidus, jau commit'inti indeksai nekartojami. Jei gija pavėluoja, vėluojantis indeksas
+ * vis tiek įrašomas, o praleisti laukai nerašomi (jokio „catch-up“ srauto).
+ *
+ * Klaidos: funkcijos grąžina 0 arba kodą (VFGFX_ERR_* žemiau, 1..1023 — mxlStatus). C++ išimtys neperženg ribos
+ * (VFGFX_ERR_INTERNAL). vfgfx_last_error(w): paskutinės kviečiančiosios gijos klaidos tekstas (jei jos nėra — paskutinė ritmo
+ * gijos klaida); vfgfx_last_error(NULL): ŠIOS gijos paskutinė vfgfx_writer_create klaida. Rodyklė galioja iki kito
+ * vfgfx_last_error iškvietimo toje pačioje gijoje; niekada NULL.
+ *
+ * Gijų sauga: vienas vfgfx_writer — vfgfx_write / vfgfx_submit / start / stop gali būti kviečiami iš kelių gijų (vidinės
+ * užraktai juos serializuoja), tačiau vfgfx_write ritmo metu grąžina VFGFX_ERR_STATE. Laiko žymės: indeksai iš TAI
+ * (mxlGetTime), grain'ų ritmas 50/1.
  */
 #include <stdint.h>
 
@@ -35,6 +50,11 @@ typedef enum { VFGFX_ALPHA_STRAIGHT = 0, VFGFX_ALPHA_PREMULTIPLIED = 1 } vfgfx_a
 typedef enum { VFGFX_MEM_HOST = 0, VFGFX_MEM_CUDA = 1 } vfgfx_mem;
 typedef struct { const void* rgba; uint32_t width, height, stride; vfgfx_alpha alpha; vfgfx_mem mem; } vfgfx_frame;
 /* 0 = OK; 1..1023 = mxlStatus; >= 2000 = VFGFX_ERR_* (INVALID_ARG 2001, GEOMETRY 2002, CUDA 2003, STATE 2004) */
+#define VFGFX_ERR_INVALID_ARG 2001
+#define VFGFX_ERR_GEOMETRY 2002
+#define VFGFX_ERR_CUDA 2003
+#define VFGFX_ERR_STATE 2004 /* taip pat: flow jau egzistuoja (created == false) */
+#define VFGFX_ERR_INTERNAL 2005 /* netikėta vidinė išimtis (niekada neperduodama per C ABI ribą) */
 int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out);
 int vfgfx_write(vfgfx_writer w, uint64_t index, const vfgfx_frame* f);   /* rankinis: grain index (laukas index%2) */
 int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns);                 /* ritmo gija, kas laukas */
