@@ -301,7 +301,7 @@ TEST_CASE("flows: AudioOut priima ilgiausią grain'ą (25/1 → 1920, 59,94 → 
 TEST_CASE("flows: wait_until(rate) laukia indekso laiko pagal dažnį", "[flows][format]") {
     std::atomic<bool> stop{false};
     const mxlRational r25{25, 1};
-    const std::uint64_t i = mxlGetCurrentIndex(&r25) + 2;
+    const std::uint64_t i = mxlGetCurrentIndex(&r25) + 1;  // ≤ 1,5 grain'o iki tikslo (indeksas apvalinamas) — ne šuolis
     CHECK_FALSE(wait_until(r25, i, 0, stop));
     CHECK(now_tai() >= mxlIndexToTimestamp(&r25, i));
     CHECK(mxl_rate(vramflow::Rational{60000, 1001}).numerator == 60000);
