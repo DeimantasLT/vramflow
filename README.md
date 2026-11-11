@@ -1,187 +1,383 @@
 # VRAMFlow
 
-**GPU-resident media functions on [MXL](https://github.com/dmf-mxl/mxl) — and a test bench that proves they behave
-exactly like MXL on the CPU.**
+**Keep MXL media flows in GPU memory and process them there, with the same timing and behaviour as MXL on the CPU.**
 
 [Lietuviškai → README.lt.md](README.lt.md)
 
-MXL (Media eXchange Layer, EBU / Linux Foundation) moves uncompressed video, audio and data between media functions
-through shared-memory ring buffers on the host. Pull request
-[dmf-mxl/mxl#653](https://github.com/dmf-mxl/mxl/pull/653) adds a `cuda-linear` payload backend, so a flow's grains can
-live in GPU memory instead. This repository answers three questions about that backend:
+[MXL](https://github.com/dmf-mxl/mxl) (Media eXchange Layer, EBU / Linux Foundation) lets media functions exchange
+uncompressed video, audio and data through shared memory. Normally that memory is host RAM. With the `cuda-linear`
+backend from [dmf-mxl/mxl#653](https://github.com/dmf-mxl/mxl/pull/653), a flow can live in GPU memory (VRAM)
+instead, so a GPU function can hand frames to the next GPU function without copying them through the CPU.
 
-1. **Is it correct?** Same grain indices, timestamps, slices, sync-group and partial-grain behaviour as host MXL, with
-   bit-exact payloads.
-2. **Is it stable?** Long runs, sanitizers, clock steps, start/stop, many flows.
-3. **What is it worth?** How many full broadcast flows fit on one GPU compared with the CPU, for the same work.
+VRAMFlow gives you:
 
-It also contains an **alpha graphics compositor** (graphics as standard `video/v210a` MXL flows, combined on the GPU)
-and draft upstream patches (tests and a fix) for PR #653, with evidence.
-
-## What is in here
-
-| Path | What it is |
+| Part | What it does |
 |---|---|
-| `src/mxlio/`, `src/gpu/` | `vramflow-verify`: writer/reader that checks every grain (pattern, CRC32C, index, timing) on host and cuda-linear flows |
-| `src/media/` | Media kernels for 1080i50 v210: logo burn-in, NV12↔v210 weave/split, test pattern generator. CUDA (`media_kernels.cu`), CPU (`cpu/`) and an independent reference (`media_ref.cpp`) |
-| `src/gfx/`, `include/vramflow/gfx.h` | Alpha graphics: RGBA → `v210a` (fill + key) and K-layer compositing. CUDA, CPU and an independent reference; `libvramflow-gfx` C library |
-| `src/func/` | `vramflow-func`: real media functions on MXL flows — `gen`, `logo`, `dec` (H.264 TS/UDP → MXL, NVDEC or software), `enc` (MXL → H.264 + AAC TS, NVENC or x264), `gfxgen`, `composite`, `verify` |
-| `tests/` | Unit tests (Catch2), GPU kernel tests, functional tests, capacity harness (`perf/capacity.py`), comparison report (`perf/compare_report.py`) |
-| `scripts/wsl/` | Build and run scripts (WSL2 or native Ubuntu 24.04) |
-| `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U4), each with evidence |
-| `docs/architektura/` | Design documents (Lithuanian): verification design, GPU media functions, time and synchronization, GPU-vs-CPU method |
+| `vramflow-func` | Ready-made media functions on MXL flows: test generator, logo burn-in, H.264 decode, H.264 + AAC encode, alpha graphics compositor, output checker. Each runs on the CPU or the GPU. |
+| `libvramflow-gfx` | C library: turn RGBA frames from any program into a standard MXL graphics flow (`video/v210a`, fill + key). |
+| `vramflow-verify` | Test writer and reader that check every grain (content, index, timing) on host or GPU flows. |
+| Tests and tools | Unit, GPU and functional tests; a capacity harness that measures how many flows fit on a machine. |
 
-## Three variants of every function
+Everything is C++ / CUDA. Python is used only by the test and measurement scripts.
 
-| Variant | Processing | Flow storage | Meaning |
+---
+
+## 1. Basic ideas (two minutes)
+
+| Term | Meaning |
+|---|---|
+| **Domain** | A folder in shared memory, e.g. `/dev/shm/my-domain`. All writers and readers that use the same folder see each other's flows. |
+| **Flow** | One stream, for example one video signal. It has a UUID and a description (`flow_def.json`). |
+| **Grain** | One unit of a flow. Here: one video **field** (1080i50 = 50 fields per second). Each grain has an index derived from TAI time, so every process agrees which grain belongs to which moment. |
+| **Writer / reader** | A writer creates a flow and commits grains; any number of readers read them. When the last writer stops, the flow disappears. |
+| **Storage** | Where the grains live: `host` (RAM, standard MXL) or `cuda-linear` (GPU memory, PR #653). Writers and readers use the same API for both. |
+| **v210 / v210a** | 10-bit 4:2:2 video. `v210a` adds a key (alpha) plane, so a graphics flow carries both picture and transparency. |
+
+Every function in VRAMFlow runs in one of three ways. You choose with two options:
+
+| Variant | `--impl` | `--storage` | When to use |
 |---|---|---|---|
-| **C** | CPU (own C++ kernels, software x264 / H.264 decoder) | host | what you run today |
-| **H** | GPU | host (MXL v1.1 + copies to and from the GPU) | GPU without PR #653 |
-| **G** | GPU | `cuda-linear` (PR #653) | grains stay on the GPU |
+| **C** — CPU | `cpu` | `host` | No GPU, or to compare with today's setup |
+| **H** — GPU, RAM flows | `gpu` | `host` | GPU processing, but other programs need the flows in RAM |
+| **G** — GPU, GPU flows | `gpu` | `cuda-linear` | Best: frames stay on the GPU between functions |
 
-The C kernels are bit-exact with the GPU kernels (both are tested against the same independent reference), so the
-comparison measures the same work.
+The three variants produce **bit-identical** output; all are tested against one independent reference.
 
-## Results (RTX 4070 Laptop 8 GB, WSL2 Ubuntu 24.04 — indicative)
+---
 
-Format: 1080i50 (grain = field, 50 grains/s, v210), 60 s per level, all outputs verified.
-**PASS strict** = 0 lost fields and 0 correctness errors. **PASS tol** = 0 correctness errors and ≤ 0.2 % lost
-fields (separates single WSL2/Windows scheduling hiccups from a real capacity limit). N\* = largest N for which this
-and every smaller level passed.
+## 2. Requirements
 
-| Function | C (CPU) N\* | G (GPU, cuda-linear) N\* | CPU cores per flow, C → G |
-|---|---|---|---|
-| Logo burn-in, MXL → MXL | 16 | ≥ 64 (limit not reached) | 0.057 → 0.005 |
-| H.264 decode, TS/UDP → MXL | 8 | 24 (16 strict) | ~0.55 → ~0.04 |
-| Full chain: TS → decode → logo → encode H.264 + AAC → TS | 4 | ≥ 12 (limit not reached; see note) | ~2.0 → ~0.33 |
+- Ubuntu 24.04 (native or WSL2)
+- For the GPU variants: NVIDIA GPU with NVENC/NVDEC, driver with CUDA 13.x, CUDA Toolkit 13.x
+- Clang 19 (or GCC 13+), CMake ≥ 3.28, Ninja, vcpkg (needed to build MXL)
+- `libavformat-dev libavcodec-dev libavutil-dev`, `ffmpeg`, Python 3 (tests only)
+- System clock with the correct TAI offset (37 s). Check:
+  `python3 -c "import time;print(time.clock_gettime(time.CLOCK_TAI)-time.time())"` must print `37.0`.
+  On WSL2 see [`docs/architektura/2026-11-11-laikas-ir-sinchronizacija.md`](docs/architektura/2026-11-11-laikas-ir-sinchronizacija.md).
 
-Full tables, GPU load and notes: [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
+## 3. Build
 
-Other measured facts:
+```bash
+# 1. MXL with the GPU backend (PR #653, pinned commit)
+git clone https://github.com/dmf-mxl/mxl ~/src/mxl-pr653
+cd ~/src/mxl-pr653
+git fetch origin pull/653/head
+git checkout 6dddc91d92f56c3c9d90fa089c95d8f262bc2c92
+cd -
 
-- **GPU load (full chain, G):** at N=12 the CUDA cores are ~10 % busy, NVENC 64 %, NVDEC 50 %, ~34 W. The limit is
-  the single NVENC engine of this laptop GPU, not CUDA compute; most of the GPU is still free.
-- **Clocks matter (see note):** at very light load (chain N=2) the laptop GPU drops its clock from 1605 to 210 MHz
-  every ~6 s and real-time deadlines are missed (18–23 % loss, reproduced 3×); from N=4 the clock stays up and all
-  levels pass. Real-time GPU media functions need locked clocks (`nvidia-smi -pm 1` and `-lgc` on servers).
-- **Power profile:** the decode and chain campaigns ran with the Windows "Whisper" (quiet, power-limited) profile.
+# 2. Build and install MXL (into ~/src/mxl-pr653/install/Linux-Clang-Release)
+bash scripts/wsl/10-build-mxl.sh
 
-- **Transport:** end-to-end grain latency p50 1.2 ms on cuda-linear vs 2.9 ms on host flows (N=1); host flows with
-  GPU processing (variant H) collapse at N=32, cuda-linear does not.
-- **Correctness:** NVDEC output bit-exact against the software decoder (1510/1510 sampled fields live); logo output
-  bit-exact against the reference on GPU and CPU.
-- **Upstream:** PR #653 full ctest **136/136** with patches U1–U3 (non-root; two tests skipped: one GPU, no docker).
+# 3. Build VRAMFlow
+VERIFY_BUILD=$HOME/build/vramflow bash scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
+```
 
-Why indicative: WSL2 on Windows adds GPU scheduling (WDDM) and clock effects. The method and tools are made to be
-rerun on native Linux servers, where the numbers become authoritative.
+Paths and versions (`MXL_SRC`, `CUDA_HOME`, `VCPKG_ROOT`, …) are in `scripts/wsl/env.sh`; override any of them with an
+environment variable. The build puts `vramflow-func`, `vramflow-verify` and `libvramflow-gfx.so` in `$VERIFY_BUILD`.
 
-Detailed tables are produced by `tests/perf/compare_report.py` from the raw JSON of each run.
+Before running anything, in every shell:
 
-## Alpha graphics compositor
+```bash
+export LD_LIBRARY_PATH=$HOME/src/mxl-pr653/install/Linux-Clang-Release/lib:$HOME/build/vramflow
+export PATH=$HOME/build/vramflow:$HOME/src/mxl-pr653/install/Linux-Clang-Release/bin:$PATH
+```
 
-Graphics in MXL are ordinary flows. The MXL standard already defines `video/v210a`: a v210 fill plane plus a 10-bit
-key plane (straight alpha, video range 64–940). VRAMFlow adds the pieces to make and combine such flows, on the CPU,
-on the GPU with host flows, and on the GPU with `cuda-linear` flows (C / H / G), bit-exact against one independent
-reference.
+---
 
-- **`libvramflow-gfx`** (`include/vramflow/gfx.h`, C ABI, shared library): any program — a renderer, an OGraf/HTML
-  page, a game engine, a script — hands over RGBA frames (host or CUDA memory, straight or premultiplied alpha) and
-  gets a standard `video/v210a` flow. Two modes: *manual* (`vfgfx_write(index, frame)`, the caller decides the grain)
-  and *paced* (`vfgfx_submit(frame)`; a library thread commits the latest frame every field on TAI time).
-- **`vramflow-func gfxgen`**: synthetic v210a sources (N × K flows, logo 384×216 or full 1920×1080 layers).
-- **`vramflow-func composite`**: base video + K graphics layers (1–8; position, opacity) → `v210` or `v210a`.
-  `--base none --out-format v210a` builds a graphics-only layer, and `--layer-flow K:UUID` feeds one compositor's output
-  into another, so compositors chain.
-- **`vramflow-func verify --mode composite`**: rebuilds the expected output with the CPU reference and checks it.
+## 4. Quick start
 
-A graphics flow behaves like any other flow. If a layer's source stops or is restarted, the compositor does not
-invent a picture: that output grain is not committed (readers see a gap, exactly as with a stopped video writer), and
-the compositor reattaches when the source returns.
+Each example uses its own domain and removes it at the end. Run the lines of one example in one shell.
+
+### 4.1 First writer and reader (RAM)
+
+```bash
+D=/dev/shm/vf-hello; mkdir -p $D
+vramflow-verify writer --domain $D --storage host --duration 10 --out /tmp/vf-hello &
+vramflow-verify reader --domain $D --storage host --duration 8  --out /tmp/vf-hello
+wait; rm -rf $D
+```
+
+The writer creates one 1080p50 v210 flow and writes a known pattern into every grain. The reader checks every grain
+(content, index, timing) and writes `summary-reader.json` to `--out`. Exit code `0` means every grain was correct.
+
+### 4.2 The same flow in GPU memory
+
+Change only the storage:
+
+```bash
+D=/dev/shm/vf-hello; mkdir -p $D
+vramflow-verify writer --domain $D --storage cuda-linear --duration 10 --out /tmp/vf-gpu &
+vramflow-verify reader --domain $D --storage cuda-linear --duration 8  --out /tmp/vf-gpu
+wait; rm -rf $D
+```
+
+Grains now live in VRAM; the reader gets device pointers and checks them on the GPU. With more than one GPU, choose
+one with `--device-uuid GPU-…` (`nvidia-smi -L` lists the UUIDs).
+
+### 4.3 A media function: logo burn-in
+
+Three processes: `gen` writes the input flow, `logo` reads it and writes a new flow with a logo, `verify` checks the
+output against the CPU reference.
+
+```bash
+D=/dev/shm/vf-logo; mkdir -p $D
+V="--impl gpu --storage cuda-linear"        # without a GPU: V="--impl cpu --storage host"
+vramflow-func gen    --domain $D --flows 1 --duration 30 $V --out /tmp/vf-logo &
+vramflow-func logo   --domain $D --flows 1 --duration 25 $V --out /tmp/vf-logo &
+vramflow-func verify --domain $D --flows 1 --duration 20 --mode logo $V --out /tmp/vf-logo
+wait; rm -rf $D
+```
+
+`--flows 4` runs four independent chains in the same processes.
+
+### 4.4 Graphics with transparency over video
+
+`gfxgen` creates two graphics flows (a small logo-sized layer and a full-screen layer), `composite` puts them over the
+video from `gen`, `verify` checks the result.
 
 ```bash
 D=/dev/shm/vf-gfx; mkdir -p $D
-vramflow-func gen     --domain $D --flows 1 --duration 60 --impl gpu --storage cuda-linear &
-vramflow-func gfxgen  --domain $D --flows 1 --layers 2 --layer-geom logo,full --mode pace                       --duration 60 --impl gpu --storage cuda-linear &
-vramflow-func composite --domain $D --flows 1 --layers 2 --layer-xy 1488,64 --layer-xy 0,0                       --opacity 1 --opacity 0.5 --base gen --out-format v210 --duration 50                       --impl gpu --storage cuda-linear
+V="--impl gpu --storage cuda-linear"
+L="--layers 2 --layer-xy 1488,64 --layer-xy 0,0 --opacity 1 --opacity 0.5 --base gen --out-format v210"
+vramflow-func gen       --domain $D --flows 1 --duration 40 $V --out /tmp/vf-gfx &
+vramflow-func gfxgen    --domain $D --flows 1 --layers 2 --layer-geom logo,full --mode pace --duration 40 $V --out /tmp/vf-gfx &
+vramflow-func composite --domain $D --flows 1 $L --duration 35 $V --out /tmp/vf-gfx &
+vramflow-func verify    --domain $D --flows 1 --mode composite $L --layer-geom logo,full --gfx-mode pace \
+                        --duration 25 $V --out /tmp/vf-gfx
+wait; rm -rf $D
 ```
 
-Status: library, `gfxgen`, `composite` and `verify --mode composite` are done and tested (unit, GPU and functional
-tests, all 12 mode × format combinations of C/H/G pass the reference check). The N × K capacity campaign and the OGraf
-example are in progress.
+### 4.5 Look inside a domain
 
-## Requirements
-
-- Ubuntu 24.04 (native or WSL2), NVIDIA GPU with NVENC/NVDEC, driver with CUDA 13.x support
-- CUDA Toolkit 13.x, Clang 19 (or GCC 13+), CMake ≥ 3.28, Ninja, vcpkg (for MXL)
-- FFmpeg development libraries (`libavformat-dev libavcodec-dev libavutil-dev`), `ffmpeg` CLI, Python 3
-- MXL from PR #653 at commit `6dddc91d92f5` (the scripts check this SHA)
-- Time: kernel TAI offset must be 37 s (`python3 -c "import time;print(time.clock_gettime(time.CLOCK_TAI)-time.time())"`).
-  On WSL2 see `docs/architektura/2026-11-11-laikas-ir-sinchronizacija.md`.
-
-## Build
+While an example is running, MXL's own tool lists the flows, their position and latency:
 
 ```bash
-# 1. MXL with the cuda-linear backend (PR #653)
-git clone https://github.com/dmf-mxl/mxl ~/src/mxl-pr653
-cd ~/src/mxl-pr653 && git fetch origin pull/653/head && git checkout 6dddc91d92f56c3c9d90fa089c95d8f262bc2c92
-cd -
-bash scripts/wsl/10-build-mxl.sh
-
-# 2. This repository (verification tool, media functions, tests)
-VERIFY_BUILD=$HOME/build/vramflow/func bash scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
+mxl-info -d /dev/shm/vf-gfx -l
 ```
 
-Paths and versions are set in `scripts/wsl/env.sh` (`MXL_SRC`, `CUDA_HOME`, `VCPKG_ROOT`, …); override them with
-environment variables.
+---
 
-## Use
+## 5. Use it from your own program
+
+### 5.1 MXL writer and reader in GPU memory (C / C++)
+
+The MXL API is the same for RAM and VRAM. Only two things change: the writer passes a storage option, and you get the
+grain address with a helper that returns a CUDA device pointer.
+
+```cpp
+#include <mxl/mxl.h>
+#include <mxl/flow.h>
+#include <mxl/time.h>
+#include "CudaLinearStorage.h"   // from ~/src/mxl-pr653/lib/payload-backends/cuda-linear
+
+mxlInstance inst = mxlCreateInstance("/dev/shm/my-domain", "");
+
+// ---- Writer ------------------------------------------------------------------
+const char* opts = R"({"payload":{"backend":"cuda-linear","deviceUuid":"GPU-xxxxxxxx-…"}})";  // RAM: nullptr
+mxlFlowWriter w; mxlFlowConfigInfo cfg{}; bool created = false;
+mxlCreateFlowWriter(inst, flow_def_json, opts, &w, &cfg, &created);
+
+mxlGrainStorageLayout layout{};
+mxlFlowWriterGetStorageLayout(w, &layout);
+std::vector<mxlGrainStorage> slots(layout.slotCount);
+mxlFlowWriterMapSlots(w, layout.slotCount, slots.data());
+
+uint64_t index = mxlGetCurrentIndex(&cfg.common.grainRate);
+for (;; ++index) {
+    mxlGrainInfo info{}; uint32_t slot = 0;
+    mxlFlowWriterOpenGrainSlot(w, index, &info, &slot);
+    void* dst = mxlCudaLinearDevicePointer(slots[slot]);   // RAM: slots[slot].host.pointer
+    my_kernel<<<grid, block, 0, stream>>>(dst /*, … */);   // write the field on the GPU
+    cudaStreamSynchronize(stream);
+    mxlFlowWriterCommitGrain(w, &info);
+    // … wait until the next field time (TAI)
+}
+
+// ---- Reader (another process) ---------------------------------------------------
+mxlFlowReader r;
+mxlCreateFlowReader(inst, "flow-uuid", "", &r);
+mxlFlowReaderGetStorageLayout(r, &layout);
+slots.resize(layout.slotCount);
+mxlFlowReaderMapSlots(r, layout.slotCount, slots.data());
+
+mxlGrainInfo info{}; uint32_t slot = 0;
+mxlFlowReaderGetGrainSlot(r, index, MXL_GRAIN_VALID_SLICES_ALL, 20'000'000 /* ns timeout */, &info, &slot);
+const void* src = mxlCudaLinearDevicePointer(slots[slot]);  // read it with your kernel
+
+mxlReleaseFlowReader(inst, r);
+mxlReleaseFlowWriter(inst, w);
+mxlDestroyInstance(inst);
+```
+
+The snippet leaves out error handling. Complete, checked versions: writer
+[`src/mxlio/verify_writer.cpp`](src/mxlio/verify_writer.cpp), reader
+[`src/mxlio/verify_reader.cpp`](src/mxlio/verify_reader.cpp). The reader learns the storage type from
+`layout.storageType`, so the same reader code handles RAM and VRAM flows; see
+[`src/mxlio/slots.hpp`](src/mxlio/slots.hpp).
+
+Rules worth knowing:
+
+- Writer and reader must use the same GPU (same `deviceUuid`). Moving VRAM flows between machines is not covered here.
+- Grains are addressed by index = time. A reader should stay a little behind the writer (a few milliseconds) and ask
+  for the index it wants, not "the next one".
+- A skipped grain reads as OK with the `MXL_GRAIN_FLAG_INVALID` flag; check `info.flags` and `info.index`.
+
+### 5.2 Graphics from any program: `libvramflow-gfx`
+
+Your renderer (an HTML/OGraf page, a game engine, a script) produces RGBA frames. The library converts them into a
+standard `video/v210a` flow (fill + key, straight alpha) in RAM or GPU memory.
+
+```c
+#include <vramflow/gfx.h>
+
+mxlInstance inst = mxlCreateInstance("/dev/shm/my-domain", "");
+vfgfx_writer g;
+vfgfx_writer_create(inst, flow_def_json /* video/v210a */, writer_options_json /* NULL = RAM */, &g);
+
+vfgfx_frame f = { .rgba = pixels, .width = 1920, .height = 1080, .stride = 1920 * 4,
+                  .alpha = VFGFX_ALPHA_STRAIGHT, .mem = VFGFX_MEM_HOST };   /* or VFGFX_MEM_CUDA */
+
+/* Option A — the library keeps the pace: it commits the latest frame every field. */
+vfgfx_start_pacing(g, 0);
+vfgfx_submit(g, &f);          /* call again whenever the picture changes */
+/* … */
+vfgfx_stop_pacing(g);
+
+/* Option B — you decide every grain:  vfgfx_write(g, index, &f); */
+
+vfgfx_writer_destroy(g, inst);
+mxlDestroyInstance(inst);
+```
+
+Every function returns `0` or an error code; `vfgfx_last_error(g)` gives the message. The full contract (threads,
+memory, timing) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h). Link with
+`-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
+(see `tests/gfx_ctypes_smoke.py`).
+
+A graphics flow behaves like any other flow. If a source stops or restarts, the compositor does not invent a picture:
+that output grain is not committed (readers see a gap, as with a stopped video writer), and output continues when the
+source returns.
+
+---
+
+## 6. Command reference
+
+All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help`.
+
+### Options shared by all `vramflow-func` commands
+
+| Option | Meaning |
+|---|---|
+| `--domain PATH` | MXL domain (required) |
+| `--flows N` | Number of parallel flows (1–128) |
+| `--flow-base B` | First flow number (to run several independent groups in one domain) |
+| `--impl gpu\|cpu`, `--storage cuda-linear\|host` | Variant, see section 1 |
+| `--device-uuid GPU-…` | GPU to use (default: device 0) |
+| `--duration S`, `--warmup S` | Run time; warm-up seconds are left out of the statistics |
+| `--out DIR` | Where `summary-<command>.json` is written |
+
+### Commands
+
+| Command | Input → output | Main options |
+|---|---|---|
+| `gen` | — → N video (+ audio) flows, 1080i50 v210, moving test pattern | `--complexity 0–3`, `--audio` |
+| `logo` | N video flows → N video flows with a logo | `--logo builtin\|file.png`, `--logo-x`, `--logo-y`, `--deadline-ms` |
+| `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software) | `--port-base`, `--playout-frames` |
+| `enc` | N video (+ audio) flows → H.264 + AAC MPEG-TS over UDP (NVENC or x264) | `--encoder nvenc\|x264`, `--vbitrate`, `--abitrate`, `--port-base` |
+| `gfxgen` | — → N × K synthetic graphics flows (`v210a`) | `--layers K`, `--layer-geom logo,full,…\|WxH`, `--mode pace\|manual` |
+| `composite` | base video + K graphics flows → `v210` or `v210a` | `--layers`, `--layer-xy X,Y` (×K), `--opacity 0–1` (×K), `--base gen\|none`, `--out-format`, `--layer-flow K:UUID` |
+| `verify` | checks the output of `gen`, `logo`, `dec` or `composite` against the CPU reference | `--mode`, `--every N` (check every N-th field) |
+| `clip`, `ref-crc` | helpers for the decode test clip | — |
+
+`composite --base none --out-format v210a` builds a graphics-only layer; `--layer-flow K:UUID` takes another flow
+(for example another compositor's output) as layer K, so compositors can be chained.
+
+### Flow IDs
+
+`vramflow-func` uses fixed, readable flow IDs so the functions find each other without configuration:
+`4d584c47-00RR-4000-8000-NNNNNNNNNNNN`, where `RR` is the role (`01` gen, `02` logo, `03` audio, `04` dec, `05`
+graphics, `06` compositor) and `N…` is the flow number in hex (graphics: `flow × 8 + layer`).
+
+### Exit code and summary
+
+Exit code `0` means everything was correct. Every run writes `summary-<command>.json` with counters (fields written,
+read, lost, late, invalid, verification errors), a latency histogram and the software / GPU versions.
+
+---
+
+## 7. Tests and measurements
 
 ```bash
-# Everything at once: probes, upstream tests, unit/GPU/functional tests, transport scale, report
-bash scripts/wsl/run-all.sh --soak skip
+bash scripts/wsl/run-all.sh --soak skip      # everything: probes, upstream tests, unit / GPU / functional tests, report
+bash scripts/wsl/61-make-test-clip.sh        # synthetic 1080i50 H.264 clip for the dec / chain tests
 
-# Synthetic 1080i50 test clip (x264 interlaced) and its reference CRCs, for dec/chain
-bash scripts/wsl/61-make-test-clip.sh
-
-# One capacity level: 8 logo flows on cuda-linear, 60 s
+# One capacity level: 8 logo flows on GPU flows, 60 s
 python3 tests/perf/capacity.py ~/evidence/try --func logo --n 8 --seconds 60 --impl gpu --storage cuda-linear
 
-# Same work on the CPU
-python3 tests/perf/capacity.py ~/evidence/try --func logo --n 8 --seconds 60 --impl cpu
-
-# GPU vs CPU campaign (variants alternate per level) and the report
+# GPU vs CPU campaign and its report
 bash scripts/wsl/71-compare.sh ~/evidence/cmp-logo logo 1,2,4,8,16,32,64
-bash scripts/wsl/71-compare.sh ~/evidence/cmp-dec dec 1,2,4,8,12,16,24
-bash scripts/wsl/71-compare.sh ~/evidence/cmp-chain chain 1,2,4,6,8,10,12
-python3 tests/perf/compare_report.py report.md ~/evidence/cmp-logo ~/evidence/cmp-dec ~/evidence/cmp-chain
+python3 tests/perf/compare_report.py report.md ~/evidence/cmp-logo
 ```
 
-`vramflow-func <subcommand> --help` lists the options of each function (`gen`, `logo`, `gfxgen`, `composite`, `verify`,
-`enc`, `dec`, `clip`, `ref-crc`). Every run writes `summary-<function>.json` with counters (lost, late, invalid, verified fields) and a
-latency histogram; `capacity.py` turns them into PASS/FAIL and CPU / VRAM per flow.
+Only synthetic test media are used (generated patterns and a generated clip).
 
-Only synthetic test media are used: generated patterns and a generated test clip.
+## 8. Results so far
 
-## Upstream patches
+RTX 4070 Laptop 8 GB, WSL2 Ubuntu 24.04, 1080i50, 60 s per level, every output verified. N\* = the largest number of
+flows for which this level and all smaller ones passed (0 correctness errors, ≤ 0.2 % lost fields). Indicative: a
+native Linux rerun will give the authoritative numbers.
 
-See [`upstream/README.md`](upstream/README.md). U1 fixes a hang of the container test for non-root users; U2 and U3 add
-Catch2 tests for synchronization groups and partial grains with payload-backend storage; U4 adds tests for
-`video/v210a` (fill + key planes) on `cuda-linear`. They are drafts: the author
-applies them and commits with `git commit -s` (DCO) before proposing them to dmf-mxl/mxl.
+| Function | CPU (C) N\* | GPU with GPU flows (G) N\* | CPU cores per flow, C → G |
+|---|---|---|---|
+| Logo burn-in, MXL → MXL | 16 | ≥ 64 (limit not reached) | 0.057 → 0.005 |
+| H.264 decode, TS/UDP → MXL | 8 | 24 (16 strict) | ~0.55 → ~0.04 |
+| Full chain: TS → decode → logo → H.264 + AAC → TS | 4 | ≥ 12 (limit not reached) | ~2.0 → ~0.33 |
 
-## Status and limits
+- Full chain at N=12: CUDA cores ~10 % busy, NVENC 64 %, NVDEC 50 %, ~34 W. The single NVENC engine of this laptop
+  GPU is the limit, not compute.
+- Grain latency p50 1.2 ms on GPU flows vs 2.9 ms on RAM flows. GPU processing with RAM flows (H) collapses at 32 logo
+  flows; with GPU flows (G) it does not.
+- At very light load a laptop GPU lowers its clock and misses real-time deadlines; on servers lock the GPU clocks
+  (`nvidia-smi -pm 1`, `-lgc`).
 
-- Results so far come from one laptop GPU under WSL2. A native Linux rerun is the next step.
-- Variant H is implemented for logo and transport, not yet for dec/enc/chain.
-- The 2-hour soak and the full sanitizer run on the media functions are not done yet.
-- NVENC on this GPU encodes progressive frames (no field encoding); x264 encodes true interlaced (MBAFF, top field first).
+Full tables and notes: [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
+The capacity campaign for the graphics compositor (N flows × K layers) is in progress.
 
-## License and credit
+## 9. Repository layout
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-You may use, change, distribute and sell this work, also in closed products. When you redistribute it or a derivative
-work, keep the NOTICE file: it names the author. If this work helps a product, a standard or a paper, please credit
-**"VRAMFlow by Deimantas Kiršinas"** with a link to this repository.
+| Path | Contents |
+|---|---|
+| `include/vramflow/gfx.h` | Public C API of `libvramflow-gfx` |
+| `src/func/` | `vramflow-func` commands |
+| `src/gfx/` | Graphics: RGBA → v210a and compositing (CUDA, CPU, independent reference) |
+| `src/media/` | Video kernels: logo, NV12 ↔ v210, test pattern (CUDA, CPU, reference) |
+| `src/mxlio/`, `src/gpu/` | `vramflow-verify` writer and reader |
+| `tests/` | `unit/`, `gpu/` (Catch2), `functional/`, `perf/` (capacity and reports) |
+| `scripts/wsl/` | Build and run scripts |
+| `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U4) with evidence |
+| `docs/` | Design notes, requirements, plans and results (in Lithuanian) |
+
+## 10. Upstream patches
+
+[`upstream/README.md`](upstream/README.md): U1 fixes a hang of a container test for non-root users; U2 and U3 add
+tests for synchronization groups and partial grains with GPU storage; U4 adds tests for `video/v210a` on
+`cuda-linear`. With U1–U3 the PR #653 test suite passes 136/136. They are drafts; the author submits them with
+`git commit -s` (DCO).
+
+## 11. Limits
+
+- Measured on one laptop GPU under WSL2 so far; native Linux servers are next.
+- Variant H exists for logo, compositor and transport; not yet for decode / encode / chain.
+- No 2-hour soak and no full sanitizer run of the media functions yet.
+- NVENC on this GPU encodes progressive frames; x264 encodes true interlaced (MBAFF, top field first).
+- VRAM flows work between processes on the same machine and GPU; other machines are outside this project.
+
+## 12. License and credit
+
+Apache License 2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). You may use, change, distribute and sell this work,
+also in closed products. When you redistribute it or a derivative, keep the NOTICE file: it names the author. If this
+work helps a product, a standard or a paper, please credit **"VRAMFlow by Deimantas Kiršinas"** with a link to this
+repository.
 
 Binaries linked with an FFmpeg build that includes libx264 fall under the GPL when distributed (see NOTICE).
 

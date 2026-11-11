@@ -1,79 +1,88 @@
 # VRAMFlow (lietuviškai)
 
-**Media funkcijos, kurių duomenys gyvena GPU atmintyje ant [MXL](https://github.com/dmf-mxl/mxl), ir bandymų stendas,
-kuris įrodo, kad jos elgiasi lygiai taip pat kaip MXL ant CPU.**
+**MXL media flow'ai GPU atmintyje ir jų apdorojimas ten pat — su tuo pačiu laiku ir elgsena kaip MXL ant CPU.**
 
-Pagrindinis aprašymas — [README.md](README.md) (anglų k., ten ir komandų pavyzdžiai). Čia trumpai.
+Išsamus aprašas su visomis komandomis ir kodo pavyzdžiais — [README.md](README.md) (anglų k.). Čia — trumpai, ta pačia
+tvarka.
 
-## Kam to reikia
+[MXL](https://github.com/dmf-mxl/mxl) leidžia media funkcijoms keistis nesuspaustu vaizdu, garsu ir duomenimis per
+bendrą atmintį (įprastai — RAM). Su `cuda-linear` backend'u iš
+[dmf-mxl/mxl#653](https://github.com/dmf-mxl/mxl/pull/653) flow'as gali gyventi GPU atmintyje (VRAM), todėl viena GPU
+funkcija perduoda kadrus kitai nekopijuodama per CPU.
 
-MXL perduoda nesuspaustą vaizdą, garsą ir duomenis tarp media funkcijų per bendrą RAM. PR
-[dmf-mxl/mxl#653](https://github.com/dmf-mxl/mxl/pull/653) prideda `cuda-linear` backend'ą: flow grain'ai laikomi GPU
-atmintyje. Šis projektas atsako į tris klausimus:
+| Dalis | Kas tai |
+|---|---|
+| `vramflow-func` | Paruoštos media funkcijos ant MXL flow'ų: generatorius, logotipas, H.264 dekodavimas, H.264 + AAC kodavimas, alfa grafikos kompozitorius, išėjimo patikra. Kiekviena veikia ant CPU arba GPU. |
+| `libvramflow-gfx` | C biblioteka: RGBA kadrai iš bet kurios programos → standartinis MXL grafikos flow'as (`video/v210a`, fill + key). |
+| `vramflow-verify` | Bandomasis writer'is ir reader'is, tikrinantys kiekvieną grain'ą (turinys, indeksas, laikas). |
+| Testai ir įrankiai | Vienetų, GPU ir funkciniai testai; talpos matavimas (kiek flow'ų telpa). |
 
-1. **Ar teisinga?** Tie patys grain indeksai, laikas, slice'ai, sinchronizacijos grupės ir daliniai grain'ai kaip host
-   MXL; turinys — bitų tikslumu.
-2. **Ar stabilu?** Ilgi bandymai, sanitizeriai, laikrodžio šuoliai, paleidimas ir stabdymas, daug flow'ų.
-3. **Kokia nauda?** Kiek pilnų transliacijos flow'ų telpa į vieną GPU, palyginus su CPU, darant tą patį darbą.
+Viskas C++ / CUDA; Python — tik testų ir matavimų skriptai.
 
-## Variantai
+## 1. Pagrindinės sąvokos
 
-- **C** — CPU apdorojimas, host flow (kaip šiandien).
-- **H** — GPU apdorojimas, host flow (MXL v1.1 + kopijos į GPU ir atgal).
-- **G** — GPU apdorojimas, `cuda-linear` flow (PR #653): grain'ai neišeina iš GPU.
+- **Domenas** — katalogas bendroje atmintyje (`/dev/shm/...`); visi jį naudojantys procesai mato vienas kito flow'us.
+- **Flow** — vienas srautas (pvz. vienas video signalas) su UUID ir aprašu.
+- **Grain** — vienas flow'o vienetas; čia — vienas video **laukas** (1080i50 = 50 laukų/s). Indeksas skaičiuojamas iš
+  TAI laiko, todėl visi procesai sutaria, kuris grain'as kuriam momentui.
+- **Writer / reader** — writer'is sukuria flow'ą ir commit'ina grain'us, reader'ių gali būti kiek nori.
+- **Saugykla** — `host` (RAM) arba `cuda-linear` (GPU atmintis). API abiem ta pati.
+- **v210 / v210a** — 10 bitų 4:2:2 video; `v210a` turi dar key (alfa) plokštumą.
 
-## Rezultatai (RTX 4070 Laptop 8 GB, WSL2 — orientaciniai)
+Trys variantai, renkami dviem parametrais:
 
-| Funkcija | C N\* | G N\* | CPU branduoliai flow'ui, C → G |
+| Variantas | `--impl` | `--storage` | Kada |
+|---|---|---|---|
+| **C** — CPU | `cpu` | `host` | Be GPU arba palyginimui su dabartine sistema |
+| **H** — GPU, RAM flow'ai | `gpu` | `host` | GPU apdorojimas, bet kitoms programoms flow'ai reikalingi RAM'e |
+| **G** — GPU, GPU flow'ai | `gpu` | `cuda-linear` | Geriausia: kadrai lieka GPU |
+
+Visi trys duoda bitų tikslumu vienodą rezultatą (tikrinama prieš vieną nepriklausomą etaloną).
+
+## 2–3. Reikalavimai ir surinkimas
+
+Ubuntu 24.04 (natyviai arba WSL2), GPU variantams — NVIDIA GPU ir CUDA 13.x; Clang 19, CMake, Ninja, vcpkg, FFmpeg dev
+bibliotekos. Sistemos TAI poslinkis turi būti 37 s. Surinkimas — trys žingsniai, žr. README.md 3 skyrių
+(MXL su PR #653 → `10-build-mxl.sh` → `30-build-verify.sh -DMXLV_BUILD_FUNC=ON`).
+
+## 4. Greita pradžia
+
+README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
+
+1. pirmas writer'is ir reader'is RAM'e (`vramflow-verify writer/reader --storage host`);
+2. tas pats GPU atmintyje (`--storage cuda-linear`);
+3. media funkcija: `gen` → `logo` → `verify` (be GPU: `--impl cpu --storage host`);
+4. grafika su skaidrumu ant video: `gen` + `gfxgen` → `composite` → `verify`;
+5. domeno turinys: `mxl-info -d <domenas> -l`.
+
+## 5. Savo programoje
+
+- **MXL writer'is / reader'is GPU atmintyje** — tas pats MXL API; writer'is paduoda
+  `{"payload":{"backend":"cuda-linear","deviceUuid":"GPU-…"}}`, grain'o adresą duoda `mxlCudaLinearDevicePointer()`.
+  Pavyzdys README.md 5.1, pilnas kodas `src/mxlio/verify_writer.cpp` ir `verify_reader.cpp`.
+- **Grafika iš bet kurios programos** — `libvramflow-gfx` (`include/vramflow/gfx.h`): `vfgfx_writer_create`, tada
+  `vfgfx_submit` (biblioteka pati laiko ritmą) arba `vfgfx_write(index, …)` (ritmą valdai pats). Pavyzdys README.md 5.2.
+- Grafikos flow'as elgiasi kaip bet kuris kitas: sustojus šaltiniui, kompozitorius nieko neišgalvoja — tas išėjimo
+  grain'as necommit'inamas, šaltiniui grįžus darbas tęsiasi.
+
+## 6. Komandos
+
+`vramflow-func gen | logo | dec | enc | gfxgen | composite | verify` — lentelė su pagrindiniais parametrais README.md
+6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo `summary-<komanda>.json`, išėjimo kodas `0` — viskas
+teisinga.
+
+## 8. Rezultatai (RTX 4070 Laptop 8 GB, WSL2 — orientaciniai)
+
+| Funkcija | CPU (C) N\* | GPU su GPU flow'ais (G) N\* | CPU branduoliai flow'ui, C → G |
 |---|---|---|---|
 | Logotipo įkepimas, MXL → MXL | 16 | ≥ 64 (riba nepasiekta) | 0,057 → 0,005 |
 | H.264 dekodavimas, TS/UDP → MXL | 8 | 24 (16 griežtai) | ~0,55 → ~0,04 |
-| Pilnas flow: TS → dekodavimas → logotipas → H.264 + AAC → TS | 4 | ≥ 12 (riba nepasiekta; žr. pastabą) | ~2,0 → ~0,33 |
-
-GPU apkrova pilname flow ties N=12: CUDA branduoliai ~10 %, NVENC 64 %, NVDEC 50 %, ~34 W. Riba — vienintelis NVENC
-variklis, didžioji GPU dalis laisva. Labai mažoje apkrovoje (N=2) nešiojamo kompiuterio GPU numeta dažnį
-1605 → 210 MHz ir praleidžia terminus; nuo N=4 viskas praeina, todėl realaus laiko darbui serveryje reikia užfiksuotų
-GPU dažnių. Dec ir grandinės matavimai vyko su Windows „Whisper“ (tyliuoju) profiliu. Visos lentelės:
-[`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
+| Pilna grandinė: TS → dekodavimas → logotipas → H.264 + AAC → TS | 4 | ≥ 12 (riba nepasiekta) | ~2,0 → ~0,33 |
 
 N\* — didžiausias flow'ų skaičius, kai ši ir visos mažesnės pakopos praėjo (0 teisingumo klaidų, praradimai ≤ 0,2 %).
-Autoritetingi skaičiai bus po pakartojimo natyviame Linux.
-
-## Alfa grafikos kompozitorius
-
-Grafika MXL'e — paprastas flow'as. MXL standartas jau turi `video/v210a`: v210 fill plokštuma + 10 bitų key plokštuma
-(straight alfa, video diapazonas 64–940). VRAMFlow prideda įrankius tokiems flow'ams kurti ir sujungti — ant CPU,
-ant GPU su host flow'ais ir ant GPU su `cuda-linear` (C / H / G), bitų tikslumu prieš vieną nepriklausomą etaloną.
-
-- **`libvramflow-gfx`** (`include/vramflow/gfx.h`, C ABI): bet kuri programa (rendereris, OGraf/HTML puslapis,
-  žaidimų variklis, skriptas) paduoda RGBA kadrus (host arba CUDA atmintis, straight arba premultiplied alfa) ir gauna
-  standartinį `video/v210a` flow'ą. Rankinis režimas (`vfgfx_write(index, kadras)`) arba ritmo režimas
-  (`vfgfx_submit(kadras)`; bibliotekos gija kas lauką pagal TAI commit'ina paskutinį kadrą).
-- **`vramflow-func gfxgen`** — sintetiniai v210a šaltiniai (N × K flow'ų, logo 384×216 arba pilnas 1920×1080).
-- **`vramflow-func composite`** — bazinis vaizdas + K grafikos sluoksnių (1–8; padėtis, nepermatomumas) → `v210` arba
-  `v210a`. `--base none --out-format v210a` sukuria vien grafikos sluoksnį, `--layer-flow K:UUID` paduoda vieno
-  kompozitoriaus išėjimą kitam — kompozitorius galima jungti grandine.
-- **`vramflow-func verify --mode composite`** — atkuria laukiamą išėjimą CPU etalonu ir tikrina.
-
-Grafikos flow'as elgiasi kaip bet kuris kitas: jei sluoksnio šaltinis sustoja ar perkraunamas, kompozitorius nieko
-neišgalvoja — to išėjimo grain'as necommit'inamas (skaitytojai mato tarpą, kaip ir sustojus video writer'iui), o
-šaltiniui grįžus kompozitorius vėl prisijungia.
-
-Būsena: biblioteka, `gfxgen`, `composite` ir `verify --mode composite` padaryti ir ištestuoti (vienetų, GPU ir
-funkciniai testai; visi 12 režimų × formatų derinių C/H/G praeina etalono patikrą). N × K talpos kampanija ir OGraf
-pavyzdys — vykdomi.
-
-## Kaip naudotis
-
-1. Ubuntu 24.04 (natyviai arba WSL2), NVIDIA GPU, CUDA 13.x, Clang 19, CMake, Ninja, vcpkg, FFmpeg dev bibliotekos.
-2. Kernel'io TAI poslinkis turi būti 37 s (žr. `docs/architektura/2026-11-11-laikas-ir-sinchronizacija.md`).
-3. MXL su PR #653 (komanda `6dddc91d92f5`) → `bash scripts/wsl/10-build-mxl.sh`.
-4. Šis repo → `VERIFY_BUILD=$HOME/build/vramflow/func bash scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON`.
-5. Visos patikros → `bash scripts/wsl/run-all.sh --soak skip`.
-6. GPU prieš CPU → `bash scripts/wsl/71-compare.sh <katalogas> logo|dec|chain <N sąrašas>`, ataskaita →
-   `python3 tests/perf/compare_report.py report.md <katalogai…>`.
-
-Naudojama tik sintetinė bandomoji medžiaga.
+Pilnoje grandinėje ties N=12 riba — vienintelis NVENC variklis, CUDA branduoliai užimti ~10 %. Visos lentelės:
+[`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md). Grafikos kompozitoriaus talpos
+matavimai (N flow'ų × K sluoksnių) vyksta.
 
 ## Licencija ir autorystė
 
