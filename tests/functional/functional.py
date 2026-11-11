@@ -676,15 +676,15 @@ def vsummary(pr, role):
     return json.loads(f.read_text()) if f is not None and f.exists() else None
 
 
-def ffmt_logo(out):
+def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
     """gen | logo | verify --mode logo kiekvienam formatui ir variantui C/H/G, FFMT_DURATION s: logo be praradimų
     (late/lapped/too_late == 0, fields_ok >= 90 % laukų), verify 0 teisingumo klaidų ir > 0 imčių."""
     res = []
     N, D = 2, FMT_DUR
-    for fmt in fmt_list():
+    for fmt in fmts or fmt_list():
         hz = FMT_GRAIN_HZ[fmt]
-        for tag, impl, storage in comp_variants():
-            tid = f"ffmt_logo[{fmt}/{tag}]"
+        for tag, impl, storage in variants or comp_variants():
+            tid = f"{tag_prefix}[{fmt}/{tag}]"
             sub = f"ffmt-logo-{fmt}-{tag}"
             d = fresh_domain(sub)
             v = vcommon(impl, storage) + ["--format", fmt]
@@ -719,6 +719,12 @@ def ffmt_logo(out):
                                   f"capacity_errors={pv.get('capacity_errors')} proc_ms={((sl or {}).get('hist') or {}).get('proc_ms')}",
                               logo=sl, verify=sv))
     return res
+
+
+def ffmt_logo720(out):
+    """720p50 su numatytąja logotipo vieta (be --logo-x / --logo-y): vieta skaičiuojama nuo rastro (viršutinis dešinys
+    kampas, ta pati 48 px paraštė kaip 1080) — gen | logo | verify, C ir G."""
+    return ffmt_logo(out, ["720p50"], [v for v in comp_variants() if v[0] in ("C", "G")], "ffmt_logo720")
 
 
 def ffmt_comp(out):
@@ -909,7 +915,7 @@ def main():
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
              "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "ffmt_neg": lambda: ffmt_neg(out),
-             "ffmt_logo": lambda: ffmt_logo(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
+             "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out)}
     results = []
     for name, fn in tests.items():

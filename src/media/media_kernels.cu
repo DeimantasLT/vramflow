@@ -71,11 +71,15 @@ __device__ __forceinline__ bool cell(const Geom& G, int rows, int& j, int& g) {
 // --- Generatorius ------------------------------------------------------------------------------------------------------
 template <bool V>
 __global__ void k_gen_field_batch(const __grid_constant__ Batch<GenJob> b, std::uint64_t run_seed, std::uint32_t complexity,
-                                  std::uint64_t index, const __grid_constant__ Geom G) {
+                                  std::uint64_t index, const __grid_constant__ Geom G, std::uint32_t rate_num, std::uint32_t rate_den) {
     const int s = blockIdx.y;
     int j, g;
     if (s >= b.n || !cell(G, G.lines, j, g)) return;
-    const GenParams gp{run_seed, b.job[s].flow, complexity};
+    GenParams gp{run_seed, b.job[s].flow, complexity};
+    set_raster(gp, G.w, G.lines * G.step);  // kadro rastras; dalikliai — kartą gijai
+    gp.rate_num = rate_num;
+    gp.rate_den = rate_den;
+    prepare_index(gp, index);
     const int fy = G.row(j);
     const int x0 = 6 * g;
     Group grp;
@@ -296,16 +300,21 @@ cudaError_t gen_fields(const GenJob* jobs, int n, std::uint64_t run_seed, std::u
 
 cudaError_t gen_fields(const GenJob* jobs, int n, std::uint64_t run_seed, std::uint32_t complexity, std::uint64_t index, Dim d,
                        bool interlaced, cudaStream_t s) {
-    if (!dim_ok(d, interlaced)) return cudaErrorInvalidValue;
+    return gen_fields(jobs, n, run_seed, complexity, index, d, interlaced, 50, 1, s);
+}
+
+cudaError_t gen_fields(const GenJob* jobs, int n, std::uint64_t run_seed, std::uint32_t complexity, std::uint64_t index, Dim d,
+                       bool interlaced, std::uint32_t rate_num, std::uint32_t rate_den, cudaStream_t s) {
+    if (!dim_ok(d, interlaced) || rate_num == 0 || rate_den == 0) return cudaErrorInvalidValue;
     const Geom G = geom_of(d, interlaced ? static_cast<int>(index & 1u) : -1);
     return run_batches(
         jobs, n, [](const GenJob& j) { return j.dst != nullptr; }, [](const GenJob& j) { return aligned16(j.dst); },
         [&](const Batch<GenJob>& b, bool vec) {
             const dim3 grid = grid_for(G, G.lines, b.n);
             if (vec)
-                k_gen_field_batch<true><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G);
+                k_gen_field_batch<true><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G, rate_num, rate_den);
             else
-                k_gen_field_batch<false><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G);
+                k_gen_field_batch<false><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G, rate_num, rate_den);
         });
 }
 

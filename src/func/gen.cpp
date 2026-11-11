@@ -94,7 +94,9 @@ int run_gen(const Opts& o) {
         }
         cudaError_t ce = cudaSuccess;
         if (cpu) {
-            const media::GenParams base{o.run_seed, 0, o.complexity};
+            media::GenParams base{o.run_seed, 0, o.complexity};
+            base.rate_num = static_cast<std::uint32_t>(grain.num);
+            base.rate_den = static_cast<std::uint32_t>(grain.den);
             pool.run(static_cast<int>(jobs.size()), [&](int n) {
                 media::GenParams g = base;
                 g.flow = jobs[n].flow;
@@ -105,12 +107,14 @@ int run_gen(const Opts& o) {
                 host_dst[n] = jobs[n].dst;
                 jobs[n].dst = scratch[n];
             }
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter, stream);
+            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
+                                                        static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
             for (std::size_t n = 0; n < jobs.size() && !ce; ++n)
                 ce = cudaMemcpyAsync(host_dst[n], scratch[n], gbytes, cudaMemcpyDeviceToHost, stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
         } else {
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter, stream);
+            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
+                                                        static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
         }
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }

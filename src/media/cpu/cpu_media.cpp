@@ -225,7 +225,10 @@ void split_nv12_progressive(const std::uint8_t* y, const std::uint8_t* uv, int p
 
 void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out) { gen_field(g, index, kDim1080, true, out); }
 
-void gen_field(const GenParams& g, std::uint64_t index, Dim d, bool interlaced, std::uint32_t* out) {
+void gen_field(const GenParams& g0, std::uint64_t index, Dim d, bool interlaced, std::uint32_t* out) {
+    GenParams g = g0;  // turinys — šio rastro
+    set_raster(g, d.w, d.h);
+    prepare_index(g, index);
     const Geom G = geom_of(d, interlaced ? static_cast<int>(index & 1) : -1);
     const Cols cols(d.w);
     for (int j = 0; j < G.lines; ++j) {

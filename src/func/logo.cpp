@@ -49,7 +49,9 @@ struct DeviceLogo {
     }
 };
 
-bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err) {
+// Numatytoji logotipo vieta (--logo-x / --logo-y < 0): viršutinis dešinys kampas, 48 px paraštė dešinėje ir 64 px viršuje
+// (1080: 1488, 64 — kaip anksčiau), skaičiuojama nuo --format rastro ir logotipo dydžio.
+bool load_logo(Opts& o, media::ref::Logo& logo, std::string& err) {
     if (o.logo == "builtin") {
         logo = media::ref::builtin_logo();
     } else {
@@ -60,6 +62,8 @@ bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err) {
         if (!media::ref::logo_from_rgba(rgba.data(), w, h, logo)) { err = "logotipo plotis turi būti lyginis"; return false; }
     }
     const int fw = o.fmt.raster.w, fh = o.fmt.raster.h;
+    if (o.logo_x < 0) o.logo_x = (fw - logo.w - 48) & ~1;
+    if (o.logo_y < 0) o.logo_y = 64;
     if (o.logo_x % 2 || o.logo_x < 0 || o.logo_y < 0 || o.logo_x + logo.w > fw || o.logo_y + logo.h > fh) {
         err = "logotipas " + std::to_string(logo.w) + "x" + std::to_string(logo.h) + " ties " + std::to_string(o.logo_x) + "," +
               std::to_string(o.logo_y) + " netelpa į " + vramflow::format_name(o.fmt) + " kadrą " + std::to_string(fw) + "x" +
@@ -69,7 +73,8 @@ bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err) {
     return true;
 }
 
-int run_logo(const Opts& o) {
+int run_logo(const Opts& o_in) {
+    Opts o = o_in;  // load_logo gali nustatyti numatytąją logotipo vietą
     Stats st;
     st.flows.resize(o.flows);
     auto& stop = stop_flag();

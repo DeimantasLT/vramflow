@@ -35,7 +35,17 @@
 
 namespace mxlv::func {
 
-bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err);
+bool load_logo(Opts& o, media::ref::Logo& logo, std::string& err);
+
+namespace {
+// Generatoriaus parametrai flow'ui (turinys priklauso nuo grain'o dažnio — sync blyksnis kartą per sekundę).
+media::GenParams gen_params(const Opts& o, std::uint32_t flow) {
+    media::GenParams g{o.run_seed, flow, o.complexity};
+    g.rate_num = static_cast<std::uint32_t>(o.fmt.grain_rate().num);
+    g.rate_den = static_cast<std::uint32_t>(o.fmt.grain_rate().den);
+    return g;
+}
+}  // namespace
 
 namespace {
 // Vienas grain'as (laukas arba kadras, `words` žodžių) į host buferį.
@@ -135,7 +145,7 @@ int verify_composite(const Opts& o, Stats& st) {
         const int parity = inter ? static_cast<int>(job.i & 1) : 0;
         const std::uint64_t t0 = now_tai();
         const std::uint64_t fr = manual ? (inter ? job.i / 2 : job.i) : 0;
-        if (has_base) media::ref::gen_field({o.run_seed, o.flow_base + job.n, o.complexity}, job.i, dim, inter, base.data());
+        if (has_base) media::ref::gen_field(gen_params(o, o.flow_base + job.n), job.i, dim, inter, base.data());
         bool ok = true;
         for (std::uint32_t k = 0; k < K && ok; ++k) {
             LayerCache& c = cache[static_cast<std::size_t>(job.n) * K + k];
@@ -270,7 +280,8 @@ int verify_composite(const Opts& o, Stats& st) {
 }
 }  // namespace
 
-int run_verify(const Opts& o) {
+int run_verify(const Opts& o_in) {
+    Opts o = o_in;  // load_logo gali nustatyti numatytąją logotipo vietą
     Stats st;
     st.flows.resize(o.flows);
     auto& stop = stop_flag();
@@ -413,7 +424,7 @@ int run_verify(const Opts& o) {
             }
             const int field = inter ? static_cast<int>(i & 1) : -1;
             if (logo_mode) media::ref::logo_field(hi.data(), ref.data(), logo, o.logo_x, o.logo_y, dim, field);
-            else media::ref::gen_field({o.run_seed, o.flow_base + n, o.complexity}, i, dim, inter, ref.data());
+            else media::ref::gen_field(gen_params(o, o.flow_base + n), i, dim, inter, ref.data());
             const media::Geom G = media::geom_of(dim, field);
             std::uint64_t bad = 0, outside = 0;
             for (std::size_t w = 0; w < gwords; ++w) {

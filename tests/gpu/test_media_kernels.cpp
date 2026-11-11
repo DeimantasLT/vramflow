@@ -681,3 +681,26 @@ TEST_CASE("media cuda: formatui neutralūs argumentai → cudaErrorInvalidValue"
     const WeaveJob wj{f.p, f.p, y.p, uv.p};
     CHECK(weave_nv12(&wj, 1, Dim{1280, 722}, true, 1280, 1280, st.s) == cudaErrorInvalidValue);  // interlaced — h % 4 != 0
 }
+
+TEST_CASE("media cuda: gen su grain'o dažniu (blyksnis kartą per sekundę) == ref, 720p ir 2160p", "[gpu][media][format][gen]") {
+    Stream st;
+    struct R {
+        std::uint32_t num, den;
+    };
+    for (const Dim d : {Dim{1280, 720}, Dim{3840, 2160}})
+        for (const R r : {R{25, 1}, R{60000, 1001}})
+            for (std::uint64_t index : {0ull, 25ull, 60ull, 120ull}) {
+                const std::size_t n = geom_of(d, -1).grain_words();
+                Dev<std::uint32_t> f(n);
+                const GenJob job{f.p, 2};
+                CUDA_OK(gen_fields(&job, 1, 77, 2, index, d, false, r.num, r.den, st.s));
+                st.sync();
+                GenParams g{77, 2, 2};
+                g.rate_num = r.num;
+                g.rate_den = r.den;
+                std::vector<std::uint32_t> want(n);
+                ref::gen_field(g, index, d, false, want.data());
+                INFO("w " << d.w << " rate " << r.num << "/" << r.den << " index " << index);
+                CHECK(diff_count(f.down(), want) == 0);
+            }
+}

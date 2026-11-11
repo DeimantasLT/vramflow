@@ -203,3 +203,67 @@ TEST_CASE("media ref: logo progresyviame kadre ir 720p", "[media][format][logo]"
         CHECK(changed > 1000);
     }
 }
+
+// --- Turinys bet kokiam rastrui ir dažniui (peržiūros pastaba 4) ------------------------------------------------------
+TEST_CASE("gen: sync blyksnis kartą per sekundę bet kuriuo grain'o dažniu (sutampa su 1 s garso pyptelėjimu)", "[media][format][gen]") {
+    struct R {
+        std::uint32_t num, den;
+    };
+    for (const R r : {R{50, 1}, R{25, 1}, R{60000, 1001}, R{30000, 1001}}) {
+        GenParams g{1, 0, 0};
+        g.rate_num = r.num;
+        g.rate_den = r.den;
+        std::uint64_t flashes = 0, bad = 0, prev = 0;
+        const std::uint64_t n = 600ull * r.num / r.den;  // 600 s
+        for (std::uint64_t i = 0; i < n; ++i) {
+            if (!flash_grain(g, i)) continue;
+            // grain'as [i·den/num, (i+1)·den/num) s turi sveiką sekundę (garso pyptelėjimo pradžią)
+            const std::uint64_t k = (i * r.den + r.num - 1) / r.num;
+            bad += !(k * r.num < (i + 1) * r.den);
+            if (flashes && (i - prev) * r.den * 10 < 9ull * r.num) ++bad;  // ne dažniau nei ~kas sekundę
+            prev = i;
+            ++flashes;
+        }
+        INFO(r.num << "/" << r.den);
+        CHECK(flashes == 600);
+        CHECK(bad == 0);
+    }
+    GenParams g50{1, 0, 0};
+    for (std::uint64_t i = 0; i < 100'000; ++i) CHECK((flash_grain(g50, i) == (i % 50 == 0)) == true);
+}
+
+TEST_CASE("gen: blyksnis ir gradientas pagal rastrą (720p blyksnis matomas, UHD neprisotintas)", "[media][format][gen]") {
+    // 720p50: blyksnio grain'e luma == 940 blyksnio stačiakampyje, kuris telpa į plotį
+    const Dim d720{1280, 720};
+    const int w720 = v210_words_per_line(d720.w);
+    std::vector<std::uint32_t> f(static_cast<std::size_t>(w720) * 720);
+    GenParams g{5, 1, 0};
+    ref::gen_field(g, 100, d720, false, f.data());  // 100 % 50 == 0 — blyksnis
+    int lit = 0;
+    for (int r = 64; r < 192; ++r)
+        for (int gi = 0; gi < 213; ++gi) {
+            const Group gr = group_at(f, w720, r, gi);
+            for (int q = 0; q < 6; ++q) lit += gr.y[q] == 940;
+        }
+    CHECK(lit > 128 * 150);
+    // UHD, complexity 0, ne blyksnio grain'as: už barkodo ir judančios juostos luma niekada neprisotinta (940)
+    const Dim d4k{3840, 2160};
+    const int w4k = v210_words_per_line(d4k.w);
+    std::vector<std::uint32_t> u(static_cast<std::size_t>(w4k) * 2160);
+    ref::gen_field(g, 7, d4k, false, u.data());
+    int sat = 0;
+    for (int r = 64; r < 2160; r += 7)
+        for (int gi = 0; gi < 640; ++gi) {
+            const Group gr = group_at(u, w4k, r, gi);
+            for (int q = 0; q < 6; ++q) sat += gr.y[q] == 940;
+        }
+    CHECK(sat == 0);
+}
+
+TEST_CASE("gen: dalyba daugyba (div_magic) tiksli visiems naudojamiems skaitikliams ir dalikliams", "[media][format][gen]") {
+    std::uint64_t bad = 0;
+    for (const std::uint32_t d : {1080u, 1920u, 720u, 1280u, 2160u, 3840u, 2000u, 3000u, 6000u, 8192u + 4320u})
+        for (std::uint32_t n = 0; n <= (8192u + 4320u) * 876u; n += (n < 4'000'000u ? 1u : 7u))
+            bad += div_m(n, div_magic(d)) != n / d;
+    CHECK(bad == 0);
+}

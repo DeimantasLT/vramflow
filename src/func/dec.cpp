@@ -450,7 +450,9 @@ int run_clip(const Opts& o, std::uint32_t frames, std::uint64_t first_field) {
     const std::size_t ysz = static_cast<std::size_t>(d.w) * d.h;
     std::vector<std::uint32_t> top(media::grain_words(d, inter)), bot(top.size());
     std::vector<std::uint8_t> nv12(ysz * 3 / 2);
-    const media::GenParams g{o.run_seed, o.flow_base, o.complexity};
+    media::GenParams g{o.run_seed, o.flow_base, o.complexity};
+    g.rate_num = static_cast<std::uint32_t>(o.fmt.grain_rate().num);
+    g.rate_den = static_cast<std::uint32_t>(o.fmt.grain_rate().den);
     for (std::uint32_t k = 0; k < frames; ++k) {
         const std::uint64_t i = first_field + (inter ? 2ull : 1ull) * k;
         media::ref::gen_field(g, i, d, inter, top.data());

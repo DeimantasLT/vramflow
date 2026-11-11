@@ -42,7 +42,7 @@ struct Opts {
     bool video = true;
     // logo
     std::string logo = "builtin";
-    int logo_x = 1488, logo_y = 64;
+    int logo_x = -1, logo_y = -1;  // < 0 — numatytoji vieta nuo rastro (viršutinis dešinys kampas; 1080: 1488, 64)
     std::uint32_t inject_every = 0;  // logo: vieno bito klaida išėjime kas M laukų (savitikrai)
     std::uint32_t deadline_ms = 30;  // įėjimų laukimo riba po lauko laiko (WDDM/Windows sutrikimų atsarga; ring 10 laukų)
     std::int64_t read_offset_us = 500;
