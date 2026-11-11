@@ -1,0 +1,85 @@
+// SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+// InputSlot — vienas video įėjimas, kuris gali atsirasti, dingti ir grįžti (planas §P6; anksčiau — composite [PF-3] logika).
+//
+// Būsenos: Waiting (dar niekada neprijungtas), Attached, Detached (buvo prijungtas, gamintojas dingo), Mismatch (grįžo kitu
+// formatu / saugykla ir politika Exit — galutinė). Prisijungiama tik prie flow, kuris turi gyvą writer'į (mxlIsFlowActive) ir
+// jau gamina (head žinomas): pasenęs nužudyto gamintojo flow ignoruojamas.
+//
+// Gamintojo dingimas aptinkamas dviem keliais: MXL_ERR_FLOW_INVALID (flow perkurtas / ištrintas) ir — kai grain'o dar nėra
+// (TOO_EARLY) — gyvumo patikra ne dažniau kaip kas kAliveNs (writer'is nužudytas, flow failai liko). Abiem atvejais get()
+// grąžina MXL_ERR_FLOW_INVALID, reader'is atlaisvinamas, būsena Detached.
+//
+// Formatas: expect != nullptr — laukiamas formatas (rastras ir grain'o ritmas); nullptr — pirmas prijungtas formatas tampa
+// laukiamu. Saugykla (cuda / host) visada užrakinama pagal pirmą prijungimą. Viena gija (tick gija) — be sinchronizacijos.
+#include <mxl/flow.h>
+#include <mxl/mxl.h>
+
+#include <atomic>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "common/format.hpp"
+#include "func/flows.hpp"
+#include "runtime/open_policy.hpp"
+
+namespace mxlv::runtime {
+
+class InputSlot {
+public:
+    enum class State { Waiting, Attached, Detached, Mismatch };
+    static constexpr std::uint64_t kRetryNs = 100'000'000;  // prisijungimo bandymas ne dažniau kaip kas 100 ms
+    static constexpr std::uint64_t kAliveNs = 10'000'000;   // gyvumo patikra TOO_EARLY metu ne dažniau kaip kas 10 ms
+
+    InputSlot(std::string flow_id, const vramflow::VideoFormat* expect, FormatChange on_change);
+    InputSlot(InputSlot&& o) noexcept;  // perkeltas slot'as reader'io nebeturi (neatlaisvina dar kartą)
+    InputSlot& operator=(InputSlot&& o) noexcept;
+    InputSlot(const InputSlot&) = delete;
+    InputSlot& operator=(const InputSlot&) = delete;
+    ~InputSlot();
+
+    // Neblokuoja. Kai neprijungtas — bandymas prisijungti (ne dažniau kaip kas kRetryNs pagal now_tai_ns). Attached — tik
+    // grąžina būseną (be sisteminių kvietimų).
+    State poll(mxlInstance inst, std::uint64_t now_tai_ns);
+    // Kaip VideoIn::get; ne Attached → MXL_ERR_FLOW_NOT_FOUND. Gamintojas dingo → MXL_ERR_FLOW_INVALID ir būsena Detached.
+    mxlStatus get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainInfo& info, const std::uint32_t*& ptr);
+    std::uint64_t head();  // MXL_UNDEFINED_INDEX, jei neprijungtas / nežinomas
+
+    State state() const { return state_; }
+    const std::string& id() const { return id_; }
+    // Laukiamas formatas (po pirmo prijungimo — faktinis).
+    const vramflow::VideoFormat& format() const { return want_; }
+    std::uint64_t reattached() const { return reattached_; }
+    // Paskutinio atmetimo priežastis (Mismatch tekstas su abiem formatais); tuščia, jei nebuvo.
+    const std::string& reason() const { return reason_; }
+    func::VideoIn& in() { return in_; }
+    const func::VideoIn& in() const { return in_; }
+    void release();
+
+private:
+    void detach();
+    std::string id_;
+    vramflow::VideoFormat want_{};
+    bool have_want_ = false;
+    bool want_cuda_ = false;
+    bool ever_ = false;  // buvo prijungtas bent kartą
+    FormatChange on_change_ = FormatChange::Exit;
+    State state_ = State::Waiting;
+    func::VideoIn in_;
+    mxlInstance inst_ = nullptr;
+    std::uint64_t next_try_ = 0;
+    std::uint64_t next_alive_ = 0;
+    std::uint64_t reattached_ = 0;
+    std::string reason_;
+};
+
+const char* state_name(InputSlot::State s);
+
+// Pradinis prisijungimas: laukia, kol VISI slot'ai Attached, pagal politiką (kas p.log_every_ms — eilutė į stderr su `who`).
+// false: err — laiko riba (su --input-wait-ms paaiškinimu), Mismatch priežastis arba sustabdymas.
+bool wait_attached(const std::vector<InputSlot*>& slots, mxlInstance inst, const OpenPolicy& p, const std::atomic<bool>& stop,
+                   const char* who, std::string& err);
+
+}  // namespace mxlv::runtime

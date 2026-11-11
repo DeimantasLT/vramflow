@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "func/flows.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -220,11 +221,46 @@ std::string read_flow_def(mxlInstance inst, const std::string& flow, std::string
     def.resize(std::strlen(def.c_str()));
     return def;
 }
+
+// Laukimo laikrodis pagal OpenPolicy (planas §P6). keep_waiting: true — pamiegota ir galima bandyti dar kartą; false — riba
+// arba sustabdymas (err užpildytas). Miegama ne ilgiau kaip 50 ms — sustabdymas nutraukia per ≤ 100 ms.
+struct Waiter {
+    const runtime::OpenPolicy& p;
+    const std::string& flow;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point next_log = t0 + std::chrono::milliseconds(p.log_every_ms);
+    bool keep_waiting(const std::atomic<bool>& stop, std::string& err, const char* what) {
+        using namespace std::chrono;
+        if (stop.load()) { err = what + flow + " neatsirado (sustabdyta)"; return false; }
+        if (p.wait_ms == 0) { err = what + flow + " nerastas (--input-wait-ms: vienas bandymas)"; return false; }
+        const auto now = steady_clock::now();
+        const auto limit = t0 + milliseconds(p.wait_ms);
+        if (p.wait_ms > 0 && now >= limit) {
+            err = what + flow + " neatsirado per " + std::to_string(p.wait_ms) + " ms (--input-wait-ms " + std::to_string(p.wait_ms) +
+                  "; 0 — laukti neribotai)";
+            return false;
+        }
+        if (p.log_every_ms && now >= next_log) {
+            std::fprintf(stderr, "[vramflow] laukiu %s%s, %lld s\n", what, flow.c_str(),
+                         static_cast<long long>(duration_cast<seconds>(now - t0).count()));
+            next_log += milliseconds(p.log_every_ms);
+        }
+        auto d = milliseconds(50);
+        if (p.wait_ms > 0) d = std::min(d, duration_cast<milliseconds>(limit - now) + milliseconds(1));
+        std::this_thread::sleep_for(d);
+        return true;
+    }
+};
 }  // namespace
 
 bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop,
                    std::string& err, const vramflow::VideoFormat* expect) {
-    if (!open_reader(inst, flow, wait_ms, stop, err)) return false;
+    return open(inst, flow, runtime::OpenPolicy{wait_ms, 0}, stop, err, expect);
+}
+
+bool VideoIn::open(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop,
+                   std::string& err, const vramflow::VideoFormat* expect) {
+    if (!open_reader(inst, flow, p, stop, err)) return false;
     const std::string def = read_flow_def(inst, flow, err);
     if (def.empty()) return false;
     if (!vramflow::format_from_flow_def(def, fmt, err)) return false;
@@ -241,7 +277,7 @@ bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait
 
 bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop,
                    std::string& err, const vramflow::gfx::Raster* expect) {
-    if (!open_reader(inst, flow, wait_ms, stop, err)) return false;
+    if (!open_reader(inst, flow, runtime::OpenPolicy{wait_ms, 0}, stop, err)) return false;
     const vramflow::VideoFormat legacy{vramflow::gfx::kHd1080i, {25, 1}};
     if (const std::string bad = check_rate(cfg.common.grainRate, legacy); !bad.empty()) { err = "įėjimo " + bad; return false; }
     cuda = is_cuda_layout(layout);
@@ -257,10 +293,10 @@ bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait
     return true;
 }
 
-bool VideoIn::open_reader(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop,
+bool VideoIn::open_reader(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop,
                           std::string& err) {
     id = flow;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    Waiter wt{p, flow};
     for (;;) {
         mxlStatus st = mxlCreateFlowReader(inst, flow.c_str(), "", &r);
         if (st == MXL_STATUS_OK) {
@@ -276,8 +312,7 @@ bool VideoIn::open_reader(mxlInstance inst, const std::string& flow, std::uint32
             err = "mxlCreateFlowReader status " + std::to_string(st);
             return false;
         }
-        if (stop.load() || std::chrono::steady_clock::now() > deadline) { err = "flow " + flow + " neatsirado"; return false; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!wt.keep_waiting(stop, err, "flow ")) return false;
     }
     return true;
 }
@@ -329,17 +364,23 @@ void AudioOut::release(mxlInstance inst) {
 
 bool AudioIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop,
                    std::string& err) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    return open(inst, flow, runtime::OpenPolicy{wait_ms, 0}, stop, err);
+}
+
+bool AudioIn::open(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop,
+                   std::string& err) {
+    Waiter wt{p, flow};
     for (;;) {
         const mxlStatus st = mxlCreateFlowReader(inst, flow.c_str(), "", &r);
         if (st == MXL_STATUS_OK) return true;
+        r = nullptr;
         if (st != MXL_ERR_FLOW_NOT_FOUND) { err = "audio reader status " + std::to_string(st); return false; }
-        if (stop.load() || std::chrono::steady_clock::now() > deadline) { err = "audio flow " + flow + " neatsirado"; return false; }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!wt.keep_waiting(stop, err, "audio flow ")) return false;
     }
 }
 
 mxlStatus AudioIn::read(std::uint64_t end, std::uint32_t count, float* l, float* rr) {
+    if (!r) return MXL_ERR_FLOW_NOT_FOUND;  // atjungtas (gamintojas dingo, laukiama re-attach)
     mxlWrappedMultiBufferSlice sl{};
     const mxlStatus st = mxlFlowReaderGetSamplesNonBlocking(r, end, count, &sl);
     if (st != MXL_STATUS_OK) return st;

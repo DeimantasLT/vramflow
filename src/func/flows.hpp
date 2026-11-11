@@ -15,6 +15,7 @@
 
 #include "common/format.hpp"
 #include "gfx/raster.hpp"
+#include "runtime/open_policy.hpp"
 
 namespace mxlv::func {
 
@@ -107,6 +108,10 @@ struct VideoIn {
     // fmt.grain_rate(); expect != nullptr — formatas (rastras ir dažnis) turi sutapti, klaidoje — abu dažniai.
     bool open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err,
               const vramflow::VideoFormat* expect);
+    // Laukimo politika (planas §P6): p.wait_ms < 0 — neribotai (kas p.log_every_ms eilutė į stderr), 0 — vienas bandymas,
+    // > 0 — riba (klaidoje — riba ir `--input-wait-ms`). Formatas tikrinamas kaip formatui neutraliame open.
+    bool open(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop, std::string& err,
+              const vramflow::VideoFormat* expect);
     // Neblokuojantis (timeout_ns = 0) arba blokuojantis grain'o gavimas; ptr — slot'o adresas (device arba host).
     mxlStatus get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainInfo& info, const std::uint32_t*& ptr);
     std::uint64_t head();  // MXL_UNDEFINED_INDEX, jei nežinoma
@@ -114,7 +119,7 @@ struct VideoIn {
 
 private:
     // Laukia flow ir sukuria reader'į (cfg, layout, slots); formatas netikrinamas.
-    bool open_reader(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err);
+    bool open_reader(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop, std::string& err);
 };
 
 // --- Audio (host) -----------------------------------------------------------------------------------------------------
@@ -132,6 +137,7 @@ struct AudioOut {
 struct AudioIn {
     mxlFlowReader r = nullptr;
     bool open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err);
+    bool open(mxlInstance inst, const std::string& flow, const runtime::OpenPolicy& p, const std::atomic<bool>& stop, std::string& err);
     // Nukopijuoja [end-count, end) į l ir r (count float kiekvienam).
     mxlStatus read(std::uint64_t end, std::uint32_t count, float* l, float* r);
     void release(mxlInstance inst);
