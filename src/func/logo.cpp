@@ -110,32 +110,21 @@ int run_logo(const Opts& o_in) {
     // gamintojas → InputSlot Detached (indeksai skaičiuojami missing_fields), grįžęs → re-attach (reattached).
     std::vector<runtime::InputSlot> in;
     in.reserve(o.flows);
-    for (std::uint32_t n = 0; n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
-    std::vector<runtime::InputSlot*> in_ptr;
-    for (auto& s : in) in_ptr.push_back(&s);
-    if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "logo", err)) {
-        const bool stopped = stop.load();  // sustabdytas belaukiant — tvarkinga pabaiga
+    for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
+    const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
+    if (const int a = attach_inputs(in_ptr, inst, o, "logo", st.fatal)) {  // neatsirado per ribą (exit 4) arba sustabdyta (exit 0)
         for (auto& s : in) s.release();
         mxlDestroyInstance(inst);
-        if (stopped) return finish(0);
-        st.fatal = err;
-        return finish(4);
+        return finish(exit_code(a));
     }
     // Nužudyto ankstesnio logo pasenę išėjimai (be writer'io) pašalinami — kitaip perkrautas logo jų nesukurtų.
     mxlGarbageCollectFlows(inst);
     std::vector<VideoOut> out(o.flows);
     int rc = 0;
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
-        const std::string id = flow_id(kRoleLogo, o.flow_base + n);
-        if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) {
-            st.fatal = "out " + std::to_string(n) + ": " + err +
-                       (out[n].existed || out[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, id) : std::string{});
-            rc = 2;
-        } else {
-            lease_output(id);
-        }
-    }
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
+        if (!create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts,
+                           o.fmt, o, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (in[n].in().cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
@@ -173,9 +162,7 @@ int run_logo(const Opts& o_in) {
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
         // [§P6] atjungtų įėjimų prisijungimas iš naujo — neblokuojantis (bandymas ne dažniau kaip kas 100 ms), prieš laukimą
-        for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-            if (in[n].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = in[n].reason(); rc = kExitFormatChange; }
-        if (rc) break;
+        if ((rc = poll_inputs(in_ptr, inst, st.fatal)) != 0) break;
         if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();

@@ -13,10 +13,12 @@
 #include <vector>
 
 #include "common/histogram.hpp"
+#include "func/flows.hpp"
 #include "func/thread_pool.hpp"
 #include "common/format.hpp"
 #include "gfx/raster.hpp"
 #include "runtime/domain_lease.hpp"
+#include "runtime/input_slot.hpp"
 #include "runtime/open_policy.hpp"
 
 namespace mxlv::func {
@@ -119,15 +121,39 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
 double warm_tai_after(double warmup_s);    // TAI ns, nuo kada skaičiuoti latencijas
 
 // --- Paleidimas ir sustabdymas (planas §P6) ---------------------------------------------------------------------------
+// VIENA vieta visoms funkcijoms (ir būsimam bendram tick varikliui): įėjimų laukimas ir re-attach (runtime::InputSlot),
+// išėjimų kūrimas su domeno nuoma (runtime::DomainLease). Funkcijų ciklai šios logikos nekopijuoja — tik kviečia.
 runtime::OpenPolicy open_policy(const Opts& o);      // --input-wait-ms
 runtime::FormatChange format_change(const Opts& o);  // --on-format-change
+// Exit kodai: įėjimai neatsirado per --input-wait-ms; įėjimas grįžo kitu formatu ir --on-format-change exit (PF-3).
+constexpr int kExitInputs = 4;
+constexpr int kExitFormatChange = 6;
+// Vidinis kodas: sustabdyta (SIGINT / SIGTERM) belaukiant įėjimų — tvarkinga pabaiga; exit_code() jį paverčia į 0.
+constexpr int kStoppedWaiting = -1;
+constexpr int exit_code(int rc) { return rc < 0 ? 0 : rc; }
+
+// Įėjimo slot'as pagal funkcijos opcijas. expect == nullptr — laukiamu tampa pirmas prijungtas formatas.
+runtime::InputSlot make_input(const Opts& o, const std::string& flow_id, const vramflow::VideoFormat* expect);
+std::vector<runtime::InputSlot*> slot_ptrs(std::vector<runtime::InputSlot>& v);
+// Pradinis prisijungimas (paleidimo tvarka nesvarbi): laukia visų įėjimų pagal --input-wait-ms. 0 — visi prijungti;
+// kStoppedWaiting — sustabdyta belaukiant; kExitInputs — neatsirado per ribą arba netinkamas formatas (fatal užpildytas).
+int attach_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, const Opts& o, const char* who, std::string& fatal);
+// Tick'o pradžioje: atjungtų įėjimų prisijungimas iš naujo (neblokuoja; prijungtam — be sisteminių kvietimų). 0 — tęsti;
+// kExitFormatChange — įėjimas grįžo kitu formatu / saugykla ir --on-format-change exit (fatal užpildytas).
+int poll_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, std::string& fatal);
+
 // Proceso domeno nuoma (paima main_func.cpp prieš subkomandą; laikoma iki proceso pabaigos).
 runtime::DomainLease& domain_lease();
 // Išėjimo flow sukurtas — užregistruojamas nuomoje (kitas paleidimas, bandantis jį sukurti, gaus savininko run_id).
 void lease_output(const std::string& flow_id);
-// Išėjimo flow sukurti nepavyko, nes jis jau egzistuoja: tekstas su gyvo savininko run_id (arba kad savininkas nežinomas).
-std::string owner_note(const Opts& o, const std::string& flow_id);
-// Exit kodas, kai įėjimas grįžo kitu formatu ir --on-format-change exit (PF-3).
-constexpr int kExitFormatChange = 6;
+// Išėjimo flow sukurti nepavyko, nors jis domene yra — kodėl: gyvas kito paleidimo writer'is (su jo run_id; be nuomos —
+// „savininkas nežinomas“) arba pasenęs flow be writer'io. Tuščias tekstas — tokio flow nėra (klaida kita). Kviečiama PO to,
+// kai nepavykusio kūrimo writer'is atlaisvintas (kitaip jis pats atrodytų kaip gyvas writer'is).
+std::string exists_note(mxlInstance inst, const Opts& o, const std::string& flow_id);
+// Išėjimo flow: sukuria ir užregistruoja nuomoje. Flow jau turi gyvą writer'į → err papildomas savininko run_id.
+bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const std::string& def, const std::string& options,
+                   const vramflow::VideoFormat& f, const Opts& o, std::string& err);
+bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
+                   const Opts& o, std::string& err);
 
 }  // namespace mxlv::func

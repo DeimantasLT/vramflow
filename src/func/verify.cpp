@@ -334,8 +334,8 @@ int run_verify(const Opts& o_in) {
     std::vector<runtime::InputSlot> out, in;
     out.reserve(o.flows);
     in.reserve(logo_mode ? o.flows : 0);
-    for (std::uint32_t n = 0; n < o.flows; ++n) out.emplace_back(flow_id(out_role, o.flow_base + n), &o.fmt, format_change(o));
-    for (std::uint32_t n = 0; logo_mode && n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
+    for (std::uint32_t n = 0; n < o.flows; ++n) out.push_back(make_input(o, flow_id(out_role, o.flow_base + n), &o.fmt));
+    for (std::uint32_t n = 0; logo_mode && n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
     std::vector<runtime::InputSlot*> all;
     for (auto& s : out) all.push_back(&s);
     for (auto& s : in) all.push_back(&s);
@@ -343,12 +343,9 @@ int run_verify(const Opts& o_in) {
         for (auto* s : all) s->release();
         mxlDestroyInstance(inst);
     };
-    if (!runtime::wait_attached(all, inst, open_policy(o), stop, ("verify " + o.mode).c_str(), err)) {
-        const bool stopped = stop.load();  // sustabdytas belaukiant — tvarkinga pabaiga
+    if (const int a = attach_inputs(all, inst, o, ("verify " + o.mode).c_str(), st.fatal)) {  // exit 4 arba sustabdyta (exit 0)
         release_all();
-        if (stopped) return finish(0);
-        st.fatal = err;
-        return finish(4);
+        return finish(exit_code(a));
     }
     int rc = 0;
 
@@ -374,9 +371,7 @@ int run_verify(const Opts& o_in) {
         // verify sąmoningai atsilieka lag_fields laukų, todėl ilgas laukimas čia nėra laikrodžio šuolis
         wait_until(rate, i + lag, 0, stop);
         if (stop.load()) break;
-        for (auto* s : all)
-            if (s->poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = s->reason(); rc = kExitFormatChange; }
-        if (rc) break;
+        if ((rc = poll_inputs(all, inst, st.fatal)) != 0) break;
         for (std::uint32_t n = 0; n < o.flows; ++n) {
             mxlGrainInfo info{};
             const std::uint32_t* p = nullptr;

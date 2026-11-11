@@ -237,12 +237,8 @@ int run_dec(const Opts& o) {
     if (!inter && siting == "field") { st.fatal = "--chroma-siting field galimas tik interlaced formatui"; rc = 1; }
     const int fps_i = static_cast<int>((o.fmt.frame_rate.num + o.fmt.frame_rate.den / 2) / o.fmt.frame_rate.den);  // ~kadrų per 1 s
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].create(inst, video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) {
-            st.fatal = err + (out[n].existed || out[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, flow_id(kRoleDec, o.flow_base + n)) : std::string{});
-            rc = 2;
-        } else {
-            lease_output(flow_id(kRoleDec, o.flow_base + n));
-        }
+        if (!create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt), opts,
+                           o.fmt, o, err)) { st.fatal = err; rc = 2; }  // nuoma + savininko run_id klaidoje (§P6)
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         auto s = std::make_unique<DecStream>();
         s->idx = static_cast<int>(n);

@@ -60,9 +60,66 @@ void lease_output(const std::string& flow_id) {
         std::fprintf(stderr, "[vramflow] nepavyko užregistruoti flow %s nuomoje\n", flow_id.c_str());
 }
 
-std::string owner_note(const Opts& o, const std::string& flow_id) {
+std::string exists_note(mxlInstance inst, const Opts& o, const std::string& flow_id) {
     const std::string who = runtime::DomainLease::flow_owner(o.domain, flow_id);
-    return " — flow " + flow_id + " jau turi gyvą writer'į" + (who.empty() ? " (savininkas nežinomas: ne vramflow-func arba be nuomos)" : " (run_id " + who + ")");
+    if (!who.empty()) return " — flow " + flow_id + " jau turi gyvą writer'į (run_id " + who + ")";
+    bool active = false;
+    if (mxlIsFlowActive(inst, flow_id.c_str(), &active) != MXL_STATUS_OK) return {};  // tokio flow nėra — klaida kita
+    return active ? " — flow " + flow_id + " jau turi gyvą writer'į (savininkas nežinomas: ne vramflow-func arba be nuomos)"
+                  : " — flow " + flow_id + " pasenęs: liko po nutrūkusio paleidimo, gyvo writer'io nėra (pašalina mxlGarbageCollectFlows)";
+}
+
+runtime::InputSlot make_input(const Opts& o, const std::string& flow_id, const vramflow::VideoFormat* expect) {
+    return runtime::InputSlot(flow_id, expect, format_change(o));
+}
+
+std::vector<runtime::InputSlot*> slot_ptrs(std::vector<runtime::InputSlot>& v) {
+    std::vector<runtime::InputSlot*> p;
+    p.reserve(v.size());
+    for (auto& s : v) p.push_back(&s);
+    return p;
+}
+
+int attach_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, const Opts& o, const char* who, std::string& fatal) {
+    std::string err;
+    if (runtime::wait_attached(in, inst, open_policy(o), stop_flag(), who, err)) return 0;
+    if (stop_flag().load()) return kStoppedWaiting;  // sustabdyta belaukiant — ne klaida
+    fatal = err;
+    return kExitInputs;
+}
+
+int poll_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, std::string& fatal) {
+    const std::uint64_t now = mxlGetTime();
+    for (runtime::InputSlot* s : in)
+        if (s->poll(inst, now) == runtime::InputSlot::State::Mismatch) {
+            fatal = s->reason();
+            return kExitFormatChange;
+        }
+    return 0;
+}
+
+bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const std::string& def, const std::string& options,
+                   const vramflow::VideoFormat& f, const Opts& o, std::string& err) {
+    if (out.create(inst, def, options, err, f)) {
+        lease_output(id);
+        return true;
+    }
+    const bool exists = out.existed || out.create_status == MXL_ERR_CONFLICT;
+    out.release(inst);  // created=false — prisijungta prie svetimo flow; atlaisvinam prieš tikrindami, kas jį laiko
+    if (exists) err += exists_note(inst, o, id);
+    return false;
+}
+
+bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
+                   const Opts& o, std::string& err) {
+    if (out.create(inst, def, err, grain_rate)) {
+        lease_output(id);
+        return true;
+    }
+    const bool exists = out.existed;
+    out.release(inst);
+    if (exists) err += exists_note(inst, o, id);
+    return false;
 }
 
 namespace {

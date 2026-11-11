@@ -137,15 +137,9 @@ int run_composite(const Opts& o) {
     };
     int rc = 0;
     for (std::uint32_t n = 0; n < N; ++n)
-        for (std::uint32_t s = 0; s < per; ++s) in.emplace_back(in_flow_id(n, s), nullptr, format_change(o));
-    {
-        std::vector<runtime::InputSlot*> in_ptr;
-        for (auto& x : in) in_ptr.push_back(&x);
-        if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "composite", err)) {
-            st.fatal = stop.load() ? std::string{} : err;  // sustabdytas belaukiant — tvarkinga pabaiga (exit 0)
-            rc = stop.load() ? -1 : 4;
-        }
-    }
+        for (std::uint32_t s = 0; s < per; ++s) in.push_back(make_input(o, in_flow_id(n, s), nullptr));
+    const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
+    rc = attach_inputs(in_ptr, inst, o, "composite", st.fatal);  // 4 — neatsirado per ribą; kStoppedWaiting — sustabdyta (exit 0)
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
             if (!vramflow::same_rate(in[n * per + s].format().grain_rate(), o.fmt.grain_rate())) {
@@ -178,14 +172,10 @@ int run_composite(const Opts& o) {
     }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
-        const std::string id = flow_id(kRoleComp, o.flow_base + n);
-        if (!out[n].create(inst, comp_def(o.flow_base + n, vramflow::VideoFormat{out_r[n], o.fmt.frame_rate}, o.run_seed), opts, err,
-                           vramflow::VideoFormat{out_r[n], o.fmt.frame_rate})) {
-            st.fatal = "out " + std::to_string(n) + ": " + err +
-                       (out[n].existed || out[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, id) : std::string{});
+        const vramflow::VideoFormat of{out_r[n], o.fmt.frame_rate};
+        if (!create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed), opts, of, o, err)) {
+            st.fatal = "out " + std::to_string(n) + ": " + err;
             rc = 2;
-        } else {
-            lease_output(id);
         }
     }
     // Įėjimai jau gamina (head žinomas): InputSlot prisijungia tik tada — pirmi tick'ai neskaičiuojami kaip vėlyvi.
@@ -219,12 +209,10 @@ int run_composite(const Opts& o) {
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
         // [PF-3, §P6] atjungtų įėjimų prisijungimas iš naujo — neblokuojantis (InputSlot: ne dažniau kaip kas 100 ms), tarp tick'ų
-        for (std::size_t a = 0; a < in.size() && !rc; ++a) {
-            if (in[a].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) {
-                st.flows[a / per].inc("reopen_mismatch");
-                st.fatal = in[a].reason();
-                rc = kExitFormatChange;
-            } else if (in[a].reattached() != seen_reatt[a]) {
+        rc = poll_inputs(in_ptr, inst, st.fatal);
+        for (std::size_t a = 0; a < in.size(); ++a) {
+            if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");
+            if (in[a].reattached() != seen_reatt[a]) {
                 seen_reatt[a] = in[a].reattached();
                 st.flows[a / per].inc("reopened");
             }
@@ -400,7 +388,7 @@ int run_composite(const Opts& o) {
         for (auto& f : st.flows)
             for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
-    return finish(rc < 0 ? 0 : rc);  // -1 — sustabdyta belaukiant įėjimų (tvarkinga pabaiga)
+    return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
 }
 
 }  // namespace mxlv::func

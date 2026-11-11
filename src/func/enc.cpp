@@ -365,18 +365,17 @@ int run_enc(const Opts& o) {
     // kai jo video slot'as prisijungia iš naujo (tas pats gamintojas) arba skaitymas grąžina FLOW_INVALID.
     std::vector<runtime::InputSlot> in;
     in.reserve(o.flows);
-    for (std::uint32_t n = 0; n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
+    for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
+    const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
     std::vector<AudioIn> ain(o.audio ? o.flows : 0);
     std::vector<std::uint64_t> audio_reopen_at(ain.size(), 0), seen_reattach(o.flows, 0);
     std::string err;
-    int rc = 0;
-    {
-        std::vector<runtime::InputSlot*> in_ptr;
-        for (auto& s : in) in_ptr.push_back(&s);
-        if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "enc", err)) { st.fatal = stop.load() ? std::string{} : err; rc = stop.load() ? -1 : 4; }
-    }
+    int rc = attach_inputs(in_ptr, inst, o, "enc", st.fatal);  // 4 — neatsirado per ribą; kStoppedWaiting — sustabdyta (exit 0)
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
-        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), open_policy(o), stop, err)) { st.fatal = stop.load() ? std::string{} : err; rc = stop.load() ? -1 : 4; }
+        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), open_policy(o), stop, err)) {
+            if (stop.load()) rc = kStoppedWaiting;
+            else { st.fatal = err; rc = kExitInputs; }
+        }
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
@@ -423,14 +422,14 @@ int run_enc(const Opts& o) {
         // interlaced: kadras F = laukai 2F, 2F+1; progresyvus: kadras F = grain'as F (i_top == i_bot)
         const std::uint64_t i_top = gpf * F, i_bot = gpf * F + gpf - 1;
         // [§P6] atjungtų įėjimų prisijungimas iš naujo (neblokuojantis); po video re-attach — ir garso reader'is
-        for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
-            if (in[n].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = in[n].reason(); rc = kExitFormatChange; }
-            if (n < ain.size() && in[n].reattached() != seen_reattach[n]) {
+        rc = poll_inputs(in_ptr, inst, st.fatal);
+        for (std::uint32_t n = 0; n < ain.size() && !rc; ++n) {
+            if (in[n].reattached() != seen_reattach[n]) {
                 seen_reattach[n] = in[n].reattached();
                 ain[n].release(inst);
                 audio_reopen_at[n] = 0;
             }
-            if (n < ain.size() && !ain[n].r && now_tai() >= audio_reopen_at[n]) {
+            if (!ain[n].r && now_tai() >= audio_reopen_at[n]) {
                 audio_reopen_at[n] = now_tai() + runtime::InputSlot::kRetryNs;
                 std::string e;
                 if (ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), runtime::OpenPolicy{0, 0}, stop, e)) st.flows[n].inc("audio_reattached");
@@ -632,7 +631,7 @@ int run_enc(const Opts& o) {
             for (const char* k : {"late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
                                   "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
-    return finish(rc < 0 ? 0 : rc);  // -1 — sustabdyta belaukiant įėjimų (tvarkinga pabaiga)
+    return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
 }
 
 }  // namespace mxlv::func

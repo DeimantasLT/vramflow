@@ -139,7 +139,15 @@ int run_gfxgen(const Opts& o) {
             s.r = geom[k];
             const int c = vfgfx_writer_create(inst, gfx_def(s.n, k, vramflow::VideoFormat{s.r, o.fmt.frame_rate}, o.run_seed).c_str(),
                                               opts.empty() ? nullptr : opts.c_str(), &s.w);
-            if (c) { st.fatal = "writer " + std::to_string(n) + "/" + std::to_string(k) + ": " + std::to_string(c) + " " + vfgfx_last_error(nullptr); rc = 2; }
+            // Domeno nuoma (§P6): sukurtas flow užregistruojamas; jei jį jau laiko kitas gyvas paleidimas — klaidoje jo run_id.
+            const std::string id = flow_id(kRoleGfx, s.n * 8 + k);
+            if (c) {
+                st.fatal = "writer " + std::to_string(n) + "/" + std::to_string(k) + ": " + std::to_string(c) + " " + vfgfx_last_error(nullptr) +
+                           exists_note(inst, o, id);
+                rc = 2;
+            } else {
+                lease_output(id);
+            }
         }
 
     const int slots = manual ? 2 : 1;
