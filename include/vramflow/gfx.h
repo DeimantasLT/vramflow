@@ -29,7 +29,8 @@
  * vis tiek įrašomas, o praleisti laukai nerašomi (jokio „catch-up“ srauto).
  *
  * Klaidos: funkcijos grąžina 0 arba kodą (VFGFX_ERR_* žemiau, 1..1023 — mxlStatus). C++ išimtys neperženg ribos
- * (VFGFX_ERR_INTERNAL). vfgfx_last_error(w): paskutinės kviečiančiosios gijos klaidos tekstas (jei jos nėra — paskutinė ritmo
+ * (VFGFX_ERR_INTERNAL). Jei ritmo gijoje įvyko išimtis, gija baigiasi, bet režimas lieka „veikiantis“ (vfgfx_write -> STATE)
+ * iki vfgfx_stop_pacing. vfgfx_last_error(w): paskutinė kviečiančiosios pusės (bet kurios gijos) klaida, bendra visam writer'iui (jei jos nėra — paskutinė ritmo
  * gijos klaida); vfgfx_last_error(NULL): ŠIOS gijos paskutinė vfgfx_writer_create klaida. Rodyklė galioja iki kito
  * vfgfx_last_error iškvietimo toje pačioje gijoje; niekada NULL.
  *
@@ -49,7 +50,7 @@ typedef struct vfgfx_writer_s* vfgfx_writer;
 typedef enum { VFGFX_ALPHA_STRAIGHT = 0, VFGFX_ALPHA_PREMULTIPLIED = 1 } vfgfx_alpha;
 typedef enum { VFGFX_MEM_HOST = 0, VFGFX_MEM_CUDA = 1 } vfgfx_mem;
 typedef struct { const void* rgba; uint32_t width, height, stride; vfgfx_alpha alpha; vfgfx_mem mem; } vfgfx_frame;
-/* 0 = OK; 1..1023 = mxlStatus; >= 2000 = VFGFX_ERR_* (INVALID_ARG 2001, GEOMETRY 2002, CUDA 2003, STATE 2004) */
+/* 0 = OK; 1..1023 = mxlStatus; >= 2000 = VFGFX_ERR_* (INVALID_ARG 2001, GEOMETRY 2002, CUDA 2003, STATE 2004, INTERNAL 2005) */
 #define VFGFX_ERR_INVALID_ARG 2001
 #define VFGFX_ERR_GEOMETRY 2002
 #define VFGFX_ERR_CUDA 2003

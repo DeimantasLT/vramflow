@@ -212,11 +212,25 @@ struct vfgfx_writer_s {
         return 0;
     }
 
-    int commit_open() {
-        const mxlStatus st = out.commit();
-        if (st != MXL_STATUS_OK) return fail(static_cast<int>(st), "mxlFlowWriterCommitGrain status " + std::to_string(st));
+    // pace = true: iškviečia ritmo gija — klaida eina į perr (ne į kviečiančiosios err).
+    int commit_open(bool pace = false) {
+        const bool forced = pace && hooks.fail_commit && hooks.fail_commit();  // testo kabliukas
+        const mxlStatus st = forced ? MXL_ERR_INTERNAL : out.commit();
+        if (st != MXL_STATUS_OK) {
+            const std::string m = "mxlFlowWriterCommitGrain status " + std::to_string(st);
+            if (pace) set_pace_error(m);
+            else set_error(m);
+            return static_cast<int>(st);
+        }
         committed.fetch_add(1);
         return 0;
+    }
+
+    ~vfgfx_writer_s() {  // visi keliai (įskaitant create išimtis) išvalo viską; release/free_all idempotentiški
+        stop.store(true);
+        if (th.joinable()) th.join();
+        out.release(inst);
+        free_all();
     }
 
     std::uint64_t now() const { return hooks.now ? hooks.now() : func::now_tai(); }
@@ -227,7 +241,7 @@ struct vfgfx_writer_s {
             const std::uint64_t o = static_cast<std::uint64_t>(offset_ns);
             t = t > o ? t - o : 0;
         } else {
-            t += static_cast<std::uint64_t>(-offset_ns);
+            t += 0 - static_cast<std::uint64_t>(offset_ns);  // beženklė neigimas: saugu ir INT64_MIN
         }
         return mxlTimestampToIndex(&func::kFieldRate, t);
     }
@@ -285,7 +299,7 @@ void vfgfx_writer_s::pace_loop_body() {
                     } else {
                         std::memcpy(dst, src, gb);
                     }
-                    if (ok && commit_open() == 0) {
+                    if (ok && commit_open(true) == 0) {
                         wrote = true;
                         if (hooks.on_commit) hooks.on_commit(i);
                     } else {
@@ -430,6 +444,10 @@ static int write_impl(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f)
     std::uint32_t* dst = w->out.open(index, st);
     if (!dst) return w->fail(static_cast<int>(st), "OpenGrainSlot " + std::to_string(index) + " status " + std::to_string(st));
     // Interlaced: grain'as = kadro laukas index%2; progresyvus: visas kadras (paritetas ignoruojamas).
+    struct CancelGuard {  // išimtis po open: atidarytas grain'as atšaukiamas (po sėkmingo commit'o cancel() nieko nedaro)
+        func::VideoOut& o;
+        ~CancelGuard() { o.cancel(); }
+    } cancel_guard{w->out};
     const int par[1] = {w->r.interlaced ? static_cast<int>(index & 1) : 0};
     std::uint8_t* const d[1] = {reinterpret_cast<std::uint8_t*>(dst)};
     if (const int c = w->convert(f, 1, par, d)) {
@@ -490,9 +508,8 @@ static int stop_pacing_impl(vfgfx_writer w) {
 static void destroy_impl(vfgfx_writer w, mxlInstance inst) {
     if (!w) return;
     stop_pacing_impl(w);
-    w->out.release(inst ? inst : w->inst);
-    w->free_all();
-    delete w;
+    if (inst) w->inst = inst;
+    delete w;  // ~vfgfx_writer_s: release(inst) + free_all
 }
 
 // --- Eksportuojami apvalkalai: jokia C++ išimtis neperženg C ABI ribos --------------------------------------------------
@@ -548,6 +565,11 @@ int set_pacing_hooks(vfgfx_writer w, PacingHooks hooks) {
     if (w->pacing.load()) return VFGFX_ERR_STATE;
     w->hooks = std::move(hooks);
     return 0;
+}
+
+std::string pacing_error(vfgfx_writer w) {
+    std::lock_guard<std::mutex> l(w->err_m);
+    return w->perr;
 }
 
 PacingStats pacing_stats(vfgfx_writer w) {

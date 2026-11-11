@@ -601,3 +601,27 @@ TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksu
     CHECK(gi::pacing_stats(w).errors >= 1);
     vfgfx_writer_destroy(w, d.inst);
 }
+
+TEST_CASE("gfx_writer: ritmo gijos commit klaida eina į ritmo klaidos lauką, ne į kviečiančiosios", "[gfx_writer][mxl]") {
+    Domain d(13);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    gi::PacingHooks hk;
+    hk.fail_commit = [] { return true; };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    Frame bad(64, 16, 4, VFGFX_ALPHA_STRAIGHT, false);
+    CHECK(vfgfx_submit(w, &bad.f) == 2002);  // kviečiančiosios klaida
+    const std::string caller = vfgfx_last_error(w);
+    REQUIRE_FALSE(caller.empty());
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    std::this_thread::sleep_for(200ms);
+    vfgfx_stop_pacing(w);
+    CHECK(gi::pacing_stats(w).errors >= 5);
+    CHECK(vfgfx_committed(w) == 0);
+    CHECK(std::string(vfgfx_last_error(w)) == caller);  // ritmo klaida kviečiančiosios nepakeitė
+    CHECK(gi::pacing_error(w).find("CommitGrain") != std::string::npos);
+    vfgfx_writer_destroy(w, d.inst);
+}

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include "vramflow/gfx.h"
 
@@ -19,6 +20,8 @@ struct PacingHooks {
     std::function<std::uint64_t()> now;
     // Kviečiamas ritmo gijoje po sėkmingo commit'o.
     std::function<void(std::uint64_t index)> on_commit;
+    // Jei grąžina true, ritmo gijos commit'as laikomas nepavykusiu (klaidos kelio testams).
+    std::function<bool()> fail_commit;
 };
 
 struct PacingStats {
@@ -32,5 +35,6 @@ struct PacingStats {
 // Kabliukai taikomi sekančiam vfgfx_start_pacing; w turi būti ne ritmo režime.
 int set_pacing_hooks(vfgfx_writer w, PacingHooks hooks);
 PacingStats pacing_stats(vfgfx_writer w);
+std::string pacing_error(vfgfx_writer w);  // paskutinė ritmo gijos klaida
 
 }  // namespace vramflow::gfx::internal
