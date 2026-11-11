@@ -24,9 +24,6 @@ extern "C" {
 namespace mxlv::media::ref {
 namespace {
 
-constexpr int kChromaPairs = kWidth / 2;    // 960 chromos porų eilutėje
-constexpr int kChromaRowsField = kFieldHeight / 2;  // 270 lauko chromos eilių NV12 kadre
-
 // Mėginio eilės numeris v210 eilutėje (§6.1): pora i (pikseliai 2i, 2i+1) užima mėginius 4i..4i+3 = Cb_i, Y_2i, Cr_i, Y_2i+1.
 int serial_y(int x) { return 4 * (x / 2) + 1 + 2 * (x % 2); }
 int serial_cb(int i) { return 4 * i; }
@@ -41,8 +38,8 @@ void put10(std::uint32_t* line, int s, int v) {
     w = (w & ~(0x3FFu << sh)) | ((static_cast<std::uint32_t>(v) & 0x3FFu) << sh);
 }
 
-const std::uint32_t* field_line(const std::uint32_t* f, int j) { return f + static_cast<std::size_t>(j) * kWordsPerLine; }
-std::uint32_t* field_line(std::uint32_t* f, int j) { return f + static_cast<std::size_t>(j) * kWordsPerLine; }
+const std::uint32_t* field_line(const std::uint32_t* f, int j, int words = kWordsPerLine) { return f + static_cast<std::size_t>(j) * words; }
+std::uint32_t* field_line(std::uint32_t* f, int j, int words = kWordsPerLine) { return f + static_cast<std::size_t>(j) * words; }
 
 int round_half_up(double v) { return static_cast<int>(std::floor(v + 0.5)); }
 
@@ -216,21 +213,25 @@ std::string load_png_rgba(const std::string& path, std::vector<std::uint8_t>& rg
 }
 
 void logo_field(const std::uint32_t* in, std::uint32_t* out, const Logo& logo, int X, int Y, int parity) {
-    std::copy(in, in + kFieldWords, out);  // viskas už stačiakampio — bitas į bitą
+    logo_field(in, out, logo, X, Y, kDim1080, parity);
+}
+
+void logo_field(const std::uint32_t* in, std::uint32_t* out, const Logo& logo, int X, int Y, Dim d, int field) {
+    const Geom G = geom_of(d, field);
+    std::copy(in, in + G.grain_words(), out);  // viskas už stačiakampio — bitas į bitą
     const int cw = logo.w / 2;
-    for (int j = 0; j < kFieldHeight; ++j) {
-        const int fy = 2 * j + parity;
-        const int ly = fy - Y;
+    for (int j = 0; j < G.lines; ++j) {
+        const int ly = G.row(j) - Y;  // kadro eilutė: laukui 2j + paritetas, kadrui j
         if (ly < 0 || ly >= logo.h) continue;
-        std::uint32_t* line = field_line(out, j);
-        for (int x = 0; x < kWidth; ++x) {
+        std::uint32_t* line = field_line(out, j, G.words);
+        for (int x = 0; x < d.w; ++x) {
             const int lx = x - X;
             if (lx < 0 || lx >= logo.w) continue;
             const std::size_t o = static_cast<std::size_t>(ly) * logo.w + lx;
             const int s = serial_y(x);
             put10(line, s, blend(get10(line, s), logo.y10[o], logo.a8[o]));
         }
-        for (int i = 0; i < kChromaPairs; ++i) {
+        for (int i = 0; i < d.w / 2; ++i) {
             const int lx = 2 * i - X;  // poros lyginis pikselis logotipo koordinatėmis (X lyginis)
             if (lx < 0 || lx >= logo.w) continue;
             const std::size_t o = static_cast<std::size_t>(ly) * cw + lx / 2;
@@ -247,64 +248,107 @@ void logo_field(const std::uint32_t* in, std::uint32_t* out, const Logo& logo, i
 
 void weave_nv12(const std::uint32_t* top, const std::uint32_t* bottom, std::uint8_t* y, std::uint8_t* uv, int pitch_y,
                 int pitch_uv) {
+    weave_nv12(top, bottom, y, uv, pitch_y, pitch_uv, kDim1080, true);
+}
+
+void weave_nv12(const std::uint32_t* top, const std::uint32_t* bottom, std::uint8_t* y, std::uint8_t* uv, int pitch_y,
+                int pitch_uv, Dim d, bool interlaced) {
+    const int words = v210_words_per_line(d.w);
+    const int pairs = d.w / 2;
+    auto to8 = [](int v10) { return static_cast<std::uint8_t>(std::min(255, (v10 + 2) >> 2)); };
+    if (!interlaced) {
+        // progresyvus: kadro eilutė r ← grain'o eilutė r; UV eilė k ← eilučių 2k ir 2k+1 vidurkis (0 tipas, tarp eilučių)
+        for (int r = 0; r < d.h; ++r)
+            for (int x = 0; x < d.w; ++x) y[static_cast<std::size_t>(r) * pitch_y + x] = to8(get10(field_line(top, r, words), serial_y(x)));
+        for (int k = 0; k < d.h / 2; ++k) {
+            const std::uint32_t* l0 = field_line(top, 2 * k, words);
+            const std::uint32_t* l1 = field_line(top, 2 * k + 1, words);
+            for (int i = 0; i < pairs; ++i) {
+                const int cb = (get10(l0, serial_cb(i)) + get10(l1, serial_cb(i)) + 4) >> 3;
+                const int cr = (get10(l0, serial_cr(i)) + get10(l1, serial_cr(i)) + 4) >> 3;
+                uv[static_cast<std::size_t>(k) * pitch_uv + 2 * i] = static_cast<std::uint8_t>(std::min(255, cb));
+                uv[static_cast<std::size_t>(k) * pitch_uv + 2 * i + 1] = static_cast<std::uint8_t>(std::min(255, cr));
+            }
+        }
+        return;
+    }
     const std::uint32_t* fields[2] = {top, bottom};
     // luma: kadro eilutė r = 2L + p ← lauko p eilutė L
-    for (int r = 0; r < kFrameHeight; ++r) {
-        const std::uint32_t* line = field_line(fields[r % 2], r / 2);
-        for (int x = 0; x < kWidth; ++x)
-            y[static_cast<std::size_t>(r) * pitch_y + x] = static_cast<std::uint8_t>(std::min(255, (get10(line, serial_y(x)) + 2) >> 2));
+    for (int r = 0; r < d.h; ++r) {
+        const std::uint32_t* line = field_line(fields[r % 2], r / 2, words);
+        for (int x = 0; x < d.w; ++x) y[static_cast<std::size_t>(r) * pitch_y + x] = to8(get10(line, serial_y(x)));
     }
     // chroma: UV eilė u = 2k + p ← lauko p chromos eilutės 2k ir 2k+1 (viršutinis ¼, apatinis ¾)
-    for (int u = 0; u < kFrameHeight / 2; ++u) {
+    for (int u = 0; u < d.h / 2; ++u) {
         const int p = u % 2, k = u / 2;
-        const std::uint32_t* l0 = field_line(fields[p], 2 * k);
-        const std::uint32_t* l1 = field_line(fields[p], 2 * k + 1);
+        const std::uint32_t* l0 = field_line(fields[p], 2 * k, words);
+        const std::uint32_t* l1 = field_line(fields[p], 2 * k + 1, words);
         const int w0 = p == 0 ? 3 : 1, w1 = p == 0 ? 1 : 3;
-        for (int i = 0; i < kChromaPairs; ++i) {
+        for (int i = 0; i < pairs; ++i) {
             const int cb = (w0 * get10(l0, serial_cb(i)) + w1 * get10(l1, serial_cb(i)) + 2) >> 2;
             const int cr = (w0 * get10(l0, serial_cr(i)) + w1 * get10(l1, serial_cr(i)) + 2) >> 2;
-            uv[static_cast<std::size_t>(u) * pitch_uv + 2 * i] = static_cast<std::uint8_t>(std::min(255, (cb + 2) >> 2));
-            uv[static_cast<std::size_t>(u) * pitch_uv + 2 * i + 1] = static_cast<std::uint8_t>(std::min(255, (cr + 2) >> 2));
+            uv[static_cast<std::size_t>(u) * pitch_uv + 2 * i] = to8(cb);
+            uv[static_cast<std::size_t>(u) * pitch_uv + 2 * i + 1] = to8(cr);
         }
     }
 }
 
 void split_nv12(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, int parity, std::uint32_t* out) {
-    std::fill(out, out + kFieldWords, 0u);
-    // lauko `parity` chromos eilė c[k] = UV eilė 2k + parity
-    auto c = [&](int k, int i, int comp) {
-        k = std::clamp(k, 0, kChromaRowsField - 1);
-        return static_cast<int>(uv[static_cast<std::size_t>(2 * k + parity) * pitch_uv + 2 * i + comp]);
-    };
-    for (int j = 0; j < kFieldHeight; ++j) {
-        std::uint32_t* line = field_line(out, j);
-        const int row = 2 * j + parity;
-        for (int x = 0; x < kWidth; ++x) put10(line, serial_y(x), y[static_cast<std::size_t>(row) * pitch_y + x] << 2);
-        const int k = j / 2;
-        for (int i = 0; i < kChromaPairs; ++i)
+    split_nv12(y, uv, pitch_y, pitch_uv, kDim1080, parity, ChromaMode::FieldSited, out);
+}
+
+void split_nv12(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, int field, ChromaMode m,
+                std::uint32_t* out) {
+    const Geom G = geom_of(d, field);
+    std::fill(out, out + G.grain_words(), 0u);
+    const int K = d.h / 2;  // kadro chromos eilių
+    // lauko `field` chromos eilė c[k] = UV eilė 2k + field (FieldSited); kadro chromos eilė c[k] = UV eilė k (FrameSited)
+    auto uvat = [&](int row, int i, int comp) { return static_cast<int>(uv[static_cast<std::size_t>(row) * pitch_uv + 2 * i + comp]); };
+    for (int j = 0; j < G.lines; ++j) {
+        std::uint32_t* line = field_line(out, j, G.words);
+        const int f = G.row(j);  // kadro eilutė
+        for (int x = 0; x < d.w; ++x) put10(line, serial_y(x), y[static_cast<std::size_t>(f) * pitch_y + x] << 2);
+        for (int i = 0; i < d.w / 2; ++i)
             for (int comp = 0; comp < 2; ++comp) {
-                int acc = 0;  // aštuntosiomis, §6.4 lentelė
-                if (parity == 0 && j % 2 == 0) acc = 1 * c(k - 1, i, comp) + 7 * c(k, i, comp);
-                if (parity == 0 && j % 2 == 1) acc = 5 * c(k, i, comp) + 3 * c(k + 1, i, comp);
-                if (parity == 1 && j % 2 == 0) acc = 3 * c(k - 1, i, comp) + 5 * c(k, i, comp);
-                if (parity == 1 && j % 2 == 1) acc = 7 * c(k, i, comp) + 1 * c(k + 1, i, comp);
-                put10(line, comp == 0 ? serial_cb(i) : serial_cr(i), (acc + 1) >> 1);
+                int v = 0;
+                if (m == ChromaMode::FrameSited) {
+                    // kadro eilutė f tarp chromos eilių: k = f >> 1, kaimynė — aukščiau (lyginė f) arba žemiau (nelyginė f)
+                    const int k = f >> 1;
+                    const int k2 = (f % 2 == 0) ? std::max(k - 1, 0) : std::min(k + 1, K - 1);
+                    v = 3 * uvat(k, i, comp) + uvat(k2, i, comp);
+                } else {
+                    const int Kf = G.lines / 2, k = j / 2, p = field;
+                    auto c = [&](int kk) { return uvat(2 * std::clamp(kk, 0, Kf - 1) + p, i, comp); };
+                    int acc = 0;  // aštuntosiomis, §6.4 lentelė
+                    if (p == 0 && j % 2 == 0) acc = 1 * c(k - 1) + 7 * c(k);
+                    if (p == 0 && j % 2 == 1) acc = 5 * c(k) + 3 * c(k + 1);
+                    if (p == 1 && j % 2 == 0) acc = 3 * c(k - 1) + 5 * c(k);
+                    if (p == 1 && j % 2 == 1) acc = 7 * c(k) + 1 * c(k + 1);
+                    v = (acc + 1) >> 1;
+                }
+                put10(line, comp == 0 ? serial_cb(i) : serial_cr(i), v);
             }
     }
+}
+
+void split_nv12_progressive(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, std::uint32_t* out) {
+    split_nv12(y, uv, pitch_y, pitch_uv, d, -1, ChromaMode::FrameSited, out);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Generatorius ir barkodas (§6.5, §6.1)
 // ---------------------------------------------------------------------------------------------------------------------
 
-void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out) {
-    std::fill(out, out + kFieldWords, 0u);  // bitai 30–31 = 0
-    const int p = static_cast<int>(index & 1u);
-    for (int j = 0; j < kFieldHeight; ++j) {
-        std::uint32_t* line = field_line(out, j);
-        const int fy = 2 * j + p;
-        for (int x = 0; x < kWidth; ++x) put10(line, serial_y(x), gen_y(g, index, x, fy));
-        for (int i = 0; i < kChromaPairs; ++i) {
+void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out) { gen_field(g, index, kDim1080, true, out); }
+
+void gen_field(const GenParams& g, std::uint64_t index, Dim d, bool interlaced, std::uint32_t* out) {
+    const Geom G = geom_of(d, interlaced ? static_cast<int>(index & 1u) : -1);
+    std::fill(out, out + G.grain_words(), 0u);  // bitai 30–31 = 0; už pločio — 0
+    for (int j = 0; j < G.lines; ++j) {
+        std::uint32_t* line = field_line(out, j, G.words);
+        const int fy = G.row(j);
+        for (int x = 0; x < d.w; ++x) put10(line, serial_y(x), gen_y(g, index, x, fy));
+        for (int i = 0; i < d.w / 2; ++i) {
             std::uint16_t cb = 0, cr = 0;
             gen_c(g, index, 2 * i, fy, cb, cr);
             put10(line, serial_cb(i), cb);
@@ -313,12 +357,14 @@ void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out) {
     }
 }
 
-std::uint32_t decode_marker(const std::uint32_t* field) {
+std::uint32_t decode_marker(const std::uint32_t* field) { return decode_marker(field, kWordsPerLine); }
+
+std::uint32_t decode_marker(const std::uint32_t* field, int words) {
     std::uint32_t word = 0;
     for (int k = 0; k < 32; ++k) {
-        int sum = 0;  // bloko centro 8×8: lauko eilutės 4..11, x 32k+12..32k+19
+        int sum = 0;  // bloko centro 8×8: grain'o eilutės 4..11, x 32k+12..32k+19
         for (int j = 4; j < 12; ++j)
-            for (int x = 32 * k + 12; x < 32 * k + 20; ++x) sum += get10(field_line(field, j), serial_y(x));
+            for (int x = 32 * k + 12; x < 32 * k + 20; ++x) sum += get10(field_line(field, j, words), serial_y(x));
         if (sum > 502 * 64) word |= 1u << k;  // vidurkis > 502
     }
     return word;

@@ -56,4 +56,14 @@ struct SplitJob {
 };
 cudaError_t split_nv12(const SplitJob* jobs, int n, int parity, int pitch_y, int pitch_uv, cudaStream_t s);
 
+// --- Formatui neutralūs variantai (planas §P2; semantika — media_ref.hpp). d — kadro matmenys; field: −1 = kadras
+// (progresyvus flow), 0 / 1 = lauko paritetas. Seni (be d) = kDim1080 ir field = parity. Netinkami matmenys, pitch < d.w
+// arba FieldSited su field −1 → cudaErrorInvalidValue.
+cudaError_t gen_fields(const GenJob* jobs, int n, std::uint64_t run_seed, std::uint32_t complexity, std::uint64_t index, Dim d,
+                       bool interlaced, cudaStream_t s);
+cudaError_t logo_fields(const LogoJob* jobs, int n, const LogoDesc& logo, Dim d, int field, cudaStream_t s);
+cudaError_t weave_nv12(const WeaveJob* jobs, int n, Dim d, bool interlaced, int pitch_y, int pitch_uv, cudaStream_t s);
+cudaError_t split_nv12(const SplitJob* jobs, int n, Dim d, int field, ChromaMode m, int pitch_y, int pitch_uv, cudaStream_t s);
+cudaError_t split_nv12_progressive(const SplitJob* jobs, int n, Dim d, int pitch_y, int pitch_uv, cudaStream_t s);
+
 }  // namespace mxlv::media

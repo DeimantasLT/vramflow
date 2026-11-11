@@ -115,3 +115,88 @@ TEST_CASE("cpu gen == media_ref", "[cpu]") {
         CHECK(diff_words(a, b) == 0);
     }
 }
+
+// --- P2: formatui neutralūs CPU branduoliai == etalonas ----------------------------------------------------------------
+namespace {
+struct FCase {
+    Dim d;
+    int field;
+};
+const FCase kFCases[] = {{{1920, 1080}, 0}, {{1920, 1080}, 1}, {{1920, 1080}, -1}, {{1280, 720}, -1}, {{3840, 2160}, -1}};
+std::vector<std::uint32_t> rnd_words(std::mt19937& rng, std::size_t n) {
+    std::vector<std::uint32_t> v(n);
+    for (auto& w : v) w = rng();
+    return v;
+}
+std::vector<std::uint8_t> rnd_bytes(std::mt19937& rng, std::size_t n) {
+    std::vector<std::uint8_t> v(n);
+    for (auto& b : v) b = static_cast<std::uint8_t>(rng());
+    return v;
+}
+}  // namespace
+
+TEST_CASE("media cpu: gen ir logo == ref (visi matmenys, laukas ir kadras)", "[cpu][format]") {
+    std::mt19937 rng(41);
+    const ref::Logo L = ref::builtin_logo();
+    for (const FCase& c : kFCases) {
+        const std::size_t n = geom_of(c.d, c.field).grain_words();
+        std::vector<std::uint32_t> got(n, 0xFFFFFFFFu), want(n);
+        const std::uint64_t index = c.field == 1 ? 51 : 50;
+        cpu::gen_field({7, 2, 3}, index, c.d, c.field >= 0, got.data());
+        ref::gen_field({7, 2, 3}, index, c.d, c.field >= 0, want.data());
+        INFO("w " << c.d.w << " field " << c.field);
+        CHECK(diff_words(got, want) == 0);
+        const auto bg = rnd_words(rng, n);
+        for (const int x : {0, c.d.w - L.w, c.d.w - 100})
+            for (const int y : {0, c.d.h - 50}) {
+                cpu::logo_field(bg.data(), got.data(), planes(L, x, y), c.d, c.field);
+                ref::logo_field(bg.data(), want.data(), L, x, y, c.d, c.field);
+                INFO("X " << x << " Y " << y);
+                CHECK(diff_words(got, want) == 0);
+            }
+    }
+}
+
+TEST_CASE("media cpu: weave, split (abi chromos), split_yuv420p == ref", "[cpu][format]") {
+    std::mt19937 rng(43);
+    for (const FCase& c : kFCases) {
+        const bool inter = c.field >= 0;
+        const std::size_t n = geom_of(c.d, c.field).grain_words();
+        for (const int pitch : {c.d.w, c.d.w + 128}) {
+            const auto t = rnd_words(rng, n), b = rnd_words(rng, n);
+            std::vector<std::uint8_t> gy(static_cast<std::size_t>(pitch) * c.d.h, 3), guv(static_cast<std::size_t>(pitch) * c.d.h / 2, 3);
+            auto wy = gy, wuv = guv;
+            if (c.field != 1) {
+                cpu::weave_nv12(t.data(), b.data(), gy.data(), guv.data(), pitch, pitch, c.d, inter);
+                ref::weave_nv12(t.data(), inter ? b.data() : nullptr, wy.data(), wuv.data(), pitch, pitch, c.d, inter);
+                INFO("weave w " << c.d.w << " inter " << inter << " pitch " << pitch);
+                CHECK(gy == wy);
+                CHECK(guv == wuv);
+            }
+            const auto y = rnd_bytes(rng, static_cast<std::size_t>(pitch) * c.d.h);
+            const auto uv = rnd_bytes(rng, static_cast<std::size_t>(pitch) * c.d.h / 2);
+            // planar — tie patys chroma mėginiai: u = uv[2i], v = uv[2i+1], pitch_c = pitch / 2
+            std::vector<std::uint8_t> u(uv.size() / 2), v(uv.size() / 2);
+            for (std::size_t i = 0; i < u.size(); ++i) {
+                u[i] = uv[2 * i];
+                v[i] = uv[2 * i + 1];
+            }
+            for (const ChromaMode m : {ChromaMode::FieldSited, ChromaMode::FrameSited}) {
+                if (!inter && m == ChromaMode::FieldSited) continue;
+                std::vector<std::uint32_t> got(n, 1), want(n, 2), gp(n, 3);
+                cpu::split_nv12(y.data(), uv.data(), pitch, pitch, c.d, c.field, m, got.data());
+                ref::split_nv12(y.data(), uv.data(), pitch, pitch, c.d, c.field, m, want.data());
+                cpu::split_yuv420p(y.data(), u.data(), v.data(), pitch, pitch / 2, c.d, c.field, m, gp.data());
+                INFO("split w " << c.d.w << " field " << c.field << " frame " << (m == ChromaMode::FrameSited) << " pitch " << pitch);
+                CHECK(diff_words(got, want) == 0);
+                CHECK(diff_words(gp, want) == 0);
+            }
+            if (!inter) {
+                std::vector<std::uint32_t> got(n, 1), want(n, 2);
+                cpu::split_nv12_progressive(y.data(), uv.data(), pitch, pitch, c.d, got.data());
+                ref::split_nv12_progressive(y.data(), uv.data(), pitch, pitch, c.d, want.data());
+                CHECK(diff_words(got, want) == 0);
+            }
+        }
+    }
+}

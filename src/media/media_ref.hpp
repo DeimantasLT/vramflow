@@ -40,8 +40,25 @@ void split_nv12(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int 
 // Generatoriaus laukas (naudoja gen_content.hpp apibrėžimą).
 void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out);
 
+// --- Formatui neutralūs variantai (planas §P2). d — kadro matmenys; field: −1 = visas kadras (progresyvus flow, grain =
+// kadras), 0 / 1 — lauko paritetas (interlaced flow). Grain'o eilutė = v210_words_per_line(d.w) žodžių; pikseliai už
+// pločio ir lygiavimo grupės = 0. Senieji (be d) — tas pats su kDim1080 ir field = parity.
+void gen_field(const GenParams& g, std::uint64_t index, Dim d, bool interlaced, std::uint32_t* out);  // field = index & 1
+void logo_field(const std::uint32_t* in, std::uint32_t* out, const Logo& logo, int X, int Y, Dim d, int field);
+// interlaced: top/bottom — du laukai; progresyvus: top — kadras (bottom nenaudojamas), chroma (c[2k] + c[2k+1] + 4) >> 3.
+void weave_nv12(const std::uint32_t* top, const std::uint32_t* bottom, std::uint8_t* y, std::uint8_t* uv, int pitch_y,
+                int pitch_uv, Dim d, bool interlaced);
+// FieldSited — tik field 0 / 1 (lauko chroma, §6.4); FrameSited — kadro chroma (0 tipas): kadro eilutė f, k = f >> 1,
+// lyginė f → 3·c[k] + c[max(k−1, 0)], nelyginė → 3·c[k] + c[min(k+1, K−1)] (10 bitų be apvalinimo).
+void split_nv12(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, int field, ChromaMode m,
+                std::uint32_t* out);
+// = split_nv12(…, field −1, FrameSited)
+void split_nv12_progressive(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, std::uint32_t* out);
+
 // Barkodo dekodavimas iš v210 lauko (lauko eilutės 0..15). Grąžina 32 bitų žodį.
 std::uint32_t decode_marker(const std::uint32_t* field);
+// Tas pats bet kurio pločio grain'ui (words — žodžių eilutėje, v210_words_per_line(w)).
+std::uint32_t decode_marker(const std::uint32_t* grain, int words);
 // Barkodo dekodavimas iš NV12 kadro lauko `parity` (po kodavimo/dekodavimo; slenkstis 8 bit).
 std::uint32_t decode_marker_nv12(const std::uint8_t* y, int pitch_y, int parity);
 

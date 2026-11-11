@@ -33,4 +33,15 @@ void split_yuv420p(const std::uint8_t* y, const std::uint8_t* u, const std::uint
 // Generatoriaus laukas (turinio apibrėžimas — gen_content.hpp).
 void gen_field(const GenParams& g, std::uint64_t index, std::uint32_t* out);
 
+// --- Formatui neutralūs variantai (planas §P2; semantika — media_ref.hpp). field: −1 = kadras, 0 / 1 = laukas.
+void logo_field(const std::uint32_t* in, std::uint32_t* out, const LogoPlanes& logo, Dim d, int field);
+void weave_nv12(const std::uint32_t* top, const std::uint32_t* bottom, std::uint8_t* y, std::uint8_t* uv, int pitch_y,
+                int pitch_uv, Dim d, bool interlaced);
+void split_nv12(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, int field, ChromaMode m,
+                std::uint32_t* out);
+void split_nv12_progressive(const std::uint8_t* y, const std::uint8_t* uv, int pitch_y, int pitch_uv, Dim d, std::uint32_t* out);
+void split_yuv420p(const std::uint8_t* y, const std::uint8_t* u, const std::uint8_t* v, int pitch_y, int pitch_c, Dim d, int field,
+                   ChromaMode m, std::uint32_t* out);
+void gen_field(const GenParams& g, std::uint64_t index, Dim d, bool interlaced, std::uint32_t* out);
+
 }  // namespace mxlv::media::cpu
