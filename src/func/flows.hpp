@@ -40,6 +40,10 @@ struct ClockWatch {
     bool stepped();
 };
 
+// Plokštumų išdėstymas prieš rastrą: planeCount, fill poslinkis 0, key iškart po fill (poslinkis = fill_bytes), dydžiai ir
+// pitch = eilučių ilgiai. Tuščias tekstas — tinka; kitaip klaidos aprašas. Naudoja VideoOut::create ir VideoIn::open.
+std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r);
+
 // --- Video išėjimas ---------------------------------------------------------------------------------------------------
 struct VideoOut {
     mxlFlowWriter w = nullptr;
@@ -51,7 +55,8 @@ struct VideoOut {
     bool open_grain = false;
     std::string id;
     vramflow::gfx::Raster raster = vramflow::gfx::kHd1080i;
-    // Sukuria flow ir patikrina rastro geometriją (numatytoji — 1080i50 v210). Klaida → tekstas į err, false.
+    // Sukuria flow ir patikrina rastro geometriją bei grainRate == 50/1 (visada, R9) (numatytoji — 1080i50 v210).
+    // Klaida → tekstas į err, false.
     bool create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err,
                 const vramflow::gfx::Raster& r = vramflow::gfx::kHd1080i);
     // Atidaro grain'ą; grąžina device rodyklę arba nullptr (st — MXL statusas).
@@ -71,7 +76,7 @@ struct VideoIn {
     bool cuda = false;
     vramflow::gfx::Raster raster = vramflow::gfx::kHd1080i;  // expect arba perskaitytas iš flow aprašo
     // Laukia flow iki wait_ms. expect != nullptr → tikrinama prieš tą rastrą (nesutapimas = klaida);
-    // nullptr → rastras perskaitomas iš flow aprašo į `raster`. Klaida → err.
+    // nullptr → rastras perskaitomas iš flow aprašo į `raster`. grainRate turi būti 50/1 visada (R9). Klaida → err.
     bool open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err,
               const vramflow::gfx::Raster* expect = nullptr);
     // Neblokuojantis (timeout_ns = 0) arba blokuojantis grain'o gavimas; ptr — slot'o adresas (device arba host).

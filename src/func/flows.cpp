@@ -75,17 +75,34 @@ bool wait_until(std::uint64_t index, std::int64_t offset_ns, const std::atomic<b
 
 // --- VideoOut ---------------------------------------------------------------------------------------------------------
 namespace {
-// Plokštumų skaičius ir dydžiai prieš rastrą (fill [+ key]); tuščias tekstas — tinka.
-std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r) {
-    const std::uint32_t want_planes = r.alpha ? 2 : 1;
-    if (l.planeCount != want_planes) return "plokštumų " + std::to_string(l.planeCount) + " != " + std::to_string(want_planes);
-    if (l.planes[0].size != vramflow::gfx::fill_bytes(r))
-        return "fill dydis " + std::to_string(l.planes[0].size) + " != " + std::to_string(vramflow::gfx::fill_bytes(r));
-    if (r.alpha && l.planes[1].size != vramflow::gfx::key_bytes(r))
-        return "key dydis " + std::to_string(l.planes[1].size) + " != " + std::to_string(vramflow::gfx::key_bytes(r));
-    return {};
+// Visi šio projekto flow'ai — kFieldRate 50/1 (interlaced lauko ritmas arba progresyvinis 50p, R9). Tuščias tekstas — tinka.
+std::string check_rate(const mxlRational& g) {
+    if (g.numerator == kFieldRate.numerator && g.denominator == kFieldRate.denominator) return {};
+    return "grainRate ne 50/1 (" + std::to_string(g.numerator) + "/" + std::to_string(g.denominator) + ")";
 }
 }  // namespace
+
+std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r) {
+    namespace gfx = vramflow::gfx;
+    const std::uint32_t want_planes = r.alpha ? 2 : 1;
+    if (l.planeCount != want_planes) return "plokštumų " + std::to_string(l.planeCount) + " != " + std::to_string(want_planes);
+    // Visi variantai (etalonas, CPU, CUDA) adresuoja: fill = grain pradžia, key = grain + fill_bytes, eilutės be tarpų.
+    if (l.planes[0].offset != 0) return "fill poslinkis " + std::to_string(l.planes[0].offset) + " != 0";
+    if (l.planes[0].size != gfx::fill_bytes(r))
+        return "fill dydis " + std::to_string(l.planes[0].size) + " != " + std::to_string(gfx::fill_bytes(r));
+    if (l.planes[0].pitch != gfx::fill_line_bytes(r.w))
+        return "fill pitch " + std::to_string(l.planes[0].pitch) + " != " + std::to_string(gfx::fill_line_bytes(r.w));
+    if (r.alpha) {
+        if (l.planes[1].offset != gfx::fill_bytes(r))
+            return "key poslinkis " + std::to_string(l.planes[1].offset) + " != " + std::to_string(gfx::fill_bytes(r)) +
+                   " (key turi eiti iškart po fill)";
+        if (l.planes[1].size != gfx::key_bytes(r))
+            return "key dydis " + std::to_string(l.planes[1].size) + " != " + std::to_string(gfx::key_bytes(r));
+        if (l.planes[1].pitch != gfx::key_line_bytes(r.w))
+            return "key pitch " + std::to_string(l.planes[1].pitch) + " != " + std::to_string(gfx::key_line_bytes(r.w));
+    }
+    return {};
+}
 
 bool VideoOut::create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err,
                       const vramflow::gfx::Raster& r) {
@@ -99,11 +116,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
         return false;
     }
     if (!created) { err = "flow jau egzistavo (created=false)"; return false; }
-    if (r.interlaced && (cfg.common.grainRate.numerator != 50 || cfg.common.grainRate.denominator != 1)) {
-        err = "grainRate ne 50/1 (" + std::to_string(cfg.common.grainRate.numerator) + "/" +
-              std::to_string(cfg.common.grainRate.denominator) + ")";
-        return false;
-    }
+    if (const std::string bad = check_rate(cfg.common.grainRate); !bad.empty()) { err = bad; return false; }
     if ((st = mxlFlowWriterGetStorageLayout(w, &layout)) != MXL_STATUS_OK) { err = "GetStorageLayout " + std::to_string(st); return false; }
     slots.assign(layout.slotCount, mxlGrainStorage{});
     if ((st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data())) != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
@@ -167,13 +180,14 @@ bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait
         if (stop.load() || std::chrono::steady_clock::now() > deadline) { err = "flow " + flow + " neatsirado"; return false; }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
+    if (const std::string bad = check_rate(cfg.common.grainRate); !bad.empty()) { err = "įėjimo " + bad; return false; }
     cuda = is_cuda_layout(layout);
     if (expect) {
         raster = *expect;
     } else {
         size_t n = 0;
         mxlGetFlowDef(inst, flow.c_str(), nullptr, &n);  // grąžina INVALID_ARG ir reikiamą dydį
-        std::string def(n ? n : 1, ' ');
+        std::string def(n ? n : 1, '\0');
         const mxlStatus ds = n ? mxlGetFlowDef(inst, flow.c_str(), def.data(), &n) : MXL_ERR_INTERNAL;
         if (ds != MXL_STATUS_OK) { err = "mxlGetFlowDef status " + std::to_string(ds); return false; }
         def.resize(std::strlen(def.c_str()));
