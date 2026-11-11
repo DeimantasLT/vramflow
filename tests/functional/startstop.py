@@ -14,7 +14,15 @@ fstart_owner    — antras gen tame pačiame domene su tuo pačiu --flow-base �
 fstart_domain   — domain.py: make_domain unikalūs; remove_domain su gyvu gen → False ir flow failai vietoje; po gen
                   pabaigos → True (domenas ir nuomos katalogas pašalinti).
 fstart_parallel — du capacity.py --func logo --n 2 lygiagrečiai (anksčiau — tas pats /dev/shm/mxlf-logo-2): abu PASS.
+fstart_longpath — domeno kelias > 48 simbolių su cuda-linear (reader'io `payload.sock` kelias netilptų į 107 simbolius, o
+                  vartotojas lauktų be galo) → gen iškart exit 1 su aiškiu tekstu; make_domain ilgą žymą sutrumpina.
+fstart_logo_restart — pats logo (rašanti funkcija viduryje grandinės) nužudomas kill -9 ir paleidžiamas vėl: startuoja (savo
+                  pasenusius išėjimus pašalina; be to cuda-linear restartas sukdavosi ant MXL_ERR_CONFLICT), išėjimas vėl
+                  juda, o verify prie naujo flow prisijungia pats (reattached >= 1) ir neranda teisingumo klaidų.
 Variantai: FSTART_VARIANTS=C,G (numatyta).
+
+Šie testai tikrina elgseną iš išorės (procesai, exit kodai, summary skaitikliai `reattached`, `missing_fields`, `fields_ok`,
+`run_id`, stderr tekstas) — nepriklauso nuo to, kuris ciklas ją įgyvendina, ir turi likti žali po tick variklio suvienodinimo.
 """
 import json
 import os
@@ -234,5 +242,80 @@ def fstart_parallel(out):
     return [F.result("fstart_parallel", "PASS" if ok else "FAIL", why=f"capacity exit={rcs} rezultatai={verdict}")]
 
 
+def fstart_longpath(out):
+    """Rasta pilname funkciniame paleidime: unikalus domeno vardas pailgino kelią, cuda-linear reader'is nebegalėjo prisijungti
+    prie `<domenas>/<uuid>.mxl-flow/payload.sock` (sun_path 107 simboliai) ir vartotojas tyliai laukė."""
+    res = []
+    d = domain.make_domain("x" * 60)  # žyma per ilga — make_domain privalo sutrumpinti
+    short_ok = len(str(d)) <= domain.MAX_DOMAIN_PATH and d.is_dir()
+    domain.remove_domain(d)
+    res.append(F.result("fstart_longpath[make_domain]", "PASS" if short_ok else "FAIL",
+                        why=f"kelias {len(str(d))} simb. (riba {getattr(domain, 'MAX_DOMAIN_PATH', None)})"))
+    long_dom = domain.SHM / ("vf-fstart-longpath-" + "y" * 40)  # 9 + 59 = 68 simboliai > 48
+    long_dom.mkdir(exist_ok=True)
+    F.DOMAINS.append(long_dom)
+    p = F.FProc(out, "fstart-longpath/G", "gen", long_dom, "--flows", 1, "--duration", 3, "--impl", "gpu", "--storage", "cuda-linear")
+    rc = p.wait(timeout=60)
+    txt = err_text(p)
+    q = F.FProc(out, "fstart-longpath/C", "gen", long_dom, "--flows", 1, "--duration", 2, "--impl", "cpu", "--storage", "host")
+    rq = q.wait(timeout=60)  # host flow'ams lizdo nėra — ilgas kelias leidžiamas
+    ok = rc == 1 and "payload.sock" in txt and "48" in txt and rq == 0
+    res.append(F.result("fstart_longpath[func]", "PASS" if ok else "FAIL", why=f"G exit={rc} stderr={txt.strip()[-200:]!r}; C exit={rq}"))
+    return res
+
+
+def fstart_logo_restart(out):
+    res = []
+    N, D = 1, 22
+    for tag, impl, storage in variants():
+        tid = f"fstart_logo_restart[{tag}]"
+        sub = f"fstart-logo-restart-{tag}"
+        d = F.fresh_domain(sub)
+        v = F.vcommon(impl, storage)
+        logo_args = ["--flows", N, "--duration", 60, "--warmup", 1, *v]
+        g = F.FProc(out, sub, "gen", d, "--flows", N, "--duration", 80, *v)
+        l1 = l2 = vf = None
+        alive = False
+        h1 = h2 = None
+        rv = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)]):
+                res.append(F.result(tid, "FAIL", why="gen flow'ai neatsirado"))
+                continue
+            l1 = F.FProc(out, f"{sub}/a", "logo", d, *logo_args)
+            F.wait_flows(d, [F.role_flow_id(2, n) for n in range(N)], 20)
+            vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", D, "--warmup", 1,
+                         *F.vimpl(impl, storage))
+            time.sleep(4)
+            l1.kill9()
+            time.sleep(2)
+            l2 = F.FProc(out, f"{sub}/b", "logo", d, *logo_args)
+            time.sleep(5)
+            alive = l2.p.poll() is None and vf.p.poll() is None
+            h1 = F.flow_head(d, F.role_flow_id(2, 0))
+            time.sleep(2)
+            h2 = F.flow_head(d, F.role_flow_id(2, 0))
+            rv = vf.wait(timeout=D + 60)
+        finally:
+            r2 = l2.term() if l2 is not None else None
+            for pr in (vf, l1, g):
+                if pr is not None:
+                    pr.term()
+        s2, sv = F.vsummary(l2, "logo"), F.vsummary(vf, "verify-logo")
+        f2 = ((s2 or {}).get("flows") or [{}])[0]
+        fv = ((sv or {}).get("flows") or [{}])[0]
+        pv = (sv or {}).get("proc") or {}
+        advancing = h1 is not None and h2 is not None and h2 - h1 >= 80  # 2 s = 100 laukų
+        ok = (alive and advancing and r2 == 0 and f2.get("fields_ok", 0) > 0 and sum(logo_losses(s2).values()) == 0
+              and fv.get("reattached", 0) >= 1 and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0)
+        res.append(F.result(tid, "PASS" if ok else "FAIL",
+                            why=f"antras logo gyvas={alive} exit={r2} fatal={(s2 or {}).get('fatal')!r} fields_ok={f2.get('fields_ok')} "
+                                f"praradimai={logo_losses(s2)} head {h1}->{h2}; verify exit={rv} reattached={fv.get('reattached')} "
+                                f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')}",
+                            logo=s2, verify=sv))
+    return res
+
+
 TESTS = {"fstart_order": fstart_order, "fstart_restart": fstart_restart, "fstart_wait": fstart_wait, "fstart_owner": fstart_owner,
-         "fstart_domain": fstart_domain, "fstart_parallel": fstart_parallel}
+         "fstart_domain": fstart_domain, "fstart_parallel": fstart_parallel, "fstart_longpath": fstart_longpath,
+         "fstart_logo_restart": fstart_logo_restart}

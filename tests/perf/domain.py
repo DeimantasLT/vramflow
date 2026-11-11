@@ -15,6 +15,9 @@ import secrets
 import shutil
 
 SHM = pathlib.Path(os.environ.get("VF_DOMAIN_ROOT", "/dev/shm"))
+# cuda-linear reader'is jungiasi prie <domenas>/<uuid>.mxl-flow/payload.sock (Unix lizdas, sun_path 107 simboliai, iš jų 59 —
+# flow katalogas ir lizdo vardas). Ilgesnis domeno kelias → reader'iai neprisijungia (src/runtime/domain_lease.hpp).
+MAX_DOMAIN_PATH = 48
 
 
 def lease_dir(path) -> pathlib.Path:
@@ -23,7 +26,12 @@ def lease_dir(path) -> pathlib.Path:
 
 
 def make_domain(tag: str) -> pathlib.Path:
-    """Naujas tuščias domenas /dev/shm/vf-<tag>-<8 hex> (mkdir be exist_ok: vardas niekada nesidalija)."""
+    """Naujas tuščias domenas /dev/shm/vf-<tag>-<8 hex> (mkdir be exist_ok: vardas niekada nesidalija).
+    Per ilga žyma sutrumpinama, kad kelias neviršytų MAX_DOMAIN_PATH (unikalumą užtikrina 8 hex)."""
+    room = MAX_DOMAIN_PATH - len(str(SHM)) - len("/vf--") - 8
+    if room < 1:
+        raise ValueError(f"domenų šaknis {SHM} per ilga: kelias turi tilpti į {MAX_DOMAIN_PATH} simbolius")
+    tag = tag[:room].rstrip("-")
     while True:
         d = SHM / f"vf-{tag}-{secrets.token_hex(4)}"
         try:

@@ -72,7 +72,7 @@ DOMAINS = []  # šio paleidimo domenai — pašalinami pabaigoje (tik be gyvų s
 
 def fresh_domain(name):
     """Unikalus domenas šiam paleidimui (planas §P6): du functional.py paleidimai vienas kito domenų netrina."""
-    d = domain.make_domain(f"mxlv-{name}")
+    d = domain.make_domain(name)
     DOMAINS.append(d)
     return d
 
