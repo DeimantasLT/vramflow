@@ -308,8 +308,9 @@ def run_level(a, n):
         src_ok = wait_flow_defs(dom, src_ids, 60 + 2 * n * K)
         xy = [x for _, p, _ in lay for x in ("--layer-xy", p)]
         op = [x for _, _, o in lay for x in ("--opacity", str(o))]
-        # composite baigiasi savo trukme (total + COMP_TAIL_S). SIGTERM netinka: nutraukti laukai iškreiptų RT. Todėl jo uodega
-        # turi viršyti tarpą iki verify starto + 6 s; kitaip pakopa pažymima NEDERINA (žr. invalid_reason), o ne PASS/FAIL
+        # composite baigiasi savo trukme (total + COMP_TAIL_S). SIGTERM netinka: nutraukti laukai iškreiptų RT. Tarpas nuo
+        # composite starto iki verify starto turi būti ≤ COMP_MAX_GAP_S = COMP_TAIL_S − 11 (= 9 s): langas gali baigtis iki 5 s po
+        # verify pabaigos (5 s mėginių ciklas), todėl realus rezervas ≥ 6 s. Kitaip pakopa NEDERINA (žr. invalid_reason), ne PASS/FAIL
         cstart = time.monotonic()
         P.start("composite", [BIN, "composite", *common, "--layers", str(K), *xy, *op, "--base", "gen",
                               "--out-format", a.out_format, "--deadline-ms", str(a.deadline_ms),

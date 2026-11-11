@@ -25,12 +25,36 @@ def gcol(r):
 
 
 def by_n(rows, key):
-    """Pakopa N laikoma PASS, jei praėjo bent vienas jos pakartojimas; grąžina {N: (praėjo, iš viso)}."""
+    """Pakopa N laikoma PASS, jei praėjo bent vienas GALIOJANTIS jos pakartojimas (R23: NEDERINA niekada nėra PASS);
+    grąžina {N: (praėjo galiojančių, galiojančių iš viso)}. N, turinti tik NEDERINA pakartojimus, lieka kaip (0, 0) —
+    t. y. pertrūkis N* sekoje."""
     agg = defaultdict(lambda: [0, 0])
     for r in rows:
-        agg[r["n"]][0] += bool(r.get(key))
-        agg[r["n"]][1] += 1
+        a = agg[r["n"]]
+        if r.get("invalid_reason"):
+            continue
+        a[0] += bool(r.get(key))
+        a[1] += 1
     return dict(sorted(agg.items()))
+
+
+def invalid_notes(rows):
+    """N* uodegos pastabos NEDERINA pakopoms: nutraukia N* tik tada, kai N neturi galiojančio PASS pakartojimo."""
+    out = []
+    for n in sorted({r["n"] for r in rows if r.get("invalid_reason")}):
+        st = by_n(rows, "pass")[n][0]
+        tol = by_n(rows, "pass_tol")[n][0]
+        if st:
+            out.append(f"N={n} NEDERINA (galiojantis pakartojimas PASS)")
+        elif tol:
+            out.append(f"N={n} NEDERINA (galiojantis pakartojimas PASS tik tol — griežtas N* nutrauktas)")
+        else:
+            out.append(f"N={n} NEDERINA — N* nutrauktas (nėra galiojančio PASS pakartojimo)")
+    return out
+
+
+def skipped_note(sk):
+    return f"N={','.join(map(str, sk))} praleista, žr. eilutės priežastį — riba nepasiekta tik todėl, kad pakopos nevykdytos"
 
 
 def nstar(rows, key):
@@ -66,6 +90,18 @@ def coverage(r):
 
 
 LOW_COVERAGE = 0.5  # R21: pakopos su mažesne patikros aprėptimi žymimos (PASS apibrėžimas nekeičiamas)
+
+
+def nstar_line(rs, nmap, k, v):
+    """Vienos (K, variantas) grupės N* eilutė; įrašo (N* griežtai, N* tol, didžiausias vykdytas N, praleisti) į nmap.
+    NEDERINA pakopos lieka sekoje (by_n jas laiko pertrūkiu, jei nėra galiojančio PASS pakartojimo); pastabos apie
+    NEDERINA ir praleistas pakopas sujungiamos, ne perrašomos."""
+    ran = [r for r in rs if not r.get("skipped")]
+    sk = sorted({r["n"] for r in rs if r.get("skipped")})
+    ns, nt = nstar(ran, "pass"), nstar(ran, "pass_tol")
+    nmap[(k, v)] = (ns, nt, max((r["n"] for r in ran), default=0), sk)
+    notes = invalid_notes(ran) + ([skipped_note(sk)] if sk else [])
+    return f"N* griežtai = **{ns}**, N* tol = **{nt}**" + (f" ({'; '.join(notes)})" if notes else "")
 
 
 def composite_section(rows):
@@ -114,17 +150,7 @@ def composite_section(rows):
                           f"{hq(r, 'out_lateness', 'p50')} / {hq(r, 'out_lateness', 'p99')} | {r.get('vram_delta_mb')} | "
                           f"{'–' if not g else f'{g['util_gpu']['mean']:.0f}'} | {'–' if not g else f'{g['power_w']['mean']:.0f}'} | "
                           f"`{r['_src']}` |")
-            ran = [r for r in rs if not r.get("skipped")]  # NEDERINA pakopos lieka sekoje kaip pertrūkis (nstar: pass = False)
-            invalid = sorted({r["n"] for r in ran if r.get("invalid_reason")})
-            skipped = sorted({r["n"] for r in rs if r.get("skipped")})
-            nmap[(k, v)] = (nstar(ran, "pass"), nstar(ran, "pass_tol"), max((r["n"] for r in ran), default=0), skipped)
-            ns, nt, top, sk = nmap[(k, v)]
-            tail = ""
-            if invalid:
-                tail += f" (N={','.join(map(str, invalid))} NEDERINA — N* nutrauktas ties pirmąja nederinama pakopa)"
-            if sk:
-                tail = f" (N={','.join(map(str, sk))} praleista, žr. eilutės priežastį — riba nepasiekta tik todėl, kad pakopos nevykdytos)"
-            md += ["", f"N* griežtai = **{ns}**, N* tol = **{nt}**" + tail, ""]
+            md += ["", nstar_line(rs, nmap, k, v), ""]
     md += ["## Suvestinė — didžiausias N (N*), kai visi mažesni PASS", "",
            "Reikšmė „griežtai / tol“. Skliaustuose — praleistos didesnės pakopos (VRAM / rankinė perklasifikacija); tokiu atveju N* nėra "
            "talpos riba. Pakopos, kurių nevykdė stop-after-fails taisyklė, nėra N* dalis.", "",
@@ -142,16 +168,32 @@ def composite_section(rows):
 
 
 def _selftest():
-    """N* turi nutrūkti ties NEDERINA pakopa: 1,2,4 PASS, 8 nederina, 16 PASS -> N* = 4 (ne 16)."""
+    """R23: NEDERINA niekada nėra PASS; N pasiekiamas tik per galiojantį PASS pakartojimą; uodegos pastabos nesiperrašo."""
     ok = lambda n: {"n": n, "pass": True, "pass_tol": True}
-    bad = {"n": 8, "pass": False, "pass_tol": False, "invalid_reason": "x"}
-    rows = [ok(1), ok(2), ok(4), bad, ok(16)]
-    assert nstar(rows, "pass") == 4 and nstar(rows, "pass_tol") == 4, (nstar(rows, "pass"), nstar(rows, "pass_tol"))
+    bad = lambda n, p=False: {"n": n, "pass": p, "pass_tol": p, "invalid_reason": "x"}
+    # (a) 1,2,4 PASS, 8 NEDERINA, 16 PASS -> N* = 4, uodega mini N=8 NEDERINA (nutrauktas)
+    a = [ok(1), ok(2), ok(4), bad(8), ok(16)]
+    assert nstar(a, "pass") == 4 and nstar(a, "pass_tol") == 4, (nstar(a, "pass"), nstar(a, "pass_tol"))
+    la = nstar_line(a, {}, 1, "G")
+    assert "**4**" in la and "N=8 NEDERINA — N* nutrauktas" in la, la
+    # NEDERINA eilutė su klaidingu pass=True vis tiek nelaikoma PASS
+    assert nstar([ok(1), ok(2), ok(4), bad(8, True), ok(16)], "pass") == 4
+    # (b) tas pats + galiojantis PASS pakartojimas ties 8 -> N* = 16, uodega anotuoja
+    b = a + [ok(8)]
+    assert nstar(b, "pass") == 16 and nstar(b, "pass_tol") == 16, (nstar(b, "pass"), nstar(b, "pass_tol"))
+    lb = nstar_line(b, {}, 1, "G")
+    assert "**16**" in lb and "N=8 NEDERINA (galiojantis pakartojimas PASS)" in lb and "nutrauktas" not in lb, lb
+    # (c) ir praleista, ir NEDERINA pakopa toje pačioje (K, variantas) -> abi pastabos
+    c = [ok(1), bad(2), ok(4), {"n": 32, "skipped": True, "skip_reason": "VRAM"}]
+    lc = nstar_line(c, {}, 4, "G")
+    assert "N=2 NEDERINA" in lc and "N=32 praleista" in lc, lc
     assert nstar([ok(1), ok(2), ok(4), ok(8), ok(16)], "pass") == 16
-    print("selftest OK: N* nutrūksta ties NEDERINA (4), be jos 16")
+    print("selftest OK: (a) N*=4, N=8 NEDERINA; (b) N*=16 su galiojanciu pakartojimu; (c) NEDERINA + praleista abi pastabos")
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # LT diakritikai Windows cp1252 konsolėje
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         return _selftest()
     out = sys.argv[1]
