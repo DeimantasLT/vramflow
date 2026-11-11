@@ -969,6 +969,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in startstop.TESTS.items()})
     import avsync  # A/V sinchronizacija po prarastų kadrų (favsync_drop, favsync_restart)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in avsync.TESTS.items()})
+    import golden  # „auksiniai“ regresijos vartai (fgold_logo, fgold_composite, fgold_dec)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in golden.TESTS.items()})
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):

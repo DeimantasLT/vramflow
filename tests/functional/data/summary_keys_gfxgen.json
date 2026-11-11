@@ -1,0 +1,43 @@
+{
+ "role": "gfxgen",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "geom",
+   "hist",
+   "impl",
+   "last_index",
+   "layers",
+   "mode",
+   "proc",
+   "role",
+   "run_id",
+   "storage",
+   "versions"
+  ],
+  "proc": [
+   "clock_steps"
+  ],
+  "hist": [],
+  "flows": [
+   "commits",
+   "expected_fields"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [],
+  "hist": [],
+  "flows": [
+   "errors",
+   "missed",
+   "submits"
+  ]
+ }
+}

@@ -1,0 +1,53 @@
+{
+ "role": "dec",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "proc",
+   "role",
+   "run_id",
+   "versions"
+  ],
+  "proc": [
+   "clock_back_ms",
+   "clock_steps"
+  ],
+  "hist": [
+   "out_lateness",
+   "split_ms"
+  ],
+  "flows": [
+   "clock_drift_dropped_frames",
+   "clock_overflow_drops",
+   "decode_errors",
+   "flag_mismatch",
+   "frames_decoded",
+   "pkts",
+   "pkts_corrupt",
+   "pts_gap_frames",
+   "send_eagain",
+   "startup_overflow_drops"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [
+   "clock_backward"
+  ],
+  "hist": [],
+  "flows": [
+   "fields_ok",
+   "startup_discard",
+   "waiting_buffer",
+   "warmup_underrun_fields"
+  ]
+ }
+}

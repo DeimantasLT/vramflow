@@ -1,0 +1,37 @@
+{
+ "role": "logo",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "proc",
+   "role",
+   "run_id",
+   "versions"
+  ],
+  "proc": [],
+  "hist": [
+   "out_lateness",
+   "proc_ms",
+   "wait_ms"
+  ],
+  "flows": [
+   "reattached"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [],
+  "hist": [],
+  "flows": [
+   "fields_ok"
+  ]
+ }
+}

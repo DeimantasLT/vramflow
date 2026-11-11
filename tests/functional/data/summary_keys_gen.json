@@ -1,0 +1,38 @@
+{
+ "role": "gen",
+ "runs": 12,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "proc",
+   "role",
+   "run_id",
+   "versions"
+  ],
+  "proc": [
+   "clock_steps"
+  ],
+  "hist": [
+   "commit_lateness",
+   "gen_ms"
+  ],
+  "flows": []
+ },
+ "optional": {
+  "top": [],
+  "proc": [
+   "late_skips"
+  ],
+  "hist": [],
+  "flows": [
+   "fields_written"
+  ]
+ }
+}

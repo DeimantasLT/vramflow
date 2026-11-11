@@ -1,0 +1,54 @@
+{
+ "role": "verify-composite",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "proc",
+   "role",
+   "run_id",
+   "versions"
+  ],
+  "proc": [
+   "capacity_errors",
+   "samples_total",
+   "verification_errors"
+  ],
+  "hist": [
+   "expect_ms"
+  ],
+  "flows": [
+   "check_dropped",
+   "chroma_low",
+   "cuda_errors",
+   "dec_mismatch",
+   "dec_mismatch_near_loop",
+   "expect_failed",
+   "invalid",
+   "marker_bad",
+   "mismatch_fields",
+   "missing",
+   "outside_diff_fields",
+   "parity_mismatch",
+   "present",
+   "read_errors",
+   "ref_marker_unknown",
+   "samples",
+   "too_late",
+   "verify_skipped"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [],
+  "hist": [],
+  "flows": []
+ }
+}

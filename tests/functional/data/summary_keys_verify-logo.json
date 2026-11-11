@@ -1,0 +1,53 @@
+{
+ "role": "verify-logo",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "proc",
+   "role",
+   "run_id",
+   "versions"
+  ],
+  "proc": [
+   "capacity_errors",
+   "samples_total",
+   "verification_errors"
+  ],
+  "hist": [],
+  "flows": [
+   "chroma_low",
+   "cuda_errors",
+   "dec_mismatch",
+   "dec_mismatch_near_loop",
+   "expect_failed",
+   "in_reattached",
+   "invalid",
+   "marker_bad",
+   "mismatch_fields",
+   "missing",
+   "outside_diff_fields",
+   "parity_mismatch",
+   "present",
+   "read_errors",
+   "reattached",
+   "ref_marker_unknown",
+   "samples",
+   "too_late",
+   "verify_skipped"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [],
+  "hist": [],
+  "flows": []
+ }
+}
