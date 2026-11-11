@@ -34,11 +34,17 @@ extern "C" {
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
 #include "runtime/input_slot.hpp"
+#include "timing/audio_timeline.hpp"
 
 namespace mxlv::func {
 namespace {
 
 constexpr int kQueueMax = 4;
+// Vien garso elementų (kai kadro video atmestas, o jo garsas vis tiek koduojamas) atsarga virš kQueueMax: jie maži (~15 KB),
+// bet eilė vis tiek ribota — užstrigus darbininkui garsas praleidžiamas, o spraga užpildoma tyla (AudioTimeline).
+constexpr int kQueueAudioOnlyMax = 2 * kQueueMax;
+// Ilgiausia spraga, užpildoma tyla (mėginiais, 1 s): apima atmestus kadrus ir trumpus šuolius; ilgesnė — perinkaravimas.
+constexpr std::int64_t kMaxSilenceSamples = 48000;
 
 std::string averr(int e) {
     char b[AV_ERROR_MAX_STRING_SIZE]{};
@@ -47,7 +53,7 @@ std::string averr(int e) {
 }
 
 struct Item {
-    AVFrame* video = nullptr;  // CUDA (nvenc) arba NV12 sistemos atmintyje (x264); pts = F
+    AVFrame* video = nullptr;  // CUDA (nvenc) arba NV12 sistemos atmintyje (x264); pts = F; nullptr — tik garsas
     std::vector<float> l, r;   // kadro mėginiai [sample_begin(kadrų dažnis, F), sample_begin(…, F + 1))
     std::int64_t frame = 0;
     std::uint64_t t_ready = 0;  // TAI, kada kadras paruoštas (latencijai)
@@ -66,6 +72,8 @@ struct Stream {
     // statistika (rašo darbininkas; skaitoma po join)
     std::uint64_t frames_encoded = 0, packets_video = 0, packets_audio = 0, bytes_video = 0, mux_errors = 0, encode_errors = 0;
     Histogram encode_ms;
+    // Garso laiko juosta (PTS iš kadro indekso): srauto būsena, ne funkcijos static — keli srautai vienoje gijoje nesusimaišo.
+    mxlv::timing::AudioTimeline audio_tl;
     // x264 staging
     std::uint8_t* d_stage = nullptr;  // device NV12 pitch = plotis
     std::vector<std::uint8_t*> pinned;  // laisvi host buferiai
@@ -105,6 +113,38 @@ AVFrame* wrap_pinned(const Ctx& cx, Stream& s, std::uint8_t* buf) {
     f->linesize[0] = cx.w;
     f->linesize[1] = cx.w;
     return f;
+}
+
+// Vienas AAC kadras iš FIFO su nurodytu PTS (mėginiais, 1/48000) → koderis → mux.
+void encode_audio(AVCodecContext* ac, AVAudioFifo* fifo, AVFormatContext* oc, AVPacket* pkt, Stream& s, std::int64_t pts) {
+    AVFrame* af = av_frame_alloc();
+    af->nb_samples = ac->frame_size;
+    af->format = AV_SAMPLE_FMT_FLTP;
+    av_channel_layout_copy(&af->ch_layout, &ac->ch_layout);
+    af->sample_rate = 48000;
+    av_frame_get_buffer(af, 0);
+    av_audio_fifo_read(fifo, reinterpret_cast<void**>(af->data), ac->frame_size);
+    af->pts = pts;
+    if (avcodec_send_frame(ac, af) >= 0)
+        while (avcodec_receive_packet(ac, pkt) == 0) {
+            ++s.packets_audio;
+            pkt->stream_index = 1;
+            av_packet_rescale_ts(pkt, ac->time_base, oc->streams[1]->time_base);
+            if (av_interleaved_write_frame(oc, pkt) < 0) ++s.mux_errors;
+        }
+    av_frame_free(&af);
+}
+
+// n tylos mėginių į FIFO (abu kanalai).
+void write_silence(AVAudioFifo* fifo, std::int64_t n) {
+    static const std::vector<float> zeros(4800, 0.f);  // tik skaitoma
+    while (n > 0) {
+        const int k = static_cast<int>(std::min<std::int64_t>(n, static_cast<std::int64_t>(zeros.size())));
+        float* z = const_cast<float*>(zeros.data());  // av_audio_fifo_write neketina rašyti į šaltinį
+        float* planes[2] = {z, z};
+        av_audio_fifo_write(fifo, reinterpret_cast<void**>(planes), k);
+        n -= k;
+    }
 }
 
 void worker(Ctx& cx, Stream& s) {
@@ -185,6 +225,7 @@ void worker(Ctx& cx, Stream& s) {
         ac->time_base = {1, 48000};
         if ((e = avcodec_open2(ac, acodec, nullptr)) < 0) { fail("aac avcodec_open2: " + averr(e)); goto out; }
         fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, 2, 48000);
+        s.audio_tl = mxlv::timing::AudioTimeline(ac->frame_size, kMaxSilenceSamples);
     }
     // --- mux
     {
@@ -220,45 +261,39 @@ void worker(Ctx& cx, Stream& s) {
             it = std::move(s.q.front());
             s.q.pop_front();
         }
-        it.video->pts = it.frame;
-        const std::uint64_t t0 = now_tai();
-        e = avcodec_send_frame(vc, it.video);
-        av_frame_free(&it.video);
-        if (e < 0) { ++s.encode_errors; continue; }
-        while ((e = avcodec_receive_packet(vc, pkt)) == 0) {
-            ++s.packets_video;
-            s.bytes_video += pkt->size;
-            pkt->stream_index = 0;
-            av_packet_rescale_ts(pkt, vc->time_base, oc->streams[0]->time_base);
-            if (av_interleaved_write_frame(oc, pkt) < 0) ++s.mux_errors;
-        }
-        s.encode_ms.add(now_tai() - t0);
-        ++s.frames_encoded;
-        if (ac) {
-            float* planes[2] = {it.l.data(), it.r.data()};
-            av_audio_fifo_write(fifo, reinterpret_cast<void**>(planes), static_cast<int>(it.l.size()));
-            // fifo pradžios mėginio indeksas: pirmo kadro sample_begin (toliau — tolydžiai)
-            static thread_local std::int64_t next_sample = -1;
-            if (next_sample < 0) next_sample = static_cast<std::int64_t>(vramflow::sample_begin(o.fmt.frame_rate, static_cast<std::uint64_t>(it.frame)));
-            while (av_audio_fifo_size(fifo) >= ac->frame_size) {
-                AVFrame* af = av_frame_alloc();
-                af->nb_samples = ac->frame_size;
-                af->format = AV_SAMPLE_FMT_FLTP;
-                av_channel_layout_copy(&af->ch_layout, &ac->ch_layout);
-                af->sample_rate = 48000;
-                av_frame_get_buffer(af, 0);
-                av_audio_fifo_read(fifo, reinterpret_cast<void**>(af->data), ac->frame_size);
-                af->pts = next_sample;
-                next_sample += ac->frame_size;
-                if (avcodec_send_frame(ac, af) >= 0)
-                    while (avcodec_receive_packet(ac, pkt) == 0) {
-                        ++s.packets_audio;
-                        pkt->stream_index = 1;
-                        av_packet_rescale_ts(pkt, ac->time_base, oc->streams[1]->time_base);
-                        if (av_interleaved_write_frame(oc, pkt) < 0) ++s.mux_errors;
-                    }
-                av_frame_free(&af);
+        if (it.video) {
+            it.video->pts = it.frame;
+            const std::uint64_t t0 = now_tai();
+            e = avcodec_send_frame(vc, it.video);
+            av_frame_free(&it.video);
+            if (e < 0) ++s.encode_errors;
+            else {
+                while ((e = avcodec_receive_packet(vc, pkt)) == 0) {
+                    ++s.packets_video;
+                    s.bytes_video += pkt->size;
+                    pkt->stream_index = 0;
+                    av_packet_rescale_ts(pkt, vc->time_base, oc->streams[0]->time_base);
+                    if (av_interleaved_write_frame(oc, pkt) < 0) ++s.mux_errors;
+                }
+                s.encode_ms.add(now_tai() - t0);
+                ++s.frames_encoded;
             }
+        }
+        if (ac && !it.l.empty()) {
+            // PTS iš kadro indekso (ne skaitiklis): kadro F mėginiai — [sample_begin(F), sample_begin(F + 1)). Spraga po
+            // atmestų / praleistų kadrų — tyla arba perinkaravimas (timing/audio_timeline.hpp), todėl A/V poslinkis nesikaupia.
+            const auto begin = static_cast<std::int64_t>(vramflow::sample_begin(o.fmt.frame_rate, static_cast<std::uint64_t>(it.frame)));
+            const mxlv::timing::AudioPlan p = s.audio_tl.submit(begin, static_cast<std::int64_t>(it.l.size()));
+            if (p.flush_frames) {
+                write_silence(fifo, p.flush_pad);
+                for (std::int64_t k = 0; k < p.flush_frames; ++k) encode_audio(ac, fifo, oc, pkt, s, p.flush_pts + k * ac->frame_size);
+            }
+            write_silence(fifo, p.silence);
+            if (p.skip < static_cast<std::int64_t>(it.l.size())) {
+                float* planes[2] = {it.l.data() + p.skip, it.r.data() + p.skip};
+                av_audio_fifo_write(fifo, reinterpret_cast<void**>(planes), static_cast<int>(static_cast<std::int64_t>(it.l.size()) - p.skip));
+            }
+            while (s.audio_tl.ready()) encode_audio(ac, fifo, oc, pkt, s, s.audio_tl.take());
         }
     }
     avcodec_send_frame(vc, nullptr);
@@ -418,6 +453,45 @@ int run_enc(const Opts& o) {
     std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
     ClockWatch cw;
     cw.stepped();
+    // Kadro F garsas į item.l / item.r (true — perskaitytas). wait — kartoti iki termino: gen garsą rašo iškart po video
+    // commit'o (trumpas pakartojimas — ne underrun dėl lenktynių).
+    auto read_audio = [&](std::uint32_t n, Item& item, std::uint64_t deadline, bool wait) {
+        // kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602
+        const std::uint64_t a_end = vramflow::sample_begin(o.fmt.frame_rate, F + 1);
+        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(o.fmt.frame_rate, F));
+        item.l = std::move(al[n]);
+        item.r = std::move(ar[n]);
+        item.l.resize(a_count);
+        item.r.resize(a_count);
+        mxlStatus as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
+        while (wait && as != MXL_STATUS_OK && now_tai() < deadline && !stop.load()) {
+            mxlSleepForNs(500'000);
+            as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
+        }
+        al[n].clear();
+        ar[n].clear();
+        return as == MXL_STATUS_OK;
+    };
+    // Kadro video atmestas — jo garsas vis tiek koduojamas (radinys 2: kitaip garso laiko juosta trumpėja ir lūpų
+    // sinchronas slenka). Garso neperskaičius ar eilei perpildžius — praleidžiama: darbininkas spragą užpildys tyla.
+    auto push_audio_only = [&](std::uint32_t n, Item&& item) {
+        av_frame_free(&item.video);
+        if (item.l.empty()) return;
+        Stream& s = *streams[n];
+        {
+            std::lock_guard g(s.m);
+            if (s.q.size() >= kQueueAudioOnlyMax) return;
+            s.q.push_back(std::move(item));
+        }
+        s.cv.notify_one();
+        st.flows[n].inc("audio_only_frames");
+    };
+    auto audio_of_dropped = [&](std::uint32_t n) {
+        if (ain.empty()) return;
+        Item item;
+        item.frame = static_cast<std::int64_t>(F);
+        if (read_audio(n, item, 0, false)) push_audio_only(n, std::move(item));
+    };
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
         // interlaced: kadras F = laukai 2F, 2F+1; progresyvus: kadras F = grain'as F (i_top == i_bot)
@@ -472,13 +546,18 @@ int run_enc(const Opts& o) {
         job_flow.clear();
         job_frame.clear();
         for (std::uint32_t n = 0; n < o.flows; ++n) {
-            if (state[n] == 0) { st.flows[n].inc("late_frames"); continue; }
-            if (state[n] != 1) continue;
+            if (state[n] == 0) { st.flows[n].inc("late_frames"); audio_of_dropped(n); continue; }
+            if (state[n] != 1) { audio_of_dropped(n); continue; }
             AVFrame* f = nullptr;
             media::WeaveJob j{top[n], bot[n], nullptr, nullptr};
             if (nvenc) {
                 f = av_frame_alloc();
-                if (av_hwframe_get_buffer(cx.frames[n], f, 0) < 0) { av_frame_free(&f); st.flows[n].inc("frame_alloc_errors"); continue; }
+                if (av_hwframe_get_buffer(cx.frames[n], f, 0) < 0) {
+                    av_frame_free(&f);
+                    st.flows[n].inc("frame_alloc_errors");
+                    audio_of_dropped(n);
+                    continue;
+                }
                 j.dst_y = f->data[0];
                 j.dst_uv = f->data[1];
                 if (!jobs.empty() && f->linesize[0] != job_frame[0]->linesize[0]) { st.fatal = "skirtingi pitch"; rc = 2; av_frame_free(&f); break; }
@@ -533,10 +612,11 @@ int run_enc(const Opts& o) {
                 st.flows[n].inc("lapped");
                 av_frame_free(&f);
                 if (host_bufs[k]) { std::lock_guard g(streams[n]->pool_m); streams[n]->pinned.push_back(host_bufs[k]); }
+                audio_of_dropped(n);
                 continue;
             }
             if (!nvenc) {
-                if (!host_bufs[k]) { st.flows[n].inc("frames_dropped_queue"); continue; }
+                if (!host_bufs[k]) { st.flows[n].inc("frames_dropped_queue"); audio_of_dropped(n); continue; }
                 f = wrap_pinned(cx, *streams[n], host_bufs[k]);
                 if (inter) f->flags |= AV_FRAME_FLAG_INTERLACED | AV_FRAME_FLAG_TOP_FIELD_FIRST;
             }
@@ -544,35 +624,19 @@ int run_enc(const Opts& o) {
             item.video = f;
             item.frame = static_cast<std::int64_t>(F);
             item.t_ready = t_ready;
-            if (!ain.empty()) {
-                // kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602
-                const std::uint64_t a_end = vramflow::sample_begin(o.fmt.frame_rate, F + 1);
-                const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(o.fmt.frame_rate, F));
-                item.l = std::move(al[n]);
-                item.r = std::move(ar[n]);
-                item.l.resize(a_count);
-                item.r.resize(a_count);
-                // gen garsą rašo iškart po video commit'o — trumpas pakartojimas iki termino (ne underrun dėl lenktynių)
-                mxlStatus as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
-                while (as != MXL_STATUS_OK && now_tai() < deadline && !stop.load()) {
-                    mxlSleepForNs(500'000);
-                    as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
-                }
-                if (as != MXL_STATUS_OK) {
-                    st.flows[n].inc("audio_underrun_frames");
-                    std::fill(item.l.begin(), item.l.end(), 0.f);
-                    std::fill(item.r.begin(), item.r.end(), 0.f);
-                }
-                al[n].clear();
-                ar[n].clear();
+            if (!ain.empty() && !read_audio(n, item, deadline, true)) {
+                st.flows[n].inc("audio_underrun_frames");
+                std::fill(item.l.begin(), item.l.end(), 0.f);
+                std::fill(item.r.begin(), item.r.end(), 0.f);
             }
             Stream& s = *streams[n];
             {
-                std::lock_guard g(s.m);
+                std::unique_lock g(s.m);
                 const bool test_drop = o.test_drop_every && t_ready >= test_drop_from && F % o.test_drop_every == 0;
                 if (s.q.size() >= kQueueMax || test_drop) {
-                    av_frame_free(&item.video);
+                    g.unlock();
                     st.flows[n].inc("frames_dropped_queue");
+                    push_audio_only(n, std::move(item));  // video atmestas, garsas — ne
                     continue;
                 }
                 s.q.push_back(std::move(item));
@@ -609,6 +673,11 @@ int run_enc(const Opts& o) {
         Stream& s = *streams[n];
         st.flows[n].inc("frames_encoded", s.frames_encoded);
         st.flows[n].inc("packets_audio", s.packets_audio);
+        if (o.audio) {  // garso laiko juosta: tyla spragoms, perinkaravimai, išmesti persidengę mėginiai (ne praradimai)
+            st.flows[n].inc("audio_silence_samples", s.audio_tl.silence_samples());
+            st.flows[n].inc("audio_reanchors", s.audio_tl.reanchors());
+            st.flows[n].inc("audio_skipped_samples", s.audio_tl.skipped_samples());
+        }
         st.flows[n].inc("encode_errors", s.encode_errors);
         st.flows[n].inc("mux_errors", s.mux_errors);
         st.hist["encode_ms"].merge(s.encode_ms);
