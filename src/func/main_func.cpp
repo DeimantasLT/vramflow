@@ -10,6 +10,7 @@ namespace mxlv::func {
 int run_gen(const Opts&);
 int run_gfxgen(const Opts&);
 int run_logo(const Opts&);
+int run_composite(const Opts&);
 int run_verify(const Opts&);
 int run_enc(const Opts&);
 int run_dec(const Opts&);
@@ -60,6 +61,16 @@ int main(int argc, char** argv) {
     l->add_option("--inject-every", o.inject_every);
     l->add_option("--deadline-ms", o.deadline_ms);
     l->add_option("--read-offset-us", o.read_offset_us);
+    auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
+    common(cp, o);
+    cp->add_option("--layers", o.layers, "grafikos sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
+    cp->add_option("--layer-xy", o.layer_xy, "X,Y (kadro koordinatės) kiekvienam sluoksniui, kartoti K kartų; X lyginis, interlaced Y lyginis");
+    cp->add_option("--opacity", o.opacity, "sluoksnio nepermatomumas 0…1 (K kartų; numatytasis 1)");
+    cp->add_option("--base", o.base, "gen (bazė flow_id(--in-role, n)) | none (tik su --out-format v210a)")->check(CLI::IsMember({"gen", "none"}));
+    cp->add_option("--out-format", o.out_format, "v210 | v210a")->check(CLI::IsMember({"v210", "v210a"}));
+    cp->add_option("--layer-flow", o.layer_flow, "K:UUID — k-tojo (0…K-1) sluoksnio flow ID (visiems išėjimams), pvz. kito composite išėjimas");
+    cp->add_option("--deadline-ms", o.deadline_ms);
+    cp->add_option("--read-offset-us", o.read_offset_us);
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
     v->add_option("--mode", o.mode, "logo | gen | dec");
@@ -103,6 +114,10 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("gen")) return run_gen(o);
     if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);
+    if (app.got_subcommand("composite")) {
+        o.out_alpha = o.out_format == "v210a";
+        return run_composite(o);
+    }
     if (app.got_subcommand("verify")) return run_verify(o);
     if (app.got_subcommand("enc")) return run_enc(o);
     if (app.got_subcommand("dec")) return run_dec(o);

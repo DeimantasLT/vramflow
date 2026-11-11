@@ -46,6 +46,13 @@ struct Opts {
     std::uint32_t layers = 1;        // K: grafikos sluoksnių (flow'ų) skaičius vienam šaltiniui, <= 8
     std::string layer_geom;          // "logo,full,full,full" (logo 384x216, full 1920x1080, arba WxH); tuščia = k=0 logo, kiti full
     std::string gfx_mode = "pace";   // pace | manual
+    // composite
+    std::vector<std::string> layer_xy;    // "X,Y" kiekvienam sluoksniui (K kartų)
+    std::vector<float> opacity;           // kiekvienam sluoksniui (tuščia = visi 1.0)
+    std::string base = "gen";             // gen | none
+    std::string out_format = "v210";      // v210 | v210a
+    bool out_alpha = false;               // išvestinis iš out_format
+    std::vector<std::string> layer_flow;  // "k:UUID" — k-tojo sluoksnio (0-based) flow ID perrašymas
     // verify
     std::string mode = "logo";
     std::uint32_t every = 25;

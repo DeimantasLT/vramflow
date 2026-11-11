@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Funkciniai gedimų testai (architektūra §6.1: F5a, F5b, F6a–d, F7, F8). Kiekvienas procesas — atskiras.
 
-Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1]  (vardai be didžiųjų/mažųjų skirtumo)
+Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1,fcomp1]  (vardai be didžiųjų/mažųjų skirtumo)
 Aplinka: VERIFY_BIN (senieji testai), FUNC_BIN + MXL_INFO (fgfx1 ir kiti vramflow-func testai).
 Rezultatas: <out_dir>/functional.json; išėjimas 0 tik jei nė vienas testas nėra FAIL.
 """
@@ -263,6 +263,271 @@ def fgfx1(out):
                           + (f" nerasti={bad}" if bad else "")))
     return res
 
+# --- composite (alfa kompozitorius, užduotis 8): fcomp1 / fcomp2 [PF-3] / fcomp3 / fcomp5 -----------------------------------
+# Variantai C (cpu+host), H (gpu+host), G (gpu+cuda-linear); aplinka FCOMP_VARIANTS=C,G apriboja.
+COMP_VARIANTS = [("C", "cpu", "host"), ("H", "gpu", "host"), ("G", "gpu", "cuda-linear")]
+
+
+# Įėjimų laukimo riba: gen / gfxgen (kiti procesai WSL2) kartais vėluoja > 15 ms (išmatuota: ~1 iš 3000 lauko-flow'ų), todėl
+# funkciniuose testuose 30 ms (kaip logo numatytoji); našumo matavimas (užduotis 10) naudoja 15.
+COMP_DEADLINE_MS = int(os.environ.get("FCOMP_DEADLINE_MS", "30"))
+
+
+def comp_variants():
+    want = [x for x in os.environ.get("FCOMP_VARIANTS", "").upper().split(",") if x]
+    return [v for v in COMP_VARIANTS if not want or v[0] in want]
+
+
+def role_flow_id(role, n):
+    return "4d584c47-%04d-4000-8000-%012x" % (role, n)
+
+
+class FProc:
+    """vramflow-func subkomanda kaip procesas (stderr į failą, summary-<role>.json out kataloge)."""
+
+    def __init__(self, out, tag, sub, domain, *args):
+        self.out = pathlib.Path(out) / tag
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.sub = sub
+        self.err_path = self.out / f"{sub}.err"
+        self.p = subprocess.Popen([FUNC_BIN, sub, "--domain", str(domain), "--out", str(self.out), *map(str, args)],
+                                  stdout=subprocess.DEVNULL, stderr=open(self.err_path, "w"), env=ENV)
+
+    def wait(self, timeout=None):
+        try:
+            return self.p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def term(self):
+        if self.p.poll() is None:
+            self.p.send_signal(signal.SIGTERM)
+        try:
+            return self.p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            return self.p.wait()
+
+    def kill9(self):
+        self.p.send_signal(signal.SIGKILL)
+        self.p.wait()
+
+    def summary(self):
+        f = self.out / f"summary-{self.sub}.json"
+        return json.loads(f.read_text()) if f.exists() else None
+
+
+def wait_flows(domain, ids, timeout=30):
+    """Laukia, kol visų flow'ų kataloguose atsiranda flow_def.json. True — visi atsirado."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if all((pathlib.Path(domain) / f"{i}.mxl-flow" / "flow_def.json").exists() for i in ids):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def flow_media_type(domain, fid):
+    f = pathlib.Path(domain) / f"{fid}.mxl-flow" / "flow_def.json"
+    return json.loads(f.read_text()).get("media_type") if f.exists() else None
+
+
+def flow_head(domain, fid):
+    """Flow head indeksas per mxl-info (None, jei neperskaitoma)."""
+    r = subprocess.run([MXL_INFO, "-d", str(domain), "-f", fid], capture_output=True, text=True, env=ENV)
+    for line in r.stdout.splitlines():
+        if "Head index" in line:
+            try:
+                return int(line.split(":")[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def flow_ctr(s, n):
+    return s["flows"][n] if s and len(s["flows"]) > n else {}
+
+
+def vcommon(impl, storage):
+    return ["--impl", impl, "--storage", storage]
+
+
+def fcomp1(out):
+    """gen + gfxgen(pace) + composite 2 išėjimai x 2 sluoksniai 10 s: išėjimo flow'ai yra, late_fields == 0."""
+    res = []
+    N, K, DUR = 2, 2, 10
+    for tag, impl, storage in comp_variants():
+        tid = f"fcomp1[{tag}]"
+        d = fresh_domain(f"fcomp1-{tag}")
+        v = vcommon(impl, storage)
+        g = FProc(out, f"fcomp1-{tag}", "gen", d, "--flows", N, "--duration", 60, *v)
+        x = FProc(out, f"fcomp1-{tag}", "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", "pace",
+                  "--duration", 60, *v)
+        ids = [role_flow_id(1, n) for n in range(N)] + [role_flow_id(5, n * 8 + k) for n in range(N) for k in range(K)]
+        c = None
+        seen = types = False
+        rc = None
+        try:
+            if not wait_flows(d, ids):
+                res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                continue
+            c = FProc(out, f"fcomp1-{tag}", "composite", d, "--flows", N, "--layers", K, "--layer-xy", "1488,64", "--layer-xy", "0,0",
+                      "--opacity", "1.0", "--opacity", "0.5", "--base", "gen", "--out-format", "v210", "--deadline-ms", COMP_DEADLINE_MS,
+                      "--duration", DUR, "--warmup", 2, *v)
+            out_ids = [role_flow_id(6, n) for n in range(N)]
+            seen = wait_flows(d, out_ids, 20)
+            types = seen and all(flow_media_type(d, i) == "video/v210" for i in out_ids)
+            rc = c.wait(timeout=DUR + 40)
+        finally:
+            for pr in (c, x, g):
+                if pr is not None:
+                    pr.term()
+        s = c.summary() if c else None
+        fl = [flow_ctr(s, n) for n in range(N)]
+        late = [f.get("late_fields", 0) for f in fl]
+        okc = [f.get("fields_ok", 0) for f in fl]
+        ok = (rc == 0 and seen and types and s is not None and all(l == 0 for l in late) and all(o >= 0.9 * DUR * 50 for o in okc))
+        res.append(result(tid, "PASS" if ok else "FAIL",
+                          why=f"exit={rc} išėjimo flow'ai={seen} v210={types} late_fields={late} fields_ok={okc} "
+                              f"proc_ms={(s or {}).get('hist', {}).get('proc_ms')}", composite=s))
+    return res
+
+
+def fcomp2(out):
+    """[PF-3] gfxgen užmušamas 2 s ir paleidžiamas iš naujo: composite neišeina, reopened >= 1, išėjimai vėl commit'inami."""
+    res = []
+    DUR = 18
+    for tag, impl, storage in comp_variants():
+        tid = f"fcomp2[{tag}]"
+        d = fresh_domain(f"fcomp2-{tag}")
+        v = vcommon(impl, storage)
+        gen_args = ["--flows", 1, "--duration", 80, *v]
+        gx_args = ["--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace", "--duration", 80, *v]
+        g = FProc(out, f"fcomp2-{tag}", "gen", d, *gen_args)
+        x = FProc(out, f"fcomp2-{tag}/a", "gfxgen", d, *gx_args)
+        x2 = c = None
+        rc = None
+        alive_during = False
+        head_before = h1 = h2 = None
+        try:
+            if not wait_flows(d, [role_flow_id(1, 0), role_flow_id(5, 0)]):
+                res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                continue
+            c = FProc(out, f"fcomp2-{tag}", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "1488,64", "--base", "gen",
+                      "--out-format", "v210", "--deadline-ms", COMP_DEADLINE_MS, "--duration", DUR, "--warmup", 1, *v)
+            wait_flows(d, [role_flow_id(6, 0)], 20)
+            time.sleep(3)
+            head_before = flow_head(d, role_flow_id(6, 0))
+            x.kill9()
+            time.sleep(2)
+            alive_during = c.p.poll() is None
+            x2 = FProc(out, f"fcomp2-{tag}/b", "gfxgen", d, *gx_args)
+            time.sleep(5)
+            h1 = flow_head(d, role_flow_id(6, 0))
+            time.sleep(2)
+            h2 = flow_head(d, role_flow_id(6, 0))
+            rc = c.wait(timeout=DUR + 40)
+        finally:
+            for pr in (c, x2, x, g):
+                if pr is not None:
+                    pr.term()
+        s = c.summary() if c else None
+        f0 = flow_ctr(s, 0)
+        advancing = h1 is not None and h2 is not None and h2 - h1 >= 80  # 2 s = 100 laukų
+        ok = (alive_during and rc in (0, 4) and s is not None and f0.get("reopened", 0) >= 1 and advancing
+              and f0.get("fields_ok", 0) > 0)
+        res.append(result(tid, "PASS" if ok else "FAIL",
+                          why=f"gyvas per outage={alive_during} exit={rc} reopened={f0.get('reopened')} flow_invalid={f0.get('flow_invalid')} "
+                              f"missing={f0.get('missing_fields')} head po paleidimo {h1}->{h2} (prieš outage {head_before}) "
+                              f"fields_ok={f0.get('fields_ok')}", composite=f0))
+    return res
+
+
+def fcomp3(out):
+    """--base none --out-format v210a be gen; neteisingos konfigūracijos atmetamos aiškia klaida (R12, R1)."""
+    res = []
+    DUR = 8
+    for tag, impl, storage in comp_variants():
+        tid = f"fcomp3[{tag}]"
+        d = fresh_domain(f"fcomp3-{tag}")
+        v = vcommon(impl, storage)
+        x = FProc(out, f"fcomp3-{tag}", "gfxgen", d, "--flows", 1, "--layers", 2, "--layer-geom", "logo,full", "--mode", "pace",
+                  "--duration", 60, *v)
+        c = None
+        r12rc = r1rc = rc = mt = None
+        try:
+            if not wait_flows(d, [role_flow_id(5, 0), role_flow_id(5, 1)]):
+                res.append(result(tid, "FAIL", why="gfxgen flow'ai neatsirado"))
+                continue
+            # R12: be bazės tik v210a
+            r12 = FProc(out, f"fcomp3-{tag}/r12", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "0,0", "--base", "none",
+                        "--out-format", "v210", "--duration", 3, *v)
+            r12rc = r12.wait(timeout=30)
+            # R1: nelyginis y interlaced rastre atmetamas pradžioje
+            r1 = FProc(out, f"fcomp3-{tag}/r1", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "0,33", "--base", "none",
+                       "--out-format", "v210a", "--duration", 3, *v)
+            r1rc = r1.wait(timeout=30)
+            c = FProc(out, f"fcomp3-{tag}", "composite", d, "--flows", 1, "--layers", 2, "--layer-xy", "1488,64", "--layer-xy", "0,0",
+                      "--opacity", "0.8", "--opacity", "1", "--base", "none", "--out-format", "v210a", "--deadline-ms", COMP_DEADLINE_MS, "--duration", DUR,
+                      "--warmup", 1, *v)
+            seen = wait_flows(d, [role_flow_id(6, 0)], 20)
+            mt = flow_media_type(d, role_flow_id(6, 0)) if seen else None
+            rc = c.wait(timeout=DUR + 40)
+        finally:
+            for pr in (c, x):
+                if pr is not None:
+                    pr.term()
+        s = c.summary() if c else None
+        f0 = flow_ctr(s, 0)
+        ok = (r12rc == 1 and r1rc == 1 and rc == 0 and mt == "video/v210a" and f0.get("late_fields", 0) == 0
+              and f0.get("fields_ok", 0) >= 0.9 * DUR * 50)
+        res.append(result(tid, "PASS" if ok else "FAIL",
+                          why=f"R12 exit={r12rc} R1 exit={r1rc}; be gen: exit={rc} media_type={mt} late_fields={f0.get('late_fields')} "
+                              f"fields_ok={f0.get('fields_ok')}", composite=f0))
+    return res
+
+
+def fcomp5(out):
+    """Grandinė: composite(--base none, v210a) išėjimas = sluoksnis antram composite su gen baze (--layer-flow)."""
+    res = []
+    DUR = 10
+    for tag, impl, storage in comp_variants():
+        tid = f"fcomp5[{tag}]"
+        d = fresh_domain(f"fcomp5-{tag}")
+        v = vcommon(impl, storage)
+        # gen n=1 antram composite (flow-base 1); gfxgen n=0 pirmam
+        g = FProc(out, f"fcomp5-{tag}", "gen", d, "--flows", 1, "--flow-base", 1, "--duration", 80, *v)
+        x = FProc(out, f"fcomp5-{tag}", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace",
+                  "--duration", 80, *v)
+        c1 = c2 = None
+        rc1 = rc2 = None
+        try:
+            if not wait_flows(d, [role_flow_id(1, 1), role_flow_id(5, 0)]):
+                res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                continue
+            c1 = FProc(out, f"fcomp5-{tag}/c1", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "1488,64", "--base", "none",
+                       "--out-format", "v210a", "--deadline-ms", COMP_DEADLINE_MS, "--duration", DUR + 12, "--warmup", 1, *v)
+            if not wait_flows(d, [role_flow_id(6, 0)], 30):
+                res.append(result(tid, "FAIL", why="pirmo composite išėjimas neatsirado"))
+                continue
+            c2 = FProc(out, f"fcomp5-{tag}/c2", "composite", d, "--flows", 1, "--flow-base", 1, "--layers", 1, "--layer-xy", "0,0",
+                       "--layer-flow", "0:" + role_flow_id(6, 0), "--base", "gen", "--out-format", "v210", "--deadline-ms", COMP_DEADLINE_MS,
+                       "--duration", DUR, "--warmup", 1, *v)
+            rc2 = c2.wait(timeout=DUR + 40)
+            rc1 = c1.wait(timeout=40)
+        finally:
+            for pr in (c2, c1, x, g):
+                if pr is not None:
+                    pr.term()
+        s1, s2 = c1.summary() if c1 else None, c2.summary() if c2 else None
+        f1, f2 = flow_ctr(s1, 0), flow_ctr(s2, 0)
+        ok = (rc1 == 0 and rc2 == 0 and f1.get("late_fields", 0) == 0 and f2.get("late_fields", 0) == 0
+              and f1.get("fields_ok", 0) >= 0.9 * DUR * 50 and f2.get("fields_ok", 0) >= 0.9 * DUR * 50)
+        res.append(result(tid, "PASS" if ok else "FAIL",
+                          why=f"c1 exit={rc1} late={f1.get('late_fields')} ok={f1.get('fields_ok')}; c2 exit={rc2} "
+                              f"late={f2.get('late_fields')} ok={f2.get('fields_ok')}", c1=f1, c2=f2))
+    return res
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -273,7 +538,8 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
-             "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out)}
+             "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
+             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp5": lambda: fcomp5(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):
