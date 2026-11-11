@@ -305,7 +305,7 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 |---|---|---|
 | `gen` | — → N video (+ audio) flows, v210 in `--format` (default 1080i50), moving test pattern | `--complexity 0–3`, `--audio` |
 | `logo` | N video flows → N video flows with a logo | `--logo builtin\|file.png`, `--logo-x`, `--logo-y`, `--deadline-ms` |
-| `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software) | `--port-base`, `--playout-frames` |
+| `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software) | `--port-base`, `--playout-frames`, `--chroma-siting auto\|field\|frame` |
 | `enc` | N video (+ audio) flows → H.264 + AAC MPEG-TS over UDP (NVENC or x264) | `--encoder nvenc\|x264`, `--vbitrate`, `--abitrate`, `--port-base` |
 | `gfxgen` | — → N × K synthetic graphics flows (`v210a`) | `--layers K`, `--layer-geom logo,full,…\|WxH`, `--mode pace\|manual` |
 | `composite` | base video + K graphics flows → `v210` or `v210a` | `--layers`, `--layer-xy X,Y` (×K), `--opacity 0–1` (×K), `--base gen\|none`, `--out-format`, `--layer-flow K:UUID` |
@@ -333,12 +333,15 @@ Every flow has an explicit format: raster, scan and frame rate (`--format`, the 
   A reader checks that the flow's grain rate matches the expected format and names both rates if not.
 - Progressive 4:2:0 → 4:2:2 uses frame chroma (type-0 siting, `split_nv12_progressive`); interlaced uses field chroma.
   `dec` picks the path per decoded frame from its interlaced flag, so a progressive frame in an interlaced flow is still
-  converted with frame chroma. Measured against FFmpeg (`tests/perf/chroma_psnr.py`): U/V ≥ 60 dB, luma identical.
+  converted with frame chroma (`dec --chroma-siting auto`). Our own `enc --encoder nvenc` cannot field-encode on this GPU:
+  its 1080i streams are flagged progressive but carry field chroma, so decode them with `dec --chroma-siting field`
+  (x264 streams are flagged correctly). Against FFmpeg's bilinear swscale (`tests/perf/chroma_psnr.py`) the progressive
+  path is bit-exact.
 - Audio samples per grain are exact integers: `[sample_begin(i), sample_begin(i + 1))` — 960 per 1080i50 field,
   1920 per 1080p25 frame, 800 / 801 at 59.94.
-- Tested end to end: 1080i50, 1080p25 and 1080p50 for `gen`, `logo`, `verify`, `enc`, `dec`; `gfxgen` / `composite` at
-  50/1 grain rate only (1080i50, 1080p50) — `libvramflow-gfx` still accepts only 50/1 (R9). Other listed formats pass the unit
-  and kernel tests (720p, 2160p, 59.94) but have no end-to-end test yet. BFF and other rates are rejected with a message.
+- Tested end to end: 1080i50, 1080p25 and 1080p50 for every function (`gen`, `logo`, `verify`, `enc`, `dec`, `gfxgen`,
+  `composite`), 720p50 for `logo`. Other listed formats pass the unit and kernel tests (720p, 2160p, 59.94) but have no
+  end-to-end test yet. `libvramflow-gfx` accepts every listed rate. BFF and other rates are rejected with a message.
 - The MXL ring keeps 200 ms by default (10 fields of 1080i50, only 5 frames of 1080p25); set
   `urn:x-mxl:option:history_duration/v1.0` in the domain's `options.json` for a deeper ring.
 

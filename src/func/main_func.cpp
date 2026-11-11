@@ -89,6 +89,7 @@ int main(int argc, char** argv) {
     v->add_option("--every", o.every);
     v->add_option("--lag-fields", o.lag_fields);
     v->add_option("--ref", o.ref_crc);
+    v->add_option("--min-chroma-db", o.min_chroma_db, "dec: Cb/Cr PSNR prieš gen etaloną (šaltinio indeksas iš barkodo) >= riba; 0 — netikrinama");
     auto* e = app.add_subcommand("enc", "MXL → H.264 + AAC MPEG-TS per UDP");
     common(e, o);
     e->add_option("--encoder", o.encoder, "nvenc | x264");
@@ -108,6 +109,8 @@ int main(int argc, char** argv) {
     common(d, o);
     d->add_option("--port-base", o.port_base);
     d->add_option("--playout-frames", o.playout_frames);
+    d->add_option("--chroma-siting", o.chroma_siting, "interlaced flow'ui: auto (pagal kadro žymę) | field | frame")
+        ->check(CLI::IsMember({"auto", "field", "frame"}));
     std::uint32_t clip_frames = 250;
     std::uint64_t clip_first = 1000;
     auto* cl = app.add_subcommand("clip", "bandomojo klipo raw NV12 kadrai į stdout (CPU etalonas)");

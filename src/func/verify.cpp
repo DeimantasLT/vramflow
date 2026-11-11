@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -63,7 +64,7 @@ int summarize(Stats& st) {
     std::uint64_t verify_err = 0, capacity = 0, samples = 0;
     for (auto& f : st.flows) {
         verify_err += f.c["mismatch_fields"] + f.c["outside_diff_fields"] + f.c["marker_bad"] + f.c["cuda_errors"] +
-                      f.c["parity_mismatch"] + f.c["dec_mismatch"] + f.c["dec_mismatch_near_loop"] + f.c["ref_marker_unknown"] +
+                      f.c["parity_mismatch"] + f.c["dec_mismatch"] + f.c["dec_mismatch_near_loop"] + f.c["ref_marker_unknown"] + f.c["chroma_low"] +
                       f.c["expect_failed"];
         capacity += f.c["missing"] + f.c["too_late"] + f.c["invalid"] + f.c["read_errors"] + f.c["verify_skipped"];
         samples += f.c["samples"];
@@ -399,6 +400,33 @@ int run_verify(const Opts& o_in) {
                 // pasekmė (jis jau užskaitytas dec pusėje), todėl informacinis. Lauko tvarkos klaida — parity_mismatch.
                 if (seq_offset[n] == INT64_MIN) seq_offset[n] = off;
                 else if (off != seq_offset[n]) { f.inc("seq_jump"); seq_offset[n] = off; }
+                if (o.min_chroma_db > 0) {
+                    // Chroma prieš gen etaloną: šaltinio indeksas — iš barkodo (24 žemesni bitai, artimiausias i); lauko
+                    // chroma su kadro chroma (ar atvirkščiai) maišo skirtingų indeksų laukų triukšmą — PSNR krenta.
+                    std::uint64_t src = (i & ~std::uint64_t{0xFFFFFF}) | (mk & 0xFFFFFFu);
+                    if (src > i + 0x800000) src -= 0x1000000;
+                    else if (src + 0x800000 < i) src += 0x1000000;
+                    media::ref::gen_field(gen_params(o, o.flow_base + n), src, dim, inter, ref.data());
+                    double se = 0;
+                    std::uint64_t cnt = 0;
+                    for (int j = 0; j < static_cast<int>(gwords / static_cast<std::size_t>(words)); ++j)
+                        for (int g = 0; 6 * g + 6 <= dim.w; ++g) {
+                            media::Group a, b;
+                            media::unpack_group(ho.data() + static_cast<std::size_t>(j) * words + 4 * g, a);
+                            media::unpack_group(ref.data() + static_cast<std::size_t>(j) * words + 4 * g, b);
+                            for (int c = 0; c < 3; ++c) {
+                                const double dc = double(a.cb[c]) - b.cb[c], dr = double(a.cr[c]) - b.cr[c];
+                                se += dc * dc + dr * dr;
+                                cnt += 2;
+                            }
+                        }
+                    const double psnr = se > 0 ? 10.0 * std::log10(1023.0 * 1023.0 * double(cnt) / se) : 99.0;
+                    f.inc("chroma_samples");
+                    if (psnr < o.min_chroma_db) f.inc("chroma_low");
+                    const auto cdb = static_cast<std::uint64_t>(psnr * 100);
+                    if (!f.c.count("chroma_psnr_min_x100") || cdb < f.c["chroma_psnr_min_x100"]) f.c["chroma_psnr_min_x100"] = cdb;
+                    f.inc("chroma_psnr_sum_x100", cdb);
+                }
                 if (!ref_crc.empty()) {
                     // klipo kilpos sandūra (siuntėjo -stream_loop): ±50 laukų nuo klipo pradžios/pabaigos vertinama atskirai
                     const std::int64_t idx = static_cast<std::int64_t>(mk & 0xFFFFFFu) - ref_k0;

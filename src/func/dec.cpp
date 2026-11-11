@@ -233,6 +233,8 @@ int run_dec(const Opts& o) {
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
     const mxlRational rate = mxl_rate(o.fmt.grain_rate());
     const std::uint64_t gpf = inter ? 2 : 1;  // grain'ų kadre
+    const std::string& siting = o.chroma_siting;  // tik interlaced flow'ui; progresyviam visada kadro chroma
+    if (!inter && siting == "field") { st.fatal = "--chroma-siting field galimas tik interlaced formatui"; rc = 1; }
     const int fps_i = static_cast<int>((o.fmt.frame_rate.num + o.fmt.frame_rate.den / 2) / o.fmt.frame_rate.den);  // ~kadrų per 1 s
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (!out[n].create(inst, video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = err; rc = 2; }
@@ -348,7 +350,10 @@ int run_dec(const Opts& o) {
             jobs.push_back({cur[n]->data[0], cur[n]->data[1], dst});
             job_flow.push_back(n);
             job_src.push_back(cur[n]);
-            job_mode.push_back(inter && !(cur[n]->flags & AV_FRAME_FLAG_INTERLACED) ? media::ChromaMode::FrameSited : media::ChromaMode::FieldSited);
+            job_mode.push_back(siting == "field"   ? media::ChromaMode::FieldSited
+                               : siting == "frame" ? media::ChromaMode::FrameSited
+                               : (cur[n]->flags & AV_FRAME_FLAG_INTERLACED) ? media::ChromaMode::FieldSited
+                                                                             : media::ChromaMode::FrameSited);
         }
         if (rc) break;
         cudaError_t ce = cudaSuccess;

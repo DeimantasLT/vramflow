@@ -74,7 +74,12 @@ struct Opts {
     std::uint32_t tap_every = 25;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
+    // interlaced flow'o 4:2:0 → 4:2:2 chroma: auto — pagal kadro AV_FRAME_FLAG_INTERLACED; field / frame — priverstinai.
+    // NVENC (šioje GPU be lauko kodavimo) žymi kadrus progresyviais, nors turinys — supinti laukai su lauko chroma:
+    // tokiam srautui reikia `field`.
+    std::string chroma_siting = "auto";
     std::string ref_crc;
+    double min_chroma_db = 0;  // verify --mode dec: chromos PSNR prieš gen etaloną (0 — netikrinama)
 };
 
 // Vieno flow'o skaitikliai. Vardai — ataskaitoje.

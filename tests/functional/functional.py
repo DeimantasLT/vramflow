@@ -833,17 +833,30 @@ def ffmt_enc(out):
     return res
 
 
-def ffmt_dec(out):
+# Chromos riba gen | enc | dec grandinei (Cb/Cr PSNR prieš gen etaloną, 10 bitų): teisinga chromos padėtis — virš, maišyti
+# laukai (kita padėtis) — žemiau: 1080i50 NVENC 18 Mbit/s — field 44,9 dB min, auto 36,8 dB (docs/rezultatai/2026-11-11-p2-formatai.md).
+# x264 ultrafast (C variantas, realiu laiku) — triukšmingesnis (min 39,1 dB 1080p50), todėl jam riba 37 dB.
+DEC_MIN_CHROMA_DB = {"nvenc": float(os.environ.get("FFMT_DEC_MIN_CHROMA_DB", "41")), "x264": 37.0}
+
+
+def dec_siting(fmt, enc):
+    """Mūsų NVENC srautai interlaced formatui žymimi progresyviais (lauko kodavimo nėra), bet nešioja lauko chromą."""
+    return ["--chroma-siting", "field"] if fmt.startswith("1080i") and enc == "nvenc" else []
+
+
+def ffmt_dec(out, fmts=None, cases=None, prefix="ffmt_dec", siting=None, expect_low=False):
     """gen | enc | dec | verify --mode dec kiekvienam formatui: C (x264 + programinis dekoderis) ir G (nvenc + NVDEC).
-    dec be praradimų po paleidimo, verify: 0 teisingumo klaidų (lauko tvarka interlaced formatams), imčių > 0."""
+    dec be praradimų po paleidimo, verify: 0 teisingumo klaidų (lauko tvarka interlaced formatams, chroma prieš gen etaloną
+    >= DEC_MIN_CHROMA_DB), imčių > 0. expect_low — neigiamas atvejis: chroma_low > 0 (patikra skiria padėtis)."""
     res = []
     N, D = 1, max(10, FMT_DUR // 2)
-    for fmt in fmt_list():
-        for tag, impl, storage, enc in (("C", "cpu", "host", "x264"), ("G", "gpu", "cuda-linear", "nvenc")):
+    for fmt in fmts or fmt_list():
+        for tag, impl, storage, enc in cases or (("C", "cpu", "host", "x264"), ("G", "gpu", "cuda-linear", "nvenc")):
             if tag not in [t for t, _, _ in comp_variants()]:
                 continue
-            tid = f"ffmt_dec[{fmt}/{tag}]"
-            sub = f"ffmt-dec-{fmt}-{tag}"
+            tid = f"{prefix}[{fmt}/{tag}]"
+            sub = f"{prefix.replace('_', '-')}-{fmt}-{tag}"
+            sit = dec_siting(fmt, enc) if siting is None else siting
             d = fresh_domain(sub)
             port = 24000 + 10 * len(res)
             v = vcommon(impl, storage) + ["--format", fmt]
@@ -854,15 +867,17 @@ def ffmt_dec(out):
                 if not wait_flows(d, [role_flow_id(1, n) for n in range(N)]):
                     res.append(result(tid, "FAIL", why="gen flow'ai neatsirado"))
                     continue
-                dc = FProc(out, sub, "dec", d, "--flows", N, "--port-base", port, "--duration", D + 14, "--warmup", 6, *v)
+                dc = FProc(out, sub, "dec", d, "--flows", N, "--port-base", port, "--duration", D + 14, "--warmup", 6, *sit, *v)
                 time.sleep(1)
-                ea = ["--encoder", enc, "--port-base", port] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
+                # aukšta sparta (H.264 4.0 riba 20 Mbit/s): kodavimo triukšmas mažas, chromos padėties klaida (laukų maišymas) aiškiai matoma
+                ea = (["--encoder", enc, "--port-base", port, "--vbitrate", 18_000_000, "--muxrate", 22_000_000]
+                      + (["--x264-preset", "ultrafast"] if enc == "x264" else []))
                 e = FProc(out, sub, "enc", d, "--flows", N, "--duration", D + 16, *ea, *v)
                 if not wait_flows(d, [role_flow_id(4, n) for n in range(N)], 20):
                     res.append(result(tid, "FAIL", why="dec išėjimo flow'ai neatsirado"))
                     continue
                 vf = FProc(out, sub, "verify", d, "--mode", "dec", "--flows", N, "--every", 5, "--duration", D, "--warmup", 6,
-                           *vimpl(impl, storage), "--format", fmt)
+                           "--min-chroma-db", DEC_MIN_CHROMA_DB[enc], *vimpl(impl, storage), "--format", fmt)
                 rv = vf.wait(timeout=D + 60)
                 rd = dc.wait(timeout=D + 60)
             finally:
@@ -873,14 +888,32 @@ def ffmt_dec(out):
             fl = ((sd or {}).get("flows") or [{}])[0]
             pv = (sv or {}).get("proc") or {}
             vfl = ((sv or {}).get("flows") or [{}])[0]
-            ok = (sd is not None and sv is not None and fl.get("fields_ok", 0) > 0 and pv.get("verification_errors", 1) == 0
-                  and pv.get("samples_total", 0) > 0 and fl.get("decode_errors", 0) == 0 and sd.get("format") == fmt)
+            low = vfl.get("chroma_low", 0)
+            cs = vfl.get("chroma_samples", 0)
+            cmin = vfl.get("chroma_psnr_min_x100", 0) / 100
+            cavg = vfl.get("chroma_psnr_sum_x100", 0) / 100 / cs if cs else 0
+            if expect_low:
+                ok = sd is not None and sv is not None and cs > 0 and low > 0
+            else:
+                ok = (sd is not None and sv is not None and fl.get("fields_ok", 0) > 0 and pv.get("verification_errors", 1) == 0
+                      and pv.get("samples_total", 0) > 0 and fl.get("decode_errors", 0) == 0 and sd.get("format") == fmt and cs > 0)
             res.append(result(tid, "PASS" if ok else "FAIL",
-                              why=f"dec exit={rd} fields_ok={fl.get('fields_ok')} underrun={fl.get('underrun_fields')} "
+                              why=f"chroma_siting={sit[1] if sit else 'auto'} chroma PSNR min={cmin:.2f} vid={cavg:.2f} dB "
+                                  f"(riba {DEC_MIN_CHROMA_DB[enc]}) chroma_low={low}/{cs} "
+                                  f"dec exit={rd} fields_ok={fl.get('fields_ok')} underrun={fl.get('underrun_fields')} "
                                   f"decode_errors={fl.get('decode_errors')} flag_mismatch={fl.get('flag_mismatch')} verify exit={rv} "
                                   f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
                                   f"parity_mismatch={vfl.get('parity_mismatch')} seq_jump={vfl.get('seq_jump')}", dec=sd, verify=sv))
     return res
+
+
+def ffmt_dec_chroma(out):
+    """Regresija (peržiūros pastaba 2): gen | enc nvenc | dec 1080i50 — NVENC kadrus žymi progresyviais, nors turinys —
+    supinti laukai su lauko chroma. Su --chroma-siting field chroma >= riba; su auto (kadro žymė → kadro chroma) — chroma_low
+    > 0, t. y. patikra aptinka laukų maišymą."""
+    g = [("G", "gpu", "cuda-linear", "nvenc")]
+    return (ffmt_dec(out, ["1080i50"], g, "ffmt_dec_chroma_field", ["--chroma-siting", "field"])
+            + ffmt_dec(out, ["1080i50"], g, "ffmt_dec_chroma_auto", [], expect_low=True))
 
 
 def ffmt_neg(out):
@@ -916,7 +949,7 @@ def main():
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
              "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
-             "ffmt_dec": lambda: ffmt_dec(out)}
+             "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):
