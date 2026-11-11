@@ -87,6 +87,7 @@ endif()
 
 # Laiko modelis: PTS → TAI → MXL indeksas (be MXL / libav / GPU) — planas §P1
 include(${CMAKE_SOURCE_DIR}/cmake/timing.cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/engine.cmake)  # bendras tick variklis (be MXL / CUDA) — planas 2026-11-12-tick-variklis
 
 # GPU media funkcijos (logotipas, kodavimas, dekodavimas) — architektūra docs/architektura/2026-11-10-gpu-media-funkcijos.md
 option(MXLV_BUILD_MEDIA "GPU media funkcijos (vramflow-func)" ON)
