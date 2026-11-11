@@ -499,7 +499,6 @@ TEST_CASE("gfx_writer: laikrodžio šuolis atgal ritmo gijoje — joks indeksas 
 TEST_CASE("gfx_writer: pavėlavusi gija — vėluojantis indeksas įrašomas, praleisti laukai skaičiuojami (kaip gen)", "[gfx_writer][mxl]") {
     Domain d(7);
     FlowId fid;
-    const gfx::Raster r{128, 72, true, true};
     vfgfx_writer w = nullptr;
     REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
     Recorder rec;

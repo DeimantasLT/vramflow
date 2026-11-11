@@ -156,7 +156,6 @@ int run_logo(const Opts& o_in) {
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
     std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
-    std::uint64_t injected = 0;
     ClockWatch cw;
     cw.stepped();
 
@@ -245,7 +244,6 @@ int run_logo(const Opts& o_in) {
             if (!ce) ce = cudaStreamSynchronize(stream);
             w ^= 1u << 3;
             if (!ce) ce = cudaMemcpyAsync(p, &w, 4, cudaMemcpyHostToDevice, stream);
-            ++injected;
             st.proc["injected"]++;
         }
         if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
