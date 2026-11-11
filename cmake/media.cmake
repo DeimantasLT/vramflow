@@ -23,7 +23,7 @@ if(MXLV_BUILD_TESTS)
   target_link_libraries(mxlv-media-cpu-unit PRIVATE mxlv_media_cpu mxlv_media Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-media-cpu-unit)
 
-  add_executable(mxlv-media-unit tests/unit/test_media.cpp)
+  add_executable(mxlv-media-unit tests/unit/test_media.cpp tests/unit/test_media_format.cpp)
   target_link_libraries(mxlv-media-unit PRIVATE mxlv_media Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-media-unit)
 
