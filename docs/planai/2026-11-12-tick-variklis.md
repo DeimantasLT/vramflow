@@ -924,7 +924,8 @@ Priimtos §12 rekomendacijos:
 | K-T13 | Eilė: `gen` → `logo` → izoliacija → `composite` → `enc` → `dec` → ritmo gija → `gfxgen` |
 | K-T14 | Briaunos sutartis skelbia ribą, žymos `urn:x-vramflow:tag:…` |
 | K-T15 | `verify` lieka už variklio |
-| **K-T9** | **Laukia autoriaus leidimo** (esamų testų perrašymas ir lūkesčių keitimas: V14b, V17). 0–3 etapams jo nereikia |
+| K-T9 | Leista (autorius 2026-11-12: „daryk, kaip atrodo geriausia“): 4 tikro laiko ritmo testai perrašomi į virtualų laiką su griežtesniais tvirtinimais; K3 liečiamų testų lūkesčiai keičiami tame pačiame PR, kiekvienas pakeitimas išvardijamas commit'o žinutėje |
+| Apimtis | Bazei dabar: 0–3 etapai, V17 (spragų politika), V18 (startas), V19 (tarnybos režimas), V20, V21 (statistika). **Atidėta iki tinklo etapo:** V22 (adresavimas ir valdymo eilė), V23 (priėmimo kabliukas — su P4), V24 (briaunos laiko sutartis) |
 
 Pastaba: A2 (`enc` garso PTS) jau pataisyta (`344f530`, `AudioTimeline`); griežti įspėjimai įjungti (`34c39d3`), todėl
 „0 įspėjimų“ vartai dabar reiškia `-Wall -Wextra -Wpedantic -Werror`. Bazinis ctest — 193.
