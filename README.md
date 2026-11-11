@@ -298,6 +298,7 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--duration S`, `--warmup S` | Run time; warm-up seconds are left out of the statistics |
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
+| `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
 
 ### Commands
 
@@ -351,10 +352,48 @@ Every flow has an explicit format: raster, scan and frame rate (`--format`, the 
 `4d584c47-00RR-4000-8000-NNNNNNNNNNNN`, where `RR` is the role (`01` gen, `02` logo, `03` audio, `04` dec, `05`
 graphics, `06` compositor) and `N…` is the flow number in hex (graphics: `flow × 8 + layer`).
 
+### Start order, waits and restarts
+
+Functions can be started in any order. A function that reads flows (`logo`, `composite`, `verify`, `enc`) waits for its
+inputs and prints `laukiu flow <id>, N s` to stderr every 5 s while it waits.
+
+| Option (readers) | Meaning |
+|---|---|
+| `--input-wait-ms N` | `0` (default): wait for the inputs without a limit. `N > 0`: give up after `N` ms with exit code `4` and a message that names the missing flows and the limit |
+| `--on-format-change exit\|wait` | An input came back with another format or storage: `exit` (default) stops with exit code `6` and names both formats; `wait` keeps waiting until it comes back with the original one |
+
+- A reader attaches only to a flow that has a live writer and already produces grains. Old files left by a killed
+  producer are ignored.
+- If a producer disappears (killed, or its flow replaced), the reader notices within about one grain, keeps running and
+  counts every index it could not produce as `missing_fields` (`missing_frames` in `enc`; `missing` in `verify`). When
+  the producer comes back with the same flow ID, the reader attaches again by itself (`reattached` per flow; `reopened`
+  in `composite`) and continues. Indices of the gap are not written to its own output yet (a reader downstream sees a gap);
+  marking them as INVALID grains is planned with the gap policy (plan item P5).
+- A restarted producer removes the stale flows of its killed predecessor (`mxlGarbageCollectFlows`) before it creates its
+  own, so a restart with the same flow IDs works. A flow that still has a live writer is never removed.
+- `SIGINT` / `SIGTERM` while waiting for inputs ends the function cleanly with exit code `0`.
+
+### Domain ownership
+
+Every `vramflow-func` process holds a lease file `<domain>.vramflow/<run-id>.lease` **next to** the domain folder (the
+MXL domain itself stays clean: `mxl-info` and MXL garbage collection never see it). The lease is an `flock`, so the kernel
+releases it even after `kill -9`. The lease lists the output flows of that run.
+
+- `--run-id ID` (all commands) names the run; the default is `<command>-<pid>-<8 hex>`. It is written to
+  `summary-<command>.json` (`run_id`).
+- Creating an output flow that already has a live writer fails (exit code `2`) and the message names the owner's run ID.
+- The functions never delete a domain. Test harnesses create a fresh domain per run (`tests/perf/domain.py`:
+  `make_domain(tag)` → `/dev/shm/vf-<tag>-<8 hex>`) and delete it only when no live owner is left (`remove_domain`
+  returns `False` and deletes nothing otherwise). Two runs with the same tag therefore never delete each other's flows.
+- `flock` works on `tmpfs` (`/dev/shm`) and local file systems, not on network file systems.
+
 ### Exit code and summary
 
-Exit code `0` means everything was correct. Every run writes `summary-<command>.json` with counters (fields written,
-read, lost, late, invalid, verification errors), a latency histogram and the software / GPU versions.
+Exit code `0` means everything was correct. `1` — wrong options or configuration, `2` — setup failed (CUDA, MXL, an output
+flow owned by another run), `3` — verification errors, `4` — something was lost (late, missing, inputs did not appear within
+`--input-wait-ms`), `6` — an input came back with another format (`--on-format-change exit`). Every run writes
+`summary-<command>.json` with counters (fields written, read, lost, late, invalid, verification errors), a latency histogram,
+the run ID and the software / GPU versions.
 
 ---
 
