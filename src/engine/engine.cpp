@@ -162,6 +162,7 @@ struct TickEngine::Impl {
         const auto lat = static_cast<std::int64_t>(in.spec.port->last_write_tai()) - T(j);
         in.ewma = in.ewma_set ? in.ewma + (lat - in.ewma) / 4 : lat;
         in.ewma_set = true;
+        hub.in_arrival(in.hub).add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, lat)));
     }
 
     void detach(In& in) { in.spec.port->detach(); }
@@ -221,6 +222,18 @@ struct TickEngine::Impl {
         r.ended = true;
         ctx_index = r.idx;
         fn->end_tick(r.idx, ctx);
+        publish_stats();
+    }
+
+    // D6: tick'o pabaigoje, po commit'ų ir už laukimų ribų; kopija į paruoštą buferį, I/O — kitoje gijoje.
+    void publish_stats() {
+        const std::uint64_t t = clk.now_tai();
+        if (hub.due(t)) {
+            for (const In& in : ins) hub.set_in_state(in.hub, in.st.state());
+            for (const Unit& u : units)
+                for (std::uint32_t m = 0; m < u.nout; ++m) hub.set_out_enabled(outs[u.out0 + m].hub, !u.failed);
+        }
+        hub.end_tick(t);
     }
 
     void resolve_unit(Unit& u) {
@@ -401,6 +414,7 @@ struct TickEngine::Impl {
                 } else if (o.port->commit()) {
                     ++(phase == 0 ? c.ok : c.late);
                     o.gs.on_content(idx, T(idx));
+                    hub.out_commit(o.hub).add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, now() - T(idx))));
                 } else {
                     ++c.commit_errors;
                 }
