@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/histogram.hpp"
+#include "func/thread_pool.hpp"
 
 namespace mxlv::func {
 
@@ -75,32 +76,6 @@ struct Stats {
     std::string fatal;
     int exit_code = 0;
     void add_hist(const char* k, std::uint64_t ns) { hist[k].add(ns); }
-};
-
-// Pastovus gijų baseinas CPU variantui: run(n, fn) iškviečia fn(i) visiems i < n ir laukia pabaigos.
-// Gijos sukuriamos vieną kartą (ne kiekvienam tick'ui), kad kūrimo kaina nepatektų į matavimą.
-class ThreadPool {
-public:
-    explicit ThreadPool(int threads);
-    ~ThreadPool();
-    template <class F>
-    void run(int n, F&& fn) {
-        job_ = [&fn](int i) { fn(i); };
-        dispatch(n);
-    }
-    int size() const { return static_cast<int>(workers_.size()) + 1; }
-
-private:
-    void dispatch(int n);
-    void worker();
-    std::vector<std::thread> workers_;
-    std::function<void(int)> job_;
-    std::mutex m_;
-    std::condition_variable cv_, done_cv_;
-    std::atomic<int> next_{0};
-    int n_ = 0, active_ = 0;
-    std::uint64_t gen_ = 0;
-    bool quit_ = false;
 };
 
 std::string storage_options(const Opts& o, int dev);  // writer'io opcijos pagal --storage

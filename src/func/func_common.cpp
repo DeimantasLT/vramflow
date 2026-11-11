@@ -38,52 +38,6 @@ int cuda_device(const std::string& uuid) { return mxlv::cuda_device_by_uuid(uuid
 
 std::string storage_options(const Opts& o, int dev) { return o.storage == "host" ? std::string{} : cuda_options(dev); }
 
-ThreadPool::ThreadPool(int threads) {
-    for (int t = 1; t < threads; ++t) workers_.emplace_back([this] { worker(); });  // kviečianti gija — taip pat darbininkas
-}
-
-ThreadPool::~ThreadPool() {
-    {
-        std::lock_guard g(m_);
-        quit_ = true;
-    }
-    cv_.notify_all();
-    for (auto& w : workers_) w.join();
-}
-
-void ThreadPool::dispatch(int n) {
-    {
-        std::lock_guard g(m_);
-        n_ = n;
-        next_ = 0;
-        active_ = static_cast<int>(workers_.size());
-        ++gen_;
-    }
-    cv_.notify_all();
-    for (int i; (i = next_.fetch_add(1)) < n;) job_(i);
-    std::unique_lock lk(m_);
-    done_cv_.wait(lk, [this] { return active_ == 0; });
-}
-
-void ThreadPool::worker() {
-    std::uint64_t seen = 0;
-    for (;;) {
-        int n = 0;
-        {
-            std::unique_lock lk(m_);
-            cv_.wait(lk, [&] { return quit_ || gen_ != seen; });
-            if (quit_) return;
-            seen = gen_;
-            n = n_;
-        }
-        for (int i; (i = next_.fetch_add(1)) < n;) job_(i);
-        {
-            std::lock_guard g(m_);
-            if (--active_ == 0) done_cv_.notify_one();
-        }
-    }
-}
-
 std::string cuda_options(int dev) {
     return R"({"payload":{"backend":"cuda-linear","deviceUuid":")" + mxlv::cuda_uuid_string(dev) + R"("}})";
 }
