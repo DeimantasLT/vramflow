@@ -1,0 +1,4 @@
+Total Test time (real) =  20.63 sec
+
+The following tests did not run:
+	135 - CUDA payload : Reader on a peer GPU (Skipped)

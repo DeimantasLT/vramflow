@@ -1,0 +1,20 @@
+{
+  "$comment": "PASS/FAIL slenksčiai (architektūra §6.4). Latencijos — prielaida (~10× virš native Linux), peržiūrima po pirmo paleidimo; keitimas tik su įrašu ataskaitoje.",
+  "verification_errors": 0,
+  "cuda_errors": 0,
+  "reopens": 0,
+  "stalls": 0,
+  "gap_grains": 0,
+  "verified_fraction_min": 0.999,
+  "lat_commit_to_verified_p50_us": 1000,
+  "lat_commit_to_verified_p99_us": 5000,
+  "lat_commit_to_verified_p999_us": 20000,
+  "writer_period_jitter_p99_us": 5000,
+  "soak": {
+    "rss_growth_max_frac": 0.01,
+    "fd_growth_max": 0,
+    "vram_growth_max_mb": 32,
+    "p99_drift_max_ratio": 1.5,
+    "max_clock_steps": 3
+  }
+}

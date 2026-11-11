@@ -1,0 +1,15 @@
+diff --git a/examples/cuda-cross-container-test.sh b/examples/cuda-cross-container-test.sh
+index 9fc0536f..d4131dfd 100755
+--- a/examples/cuda-cross-container-test.sh
++++ b/examples/cuda-cross-container-test.sh
+@@ -23,8 +23,8 @@ byte=92
+ 
+ if docker info >/dev/null 2>&1; then
+     docker=(docker)
+-elif sudo docker info >/dev/null 2>&1; then
+-    docker=(sudo docker)
++elif sudo -n docker info >/dev/null 2>&1; then
++    docker=(sudo -n docker)
+ else
+     echo "mxl-cuda-cross-container: docker is not available" >&2
+     exit 2

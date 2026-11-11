@@ -1,0 +1,32 @@
+VRAMFlow
+Copyright 2026 Deimantas Kiršinas
+
+This product includes software developed by Deimantas Kiršinas (LRT)
+(https://github.com/DeimantasLT/vramflow).
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Under section 4(d) of the License, any redistribution of this work or of a
+derivative work, in source or binary form and whether free or commercial,
+must include a readable copy of the attribution notices in this NOTICE file.
+If you use this work in a product, a standard, a specification or a
+publication, please credit:
+
+    "VRAMFlow by Deimantas Kiršinas (https://github.com/DeimantasLT/vramflow)"
+
+-------------------------------------------------------------------------------
+Third-party software (not included in this repository; linked at build time)
+
+- MXL (Media eXchange Layer) SDK, dmf-mxl/mxl, including the cuda-linear
+  payload backend from pull request #653 - Apache License 2.0.
+- FFmpeg (libavformat, libavcodec, libavutil) - LGPL-2.1-or-later, or
+  GPL-2.0-or-later when FFmpeg is built with GPL components such as libx264.
+  A binary of vramflow-func linked against such an FFmpeg build is subject to
+  the GPL when it is distributed.
+- x264 (through FFmpeg) - GPL-2.0-or-later.
+- NVIDIA CUDA Toolkit, NVENC/NVDEC - NVIDIA license terms; not redistributed.
+- CLI11 - BSD-3-Clause. Catch2 - BSL-1.0.
+
+MXL and NVIDIA are trademarks of their respective owners. This project is
+not affiliated with or endorsed by the MXL project, the EBU, the Linux
+Foundation or NVIDIA.

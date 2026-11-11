@@ -1,0 +1,7 @@
+build/
+evidence/*
+!evidence/**/report.md
+.vs/
+.vscode/
+__pycache__/
+*.pyc
