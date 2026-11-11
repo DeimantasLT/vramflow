@@ -38,3 +38,19 @@ if(MXLV_BUILD_TESTS)
   target_compile_definitions(mxlv-gfx-unit PRIVATE MXLV_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/unit/data")
   catch_discover_tests(mxlv-gfx-unit)
 endif()
+
+# Variantai H / G: CUDA RGBA -> v210a ir batch kompozitorius. RGB->YCbCr double aritmetika naudoja __dmul_rn / __dadd_rn
+# intrinsics (nvcc jų nesujungia į FMA nepriklausomai nuo -fmad). Parametrai kaip mxlv_media.
+if(MXLV_BUILD_MEDIA)
+  add_library(mxlv_gfx_cuda STATIC src/gfx/gfx_kernels.cu)
+  target_include_directories(mxlv_gfx_cuda PUBLIC ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(mxlv_gfx_cuda PUBLIC CUDA::cudart_static)
+  set_target_properties(mxlv_gfx_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION OFF POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(mxlv_gfx_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -lineinfo>)
+
+  if(MXLV_BUILD_TESTS)
+    add_executable(vramflow-gfx-gpu-tests tests/gpu/test_gfx_kernels.cpp)
+    target_link_libraries(vramflow-gfx-gpu-tests PRIVATE mxlv_gfx_cuda mxlv_gfx_ref Catch2::Catch2WithMain)
+    catch_discover_tests(vramflow-gfx-gpu-tests)
+  endif()
+endif()
