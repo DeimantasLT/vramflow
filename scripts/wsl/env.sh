@@ -12,3 +12,7 @@ export VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}"
 export PATH="$CUDA_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/wsl/lib"
 export LOG_DIR="${LOG_DIR:-$HOME/logs}"
 mkdir -p "$LOG_DIR"
+# Kompiliatoriai: perrašomi CC_BIN / CXX_BIN / CUDA_HOST_CXX; numatyta clang-19, jei yra, kitaip cc / c++
+if [[ -z "${CC_BIN:-}" ]]; then if command -v clang-19 >/dev/null; then CC_BIN=clang-19; else CC_BIN=cc; fi; fi
+if [[ -z "${CXX_BIN:-}" ]]; then if command -v clang++-19 >/dev/null; then CXX_BIN=clang++-19; else CXX_BIN=c++; fi; fi
+export CC_BIN CXX_BIN CUDA_HOST_CXX="${CUDA_HOST_CXX:-g++}"

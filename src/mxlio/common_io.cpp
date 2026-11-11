@@ -91,7 +91,12 @@ std::string versions_json() {
         j += ",\"gpu\":";
         json_escape_into(j, p.name);
         j += ",\"gpu_uuid\":\"" + cuda_uuid_string(0) + "\"";
+        j += ",\"gpu_cc\":\"" + std::to_string(p.major) + "." + std::to_string(p.minor) + "\"";
     }
+#ifdef VRAMFLOW_CUDA_ARCH
+    j += ",\"cuda_arch_build\":";
+    json_escape_into(j, VRAMFLOW_CUDA_ARCH);
+#endif
     return j + "}";
 }
 

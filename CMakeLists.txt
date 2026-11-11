@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.24)
+# CUDA architektūra turi būti nustatyta PRIEŠ project(): project() pats užpildo numatytąją (pvz. 75),
+# ir vėlesnis if(NOT DEFINED ...) niekada nesuveikia. Numatyta — šio kompiuterio GPU (native).
+# Kita GPU / CI be GPU: -DCMAKE_CUDA_ARCHITECTURES=86;89 arba aplinkos kintamasis CUDAARCHS.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT DEFINED ENV{CUDAARCHS})
+  set(CMAKE_CUDA_ARCHITECTURES native)
+endif()
 project(vramflow-verify LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-# RTX 4070 Laptop = sm_89. Keičiama: -DCMAKE_CUDA_ARCHITECTURES=native|86|89|...
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 89)
-endif()
 
 set(MXL_ROOT "$ENV{HOME}/src/mxl-pr653/install/Linux-Clang-Release" CACHE PATH "MXL PR #653 instaliacija")
 set(MXL_SOURCE_DIR "$ENV{HOME}/src/mxl-pr653" CACHE PATH "MXL šaltinis (CudaLinearStorage.h)")
@@ -31,6 +33,8 @@ endif()
 
 add_library(mxlv_common INTERFACE)
 target_include_directories(mxlv_common INTERFACE ${CMAKE_SOURCE_DIR}/src)
+# Su kuo sukompiliuota — patenka į summary-*.json (versions.cuda_arch_build)
+target_compile_definitions(mxlv_common INTERFACE VRAMFLOW_CUDA_ARCH="${CMAKE_CUDA_ARCHITECTURES}")
 
 add_library(mxlv_gpu STATIC src/gpu/kernels.cu)
 target_link_libraries(mxlv_gpu PUBLIC mxlv_common CUDA::cudart_static)
@@ -57,6 +61,13 @@ if(MXLV_BUILD_TESTS)
   add_executable(mxlv-gpu-tests tests/gpu/test_kernels.cpp)
   target_link_libraries(mxlv-gpu-tests PRIVATE mxlv_gpu Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-gpu-tests)
+
+  # Build architektūros patikra: binare turi būti SASS šio kompiuterio GPU (L16)
+  find_program(MXLV_CUOBJDUMP cuobjdump HINTS ${CUDAToolkit_BIN_DIR})
+  if(MXLV_CUOBJDUMP)
+    add_test(NAME build_arch COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/check_arch.sh $<TARGET_FILE:mxlv-gpu-tests> ${MXLV_CUOBJDUMP})
+    set_tests_properties(build_arch PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
   add_executable(vramflow-v210a-gpu-tests tests/gpu/test_v210a_cuda_linear.cpp)

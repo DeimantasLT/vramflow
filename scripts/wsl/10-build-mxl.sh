@@ -14,7 +14,7 @@ if [[ -d "$HOME/vcpkg-overlay" ]] && [[ -n "$(ls -A "$HOME/vcpkg-overlay")" ]]; 
 fi
 
 cmake --preset "$MXL_PRESET" "${overlay_args[@]}" \
-  -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
+  -DCMAKE_C_COMPILER="$CC_BIN" -DCMAKE_CXX_COMPILER="$CXX_BIN" \
   -DMXL_ENABLE_CUDA_PAYLOAD=ON -DBUILD_DOCS=OFF \
   -DCUDAToolkit_ROOT="$CUDA_HOME" 2>&1 | tee "$LOG_DIR/configure.log"
 
