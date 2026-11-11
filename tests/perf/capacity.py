@@ -110,6 +110,7 @@ COMP_LAYERS = [("logo", "1488,64", 1.0), ("full", "0,0", 0.8), ("full", "0,0", 0
 GEOM_WH = {"logo": (384, 216), "full": (1920, 1080)}
 RING_GRAINS = 10  # MXL ring (laukai) vienam flow (išmatuota: logo G ΔVRAM ≈ 27,6 MB/flow = 10 × 2 764 800 B)
 CTX_OVERHEAD_MB = 128  # CUDA konteksto + darbinių buferių atsarga vienam GPU procesui (logo G N=1: ~380 MB / 3 procesai)
+RING_FACTOR = 1.25  # ring'ų modelio pataisa pagal išmatuotą ΔVRAM (ΔVRAM: K=2 N=32 4189 vs modelis 3516 MiB; K=4 N=32 7223 vs 6047 MiB)
 VRAM_CAP_MB = 7168  # R19: ~7 GiB iš 8 GiB kortos (WDDM ir kiti procesai laiko ~0,3–0,5 GB)
 
 
@@ -144,9 +145,10 @@ def comp_guard(a, n):
     desc = " + ".join(f"{b}B×{c}" for _, b, c in parts)
     if a.impl == "gpu" and a.storage == "cuda-linear":
         procs = 4  # gen, gfxgen, composite, verify (kiekvienas su CUDA kontekstu)
-        tot = ring_mb + procs * CTX_OVERHEAD_MB
+        # RING_FACTOR: išmatuota (K=4 N=32 pakilo iki ΔVRAM 7223 MiB, kai modelis rodė 6047): gfxgen/composite laiko papildomų buferių
+        tot = ring_mb * RING_FACTOR + procs * CTX_OVERHEAD_MB
         if tot > VRAM_CAP_MB:
-            return (f"VRAM riba (apskaičiuota): ({desc}) × {RING_GRAINS} grain'ų = {ring_mb:.0f} MiB + {procs}×{CTX_OVERHEAD_MB} "
+            return (f"VRAM riba (apskaičiuota): ({desc}) × {RING_GRAINS} grain'ų = {ring_mb:.0f} MiB × {RING_FACTOR} + {procs}×{CTX_OVERHEAD_MB} "
                     f"MiB kontekstų = {tot:.0f} MiB > {VRAM_CAP_MB} MiB")
         return None
     try:

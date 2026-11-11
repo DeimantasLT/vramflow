@@ -1,22 +1,26 @@
 # composite — talpa N × K (C / H / G)
 
-Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa kompozitorius. Žaliavos: `evidence/compare-composite/`
+Data: 2026-11-11 (C/H ir pirmas G: 13:15–14:33; G pakartojimas po `39dcb80`: 15:04–15:39, vietos laiku). Užduotis 10, alfa kompozitorius. Žaliavos: `evidence/compare-composite/`
 (git ignoruojama; lentelių eilutės nurodo `capacity-composite-k<K>-<V>.all.json`), aplinka — `evidence/compare-composite.env.txt`,
-žurnalas — `evidence/compare-composite/compare.log`, praleistos pakopos — `skipped-after-fails.jsonl`.
+žurnalas — `evidence/compare-composite/compare.log`; G pakartojimas — `evidence/compare-composite-g/`, praleistos pakopos — `skipped-after-fails.jsonl`.
 
 ## Išvados trumpai
 
 - **Didžiausias N, kai visi mažesni PASS** (N* tol / N* griežtai): C — K=1: 16 / 2, K=2: 8 / 4, K=4: 4 / 4;
-  H — K=1: 4 / 1, K=2: 4 / 0, K=4: 4 / 2; **G — 1 / 1 visiems K** (G pakopose N ≥ 2 yra teisingumo klaidų, žr. toliau).
-- **G (cuda-linear): `verify` randa neatitikimų** K=1 N=2: 60, N=4: 120; K=2 N=2: 60; K=4 N=2: 60 (kitose G pakopose 0).
-  Tai teisingumo, ne talpos rezultatas. Pavyzdžiuose neatitinka tik antro flow'o (n=1) logo stačiakampis (lauko eilutės 32…139,
-  x 1488…1871) ir tik lyginių indeksų (viršutinių) laukų. C ir H tomis pačiomis N — 0 klaidų. Pavyzdžiai:
-  `evidence/compare-composite/composite-k1-G-n2/mismatch_n1_*.{actual,expected}.v210`. **Priežastis neištirta** (funkciniai
-  testai tikrina `verify` tik su N=1; įtariama G kelio N ≥ 2 indeksavimas kompozitoriuje arba gfxgen pace režime).
-  Todėl G talpos skaičiai **nėra patikimas „G pajėgumas“**.
+  H — K=1: 4 / 1, K=2: 4 / 0, K=4: 4 / 2; **G (po pataisos 39dcb80) — K=1: 4 / 4, K=2: 2 / 0, K=4: 0 / 0**.
+- **Didžiausias praėjęs N (nebūtinai su visais mažesniais PASS), tol / griežtai:** C — K=1: 16 / 8, K=2: 8 / 4, K=4: 4 / 4;
+  H — K=1: 4 / 4, K=2: 4 / 2, K=4: 4 / 2; **G — K=1: 32 / 32, K=2: 32 / nė vienas, K=4: 16 / 16** (K=4 N=32 nevykdyta:
+  VRAM riba). G pakopų FAIL pasitaiko žemuose ir viduriniuose N (K=1 N=8, K=2 N=4, K=4 N=1), nors didesnės N praeina; GPU SM
+  dažnis visose G pakopose likęs ~210–690 MHz (žr. „Aplinka“), todėl FAIL/PASS kaita atspindi dažnio šuolius ir WSL2 drebėjimą,
+  o ne monotonišką talpos ribą. N* (visi mažesni PASS) čia pesimistiškas.
+- **Pirmasis G matavimas buvo negaliojantis.** Pirmoje kampanijoje (iki `39dcb80`) `verify` G pakopose rado neatitikimų:
+  K=1 N=2: 60, N=4: 120; K=2 N=2: 60; K=4 N=2: 60 (kitose G pakopose 0). Priežastis — `gfxgen` klaida: pageable `cudaMemcpy`
+  H2D grįždavo prieš pasibaigiant DMA, o biblioteka konvertuodavo pusiau įkeltą kadrą (neatitiko tik flow n=1 logo
+  stačiakampis, lyginiai laukai). C ir H (host kelias) neturėjo šios klaidos. Klaida ištaisyta `39dcb80`; G pakartota, visose
+  pakartoto matavimo pakopose **0 teisingumo klaidų**. Seni G skaičiai pakeisti; C/H palikti kaip išmatuota.
 - Žemuose N GPU dažnis dažnai likęs tuščios eigos (210 MHz, žr. aplinką), todėl žemų N rezultatai pesimistiški ir nemonotoniški.
 - composite proceso CPU PASS pakopose: C ≈ 0,08–0,15 branduolio/srautui (K=1), 0,25–0,35 (K=2), 0,56–0,67 (K=4);
-  G ≈ 0,03–0,13, H ≈ 0,04–0,38 (K=1…4).
+  G ≈ 0,007–0,14, H ≈ 0,04–0,38 (K=1…4).
 
 ## Metodas
 
@@ -34,8 +38,11 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
   CPU generatorius; todėl C eilučių „ΔVRAM“ ir „GPU %“ rodo **šaltinių** GPU naudojimą, ne composite.
 - **Terminas (R18):** `--deadline-ms 30` — tas pats kaip ankstesnėse logo talpos kampanijose (`2026-11-11-gpu-vs-cpu.md`),
   palyginamumui; ne 15 ms (plano 15 ms buvo pavyzdys; R14: WSL2 gamintojų drebėjimas > 15 ms). Su 15 ms talpa nebūtų didesnė.
-- **Ankstyvas sustojimas:** po 2 iš eilės PASS_tol FAIL tam (K, variantui) didesnės N nevykdytos. Nevykdyta: K=1 G N=8,16,32 ir
-  H N=32; K=2 G N=8,16,32 ir H N=32; K=4 G N=8,16,32, H N=32, C N=32. Tai ne VRAM sprendimai.
+- **Ankstyvas sustojimas:** po 2 iš eilės PASS_tol FAIL tam (K, variantui) didesnės N nevykdytos. Nevykdyta: H N=32 (K=1,2,4) ir
+  C N=32 (K=4); G pakartotoje kampanijoje sustojimas nebuvo suveikęs (vykdytos visos N, išskyrus K=4 N=32 — VRAM riba). Tai ne
+  VRAM sprendimai (išskyrus G K=4 N=32).
+- **G pakartota po `39dcb80`** (atskiras katalogas `evidence/compare-composite-g/`, komanda ta pati su `VARIANTS=gpu-cuda`;
+  pirmojo, negaliojančio G matavimo duomenys liko `evidence/compare-composite/capacity-composite-k*-G.all.json`).
 - **Latencija:** `proc` — nuo visų įėjimų paruošimo iki išėjimo commit'o; `vėlavimas` — commit'as po lauko laiko (`out_lateness`);
   p50 / p99 ms, composite histogramos per visą jo veikimą.
 
@@ -47,10 +54,13 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
   Skaičiai orientaciniai; autoritetingi — natyviame Linux su užfiksuotais GPU dažniais.
 - **GPU dažniai:** kampanijos pradžioje GPU P8, 210 MHz. 1 Hz zondo SM dažnio vidurkiai: N ≤ 2 daugumoje variantų 210–520 MHz
   (tuščios eigos būsena), N=4 — nuo 210 iki 2595 MHz (G K=4: 212 MHz, H K=4: 2595 MHz), didesnėms N daugiausia 520–2595 MHz.
-  Todėl žemų N PASS/FAIL iš dalies priklauso nuo dažnio kilimo, ne vien nuo apkrovos (tą patį artefaktą aprašo
+  **G pakartojime** SM dažnio vidurkis pakopose: K=1 — 210, 210, 210, 449, 211, 380 MHz (N=1…32); K=2 — 210, 210, 547, 212, 375,
+  688; K=4 — 239, 512, 211, 352, 687 (kampanijoje niekur nepasiekta maks. 3105 MHz). Todėl žemų N PASS/FAIL iš dalies
+  priklauso nuo dažnio kilimo, ne vien nuo apkrovos (tą patį artefaktą aprašo
   `2026-11-11-gpu-vs-cpu.md`, „Grandinės G N\* = 1 yra artefaktas“).
-- **Laikrodžio zondas** (`80-clock-probe.py`, 30 s): prieš — realtime/raw 2,2 ppm, PHC 0,9 ppm, realtime−PHC 0,036 ms, žingsnių 0;
-  po — −0,1 ppm, −0,2 ppm, −0,016 ms, žingsnių 0 (`clock-before.json`, `clock-after.json`). Zondas aprėpia tik 30 s langą;
+- **Laikrodžio zondas** (`80-clock-probe.py`, 30 s), C/H kampanija: prieš — realtime/raw 2,2 ppm, PHC 0,9 ppm, realtime−PHC 0,036 ms,
+  žingsnių 0; po — −0,1 ppm, −0,2 ppm, −0,016 ms, žingsnių 0. G pakartojimas (15:04–15:39): prieš — 0,0 / −0,0 ppm, 0,002 ms; po —
+  0,1 / −0,2 ppm, 0,012 ms, žingsnių 0 (`clock-before.json`, `clock-after.json` abiejuose kataloguose). Zondas aprėpia tik 30 s langą;
   **WSL2 gamintojų drebėjimas (pavieniai vėluojantys laukai) išlieka** ir lemia dalį pavienių „griežtai FAIL“ (R14).
 
 ## VRAM / atminties biudžetas (R19)
@@ -60,15 +70,19 @@ Ring'as = 10 laukų grain'ų flow'ui (anksčiau išmatuota: logo G ΔVRAM ≈ 27
 165 888 B; išėjimas v210 2 764 800 B. G: (bazė N + sluoksniai N·K + išėjimai N) × 10 + 4 × 128 MiB CUDA kontekstų (gen, gfxgen,
 composite, verify); funkcija `comp_budget_mb` / `comp_guard` (`tests/perf/capacity.py`).
 
-| K | N=4 (apskaič. / išmatuota ΔVRAM) | N=32 (apskaič.) |
+| K | N=4 (apskaič. / išmatuota ΔVRAM) | N=32 (apskaič. / išmatuota) |
 |---|---|---|
-| 1 | 729 / 743 MiB | 2 250 MiB |
-| 2 | 887 / 967 MiB | 3 516 MiB |
-| 4 | 1 204 / 1 417 MiB | 6 047 MiB |
+| 1 | 729 / 743 MiB | 2 250 / 2 391 MiB |
+| 2 | 887 / 967 MiB | 3 516 / 4 189 MiB |
+| 4 | 1 204 / 1 417 MiB | 6 047 / **7 223 MiB** |
 
-K=4, N=32 pagal skaičiavimą ~6,0 GiB < 7 GiB riba, bet K=4 N=4 skaičiavimas nuvertino išmatuotą ΔVRAM ~18 %, t. y. N=32
-realiai būtų ~7 GiB — riboje. **Dėl VRAM nepraleista nė viena pakopa**; G N=32 nevykdyta dėl ankstyvo sustojimo. C/H (host):
-ring'ai `/dev/shm`; didžiausia K=4 N=32 ~5,5 GiB < 75 % × 16 GiB, apsauga netrigerinta.
+Pradinis modelis K ≥ 2 nuvertino (gfxgen/composite laiko papildomų buferių; K=4 N=32 ~19 %). **G K=4 N=32 pakopa vis dėlto
+buvo paleista** (modelis rodė 6 047 MiB < 7 168): ΔVRAM pakilo iki 7 223 MiB (zondas 7 554 iš 8 188 MiB), GPU 100 %, `composite`
+nepradėjo išvesti ir buvo nutrauktas po laukimo (killed). Tai laikoma **VRAM riba (išmatuota)**, o ne talpos rezultatu; eilutė
+lentelėje pažymėta „praleista“, originalus įrašas — `evidence/compare-composite-g/capacity-composite-k4-G.attempt-n32.json`.
+Po to harness pataisytas (`RING_FACTOR` = 1,25, K=4 N=32 dabar apskaičiuojamas 7 431 MiB > 7 168 ir praleidžiamas). Pastebėta:
+`composite` prie VRAM išsekimo nesibaigia aiškia klaida, o pakimba. C/H (host): ring'ai `/dev/shm`; didžiausia K=4 N=32
+~5,5 GiB < 75 % × 16 GiB, apsauga netrigerinta.
 
 ## Rezultatai
 
@@ -104,11 +118,14 @@ N* griežtai = **1**, N* tol = **4**
 
 | N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | CPU/srautui (composite) | gfxgen CPU | gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | PASS | PASS | 0.000 | 1.0000 | 0 | 120 | 0.071 | 0.105 | 0.084 | 0.86 / 1.85 | 3.57 / 6.09 | 567 | 8 | 4 | `compare-composite/capacity-composite-k1-G.all.json` |
-| 2 | FAIL | FAIL | 0.000 | 1.0000 | 60 | 240 | 0.043 | 0.074 | 0.055 | 1.13 / 1.62 | 3.96 / 6.49 | 625 | 11 | 4 | `compare-composite/capacity-composite-k1-G.all.json` |
-| 4 | FAIL | FAIL | 0.764 | 0.9945 | 120 | 480 | 0.032 | 0.084 | 0.037 | 1.75 / 2.39 | 4.92 / 8.32 | 743 | 18 | 5 | `compare-composite/capacity-composite-k1-G.all.json` |
+| 1 | PASS | PASS | 0.000 | 1.0000 | 0 | 120 | 0.060 | 0.098 | 0.077 | 0.70 / 1.26 | 2.85 / 5.57 | 567 | 8 | 4 | `compare-composite-g/capacity-composite-k1-G.all.json` |
+| 2 | PASS | PASS | 0.000 | 1.0000 | 0 | 239 | 0.043 | 0.108 | 0.045 | 1.13 / 1.69 | 3.96 / 6.09 | 625 | 12 | 4 | `compare-composite-g/capacity-composite-k1-G.all.json` |
+| 4 | PASS | PASS | 0.000 | 1.0000 | 0 | 480 | 0.032 | 0.085 | 0.037 | 1.82 / 2.39 | 4.92 / 8.32 | 743 | 18 | 5 | `compare-composite-g/capacity-composite-k1-G.all.json` |
+| 8 | FAIL | FAIL | 0.400 | 0.9980 | 0 | 955 | 0.025 | 0.101 | 0.023 | 2.65 / 6.09 | 6.75 / 14.55 | 977 | 27 | 8 | `compare-composite-g/capacity-composite-k1-G.all.json` |
+| 16 | FAIL | PASS | 0.018 | 0.9998 | 0 | 1917 | 0.010 | 0.060 | 0.018 | 1.69 / 5.96 | 8.78 / 12.45 | 1449 | 32 | 12 | `compare-composite-g/capacity-composite-k1-G.all.json` |
+| 32 | PASS | PASS | 0.000 | 1.0000 | 0 | 3624 | 0.007 | 0.039 | 0.010 | 1.82 / 2.19 | 9.31 / 11.66 | 2391 | 37 | 13 | `compare-composite-g/capacity-composite-k1-G.all.json` |
 
-N* griežtai = **1**, N* tol = **1**
+N* griežtai = **4**, N* tol = **4**
 
 ### K = 2 — C — CPU + host flow (šaltinis: fair, išėjimas v210, deadline 30 ms)
 
@@ -139,11 +156,14 @@ N* griežtai = **0**, N* tol = **4**
 
 | N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | CPU/srautui (composite) | gfxgen CPU | gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | PASS | PASS | 0.000 | 1.0000 | 0 | 120 | 0.083 | 0.154 | 0.110 | 1.10 / 1.62 | 3.96 / 6.62 | 623 | 11 | 5 | `compare-composite/capacity-composite-k2-G.all.json` |
-| 2 | FAIL | FAIL | 0.055 | 0.9995 | 60 | 240 | 0.061 | 0.446 | 0.069 | 1.43 / 2.05 | 7.01 / 9.57 | 737 | 26 | 5 | `compare-composite/capacity-composite-k2-G.all.json` |
-| 4 | FAIL | FAIL | 2.773 | 0.9826 | 0 | 476 | 0.038 | 0.360 | 0.040 | 2.26 / 5.70 | 6.88 / 18.09 | 967 | 23 | 11 | `compare-composite/capacity-composite-k2-G.all.json` |
+| 1 | FAIL | PASS | 0.036 | 0.9998 | 0 | 120 | 0.082 | 0.158 | 0.111 | 1.10 / 1.72 | 3.96 / 6.49 | 623 | 11 | 5 | `compare-composite-g/capacity-composite-k2-G.all.json` |
+| 2 | FAIL | PASS | 0.018 | 0.9998 | 0 | 238 | 0.062 | 0.451 | 0.070 | 1.46 / 2.13 | 7.14 / 9.57 | 737 | 27 | 5 | `compare-composite-g/capacity-composite-k2-G.all.json` |
+| 4 | FAIL | FAIL | 2.382 | 0.9860 | 0 | 466 | 0.037 | 0.338 | 0.039 | 2.39 / 5.83 | 7.01 / 18.09 | 967 | 26 | 10 | `compare-composite-g/capacity-composite-k2-G.all.json` |
+| 8 | FAIL | PASS | 0.073 | 0.9996 | 0 | 959 | 0.028 | 0.131 | 0.030 | 2.92 / 3.64 | 7.93 / 11.66 | 1427 | 33 | 13 | `compare-composite-g/capacity-composite-k2-G.all.json` |
+| 16 | FAIL | PASS | 0.036 | 0.9998 | 0 | 1919 | 0.017 | 0.094 | 0.014 | 3.18 / 3.83 | 9.57 / 12.98 | 2349 | 37 | 14 | `compare-composite-g/capacity-composite-k2-G.all.json` |
+| 32 | FAIL | PASS | 0.145 | 0.9991 | 0 | 2714 | 0.011 | 0.056 | 0.007 | 3.31 / 4.10 | 10.88 / 15.86 | 4189 | 39 | 17 | `compare-composite-g/capacity-composite-k2-G.all.json` |
 
-N* griežtai = **1**, N* tol = **1**
+N* griežtai = **0**, N* tol = **2**
 
 ### K = 4 — C — CPU + host flow (šaltinis: fair, išėjimas v210, deadline 30 ms)
 
@@ -173,11 +193,14 @@ N* griežtai = **2**, N* tol = **4**
 
 | N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | CPU/srautui (composite) | gfxgen CPU | gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | PASS | PASS | 0.000 | 1.0000 | 0 | 120 | 0.127 | 1.029 | 0.130 | 1.56 / 2.13 | 7.54 / 9.57 | 735 | 29 | 6 | `compare-composite/capacity-composite-k4-G.all.json` |
-| 2 | FAIL | FAIL | 0.036 | 0.9998 | 60 | 240 | 0.097 | 0.881 | 0.059 | 2.33 / 5.83 | 7.54 / 14.55 | 961 | 30 | 10 | `compare-composite/capacity-composite-k4-G.all.json` |
-| 4 | FAIL | FAIL | 0.227 | 0.9989 | 0 | 480 | 0.059 | 0.333 | 0.049 | 3.64 / 3.90 | 8.32 / 11.66 | 1417 | 34 | 13 | `compare-composite/capacity-composite-k4-G.all.json` |
+| 1 | FAIL | FAIL | 0.509 | 0.9973 | 0 | 120 | 0.142 | 1.049 | 0.160 | 1.66 / 2.85 | 8.06 / 11.66 | 735 | 30 | 7 | `compare-composite-g/capacity-composite-k4-G.all.json` |
+| 2 | FAIL | PASS | 0.055 | 0.9996 | 0 | 240 | 0.102 | 0.866 | 0.054 | 2.46 / 5.70 | 7.41 / 14.55 | 961 | 30 | 10 | `compare-composite-g/capacity-composite-k4-G.all.json` |
+| 4 | PASS | PASS | 0.000 | 1.0000 | 0 | 480 | 0.058 | 0.301 | 0.047 | 3.64 / 3.90 | 8.32 / 10.62 | 1417 | 35 | 12 | `compare-composite-g/capacity-composite-k4-G.all.json` |
+| 8 | PASS | PASS | 0.000 | 1.0000 | 0 | 960 | 0.035 | 0.196 | 0.020 | 4.10 / 4.39 | 9.31 / 11.66 | 2327 | 37 | 14 | `compare-composite-g/capacity-composite-k4-G.all.json` |
+| 16 | PASS | PASS | 0.000 | 1.0000 | 0 | 1905 | 0.020 | 0.106 | 0.007 | 4.10 / 4.39 | 10.36 / 14.03 | 4147 | 39 | 18 | `compare-composite-g/capacity-composite-k4-G.all.json` |
+| 32 | praleista | praleista | | | | | | | | | | | | | VRAM riba (išmatuota): bandymas pakilo iki ΔVRAM 7223 MiB (zondas 7554 MiB iš 8188), composite nepradėjo išvesti ir buvo nutrauktas (killed); originalus įrašas capacity-composite-k4-G.attempt-n32.json. Modelis rodė 6047 MiB (pataisytas koeficientas 1,25 → 7431 MiB > 7168). |
 
-N* griežtai = **1**, N* tol = **1**
+N* griežtai = **0**, N* tol = **0**
 
 ### Suvestinė — didžiausias N (N*), kai visi mažesni PASS
 
@@ -185,20 +208,21 @@ Reikšmė „griežtai / tol“. „+“ — didžiausia išbandyta pakopa praė
 
 | K | C | H | G |
 |---|---|---|---|
-| 1 | 2 / 16 | 1 / 4 | 1 / 1 |
-| 2 | 4 / 8 | 0 / 4 | 1 / 1 |
-| 4 | 4 / 4 | 2 / 4 | 1 / 1 |
+| 1 | 2 / 16 | 1 / 4 | 4 / 4 |
+| 2 | 4 / 8 | 0 / 4 | 0 / 2 |
+| 4 | 4 / 4 | 2 / 4 | 0 / 0 |
 
 
 ## Pastabos ir apribojimai
 
-- **G rezultatai nepatikimi dėl teisingumo klaidų** (aukščiau). G N* = 1 reiškia „nepraėjo N=2 ir N=4“, o ne „GPU nepajėgia“:
-  K=2/4 N=4 G eilutėse 0 teisingumo klaidų, bet 0,2–2,8 % praradimų prie nedidelių SM dažnių. G/C santykio prieš
-  ištaisant N ≥ 2 neatitikimą ir kartojant su užfiksuotais dažniais nereikėtų daryti.
+- **G (po `39dcb80`):** 0 teisingumo klaidų visose vykdytose pakopose. G N* mažas dėl dažnių artefakto ir WSL2 drebėjimo (K=2
+  visos pakopos griežtai FAIL dėl pavienių vėluojančių laukų, tol PASS kai N=1, 2, 8, 16, 32 (N=4: 2,4 % praradimų)), ne dėl nuoseklaus pajėgumo
+  trūkumo; proc p99 G pakopose ≈ 6 ms ar mažiau. Tikra G riba — VRAM (K=4 N≈32), ne skaičiavimas. Tikslesniam G/C santykiui reikia
+  užfiksuotų GPU dažnių ir pakartojimų.
 - **H** K=1 jau N=8 FAIL (`proc` p99 22 ms, artėja prie 30 ms termino).
 - **C** gerai skalėjasi mažiems K (K=1 PASS_tol iki N=16), bet K=4 jau N=8 FAIL (11,6 % praradimų, 0,53 branduolio/srautui).
 - Nemonotoniškumas (K=1 C N=4 griežtai FAIL, N=8 PASS; K=1 H N=2 FAIL, N=4 PASS) — WSL2 drebėjimas ir GPU dažnio perėjimai;
   pakartojimų nedaryta (viena pakopa vienam variantui). Pasikliauti reikia tendencija, ne pavieniu N.
 - `verify`: ≥ 119 mėginių kiekvienoje nepraleistoje pakopoje (išskyrus didelės apkrovos K=4 N=16: C 571, H 135 — `check_dropped`).
-- Nevykdyta: v210a išėjimo kampanija, pakartojimai, G be `verify`, G N=32.
+- Nevykdyta: v210a išėjimo kampanija, pakartojimai (išskyrus G po pataisos), G K=4 N=32 (VRAM).
 - Logo kampanija vyko kitu energijos profiliu (`2026-11-11-gpu-vs-cpu.md`), todėl logo ir composite skaičiai tiesiogiai nepalyginami.
