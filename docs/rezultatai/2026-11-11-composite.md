@@ -25,7 +25,7 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
   FAIL): C 0,079–0,671, H 0,042–0,379, G 0,007–0,142.
 - **Patikros aprėptis (R21):** lentelėse „patikra %“ = patikrinta mėginių / laukiama. Aprėptis < 50 % tik FAIL pakopose:
   K=2 C N=32 (34 %), K=2 H N=16 (43 %), K=4 C N=16 (30 %), K=4 H N=16 (7 %); nė viena PASS pakopa nepatikrinta mažiau nei per pusę,
-  G pakopose aprėptis ≈ 100 %. Aprėptis perskaičiuota iš `summary-verify-composite.json` (matavimo metu harness jos neįrašė).
+  G pakopose aprėptis 71–101 % (mažiausia K=2 N=32: 71 %, K=1 N=32: 94 %, kitur ≥ 97 %). Aprėptis perskaičiuota iš `summary-verify-composite.json` (matavimo metu harness jos neįrašė).
 
 ## Metodas
 
@@ -50,8 +50,9 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
   pirmojo, negaliojančio G matavimo duomenys liko `evidence/compare-composite/capacity-composite-k*-G.all.json`).
 - **C variantas:** `--impl cpu` priverstinai naudoja host storage (`src/func/main_func.cpp`: `if (o.impl == "cpu") o.storage = "host"`),
   CUDA kontekstas nekuriamas (`verify` C/H variantuose taip pat CPU).
-- **Harness po matavimų pakeistas** (be perkartojimo): composite `--duration` sutrumpintas iki `total + 14` (anksčiau `+ 40`, tik
-  tuščias laukimas po lango), patikros aprėptis įrašoma į JSON, VRAM modelis pakeistas regresija (žr. žemiau). Matavimo langas ir
+- **Harness po matavimų pakeistas** (be perkartojimo): composite `--duration` sutrumpintas iki `total + 20` (anksčiau `+ 40`, tik
+  tuščias laukimas po lango); jei tarpas tarp composite ir verify starto > 14 s, pakopa žymima „NEDERINA“ (ne PASS/FAIL). **Visa pateikta
+  kampanija vyko su senąja `+ 40` uodega, todėl jos matavimo langas nebuvo paveiktas**, patikros aprėptis įrašoma į JSON, VRAM modelis pakeistas regresija (žr. žemiau). Matavimo langas ir
   PASS kriterijai nepakito.
 - **10.1 dūmų bandymas** (K=2, N=1, 20 s + 5 s apšilimas, `--source fair`, `capacity.py` tiesiogiai): C — griežtai PASS, verif 0, 40 mėginių,
   CPU/srautui 0,354; G — pirmas paleidimas griežtai FAIL (1 `late_skips`, WSL2 drebėjimas), tol PASS, verif 0 (39 mėginiai); G pakartojimas
@@ -68,9 +69,9 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
 - **GPU dažniai:** kampanijos pradžioje GPU P8, 210 MHz. 1 Hz zondo SM dažnio vidurkiai: N ≤ 2 daugumoje variantų 210–520 MHz
   (tuščios eigos būsena), N=4 — nuo 210 iki 2595 MHz (G K=4: 212 MHz, H K=4: 2595 MHz), didesnėms N daugiausia 520–2595 MHz.
   **G pakartojime** SM dažnio vidurkis pakopose: K=1 — 210, 210, 210, 449, 211, 380 MHz (N=1…32); K=2 — 210, 210, 547, 212, 375,
-  688; K=4 — 239, 512, 211, 352, 687 (kampanijoje niekur nepasiekta maks. 3105 MHz). Todėl žemų N PASS/FAIL iš dalies
-  priklauso nuo dažnio kilimo, ne vien nuo apkrovos (tą patį artefaktą aprašo
-  `2026-11-11-gpu-vs-cpu.md`, „Grandinės G N\* = 1 yra artefaktas“).
+  688; K=4 — 239, 512, 211, 352, 687 (kampanijoje niekur nepasiekta maks. 3105 MHz). Galima hipotezė, kad žemų N
+  PASS/FAIL iš dalies priklauso nuo dažnio kilimo, o ne vien nuo apkrovos (panašų artefaktą aprašo
+  `2026-11-11-gpu-vs-cpu.md`, „Grandinės G N\* = 1 yra artefaktas“); šioje kampanijoje tai netikrinta.
 - **Laikrodžio zondas** (`80-clock-probe.py`, 30 s), C/H kampanija (ir pirmoji, negaliojanti G): prieš — realtime/raw 2,2 ppm, PHC 0,9 ppm, realtime−PHC 0,036 ms,
   žingsnių 0; po — −0,1 ppm, −0,2 ppm, −0,016 ms, žingsnių 0. G pakartojimas (15:04–15:39): prieš — 0,0 / −0,0 ppm, 0,002 ms; po —
   0,1 / −0,2 ppm, 0,012 ms, žingsnių 0 (`clock-before.json`, `clock-after.json` abiejuose kataloguose). Zondas aprėpia tik 30 s langą;
@@ -216,7 +217,7 @@ N* griežtai = **2**, N* tol = **4**
 | 4 | PASS | PASS | 0.000 | 1.0000 | 0 | 480 | 100 | 0 | 0.058 | 0.301 | 0.047 | 3.64 / 3.90 | 8.32 / 10.62 | 1417 | 35 | 12 | `compare-composite-g/capacity-composite-k4-G.all.json` |
 | 8 | PASS | PASS | 0.000 | 1.0000 | 0 | 960 | 100 | 0 | 0.035 | 0.196 | 0.020 | 4.10 / 4.39 | 9.31 / 11.66 | 2327 | 37 | 14 | `compare-composite-g/capacity-composite-k4-G.all.json` |
 | 16 | PASS | PASS | 0.000 | 1.0000 | 0 | 1905 | 99 | 13 | 0.020 | 0.106 | 0.007 | 4.10 / 4.39 | 10.36 / 14.03 | 4147 | 39 | 18 | `compare-composite-g/capacity-composite-k4-G.all.json` |
-| 32 | praleista | praleista | | | | | | | | | | | | | | | VRAM riba (išmatuota): bandymas pakilo iki ΔVRAM 7223 MiB (zondas 7554 MiB iš 8188), composite nepradėjo išvesti ir buvo nutrauktas (killed); originalus įrašas capacity-composite-k4-G.attempt-n32.json. Modelis rodė 6047 MiB (pataisytas koeficientas 1,25 → 7431 MiB > 7168). (ne harness išvestis: rankinė perklasifikacija); `compare-composite-g/capacity-composite-k4-G.attempt-n32.json` |
+| 32 | praleista | praleista | | | | | | | | | | | | | | | VRAM riba (išmatuota): bandymas pakilo iki ΔVRAM 7223 MiB (zondas 7554 MiB iš 8188), composite nepradėjo išvesti ir buvo nutrauktas (killed); originalus įrašas capacity-composite-k4-G.attempt-n32.json. Pirmas modelis rodė 6047 MiB; regresijos modelis: 7784 MiB (× 1,05 atsarga = 8174 MiB) > 7168 MiB. (ne harness išvestis: rankinė perklasifikacija); `compare-composite-g/capacity-composite-k4-G.attempt-n32.json` |
 
 N* griežtai = **0**, N* tol = **0** (N=32 praleista, žr. eilutės priežastį — riba nepasiekta tik todėl, kad pakopos nevykdytos)
 
@@ -235,15 +236,16 @@ Pakopos su patikros aprėptimi < 50% (R21): K=2 C N=32 (34 %), K=2 H N=16 (43 %)
 
 ## Pastabos ir apribojimai
 
-- **G (po `39dcb80`):** 0 teisingumo klaidų visose vykdytose pakopose; patikros aprėptis ≈ 100 %. Dauguma G FAIL pakopų — pavieniai
+- **G (po `39dcb80`):** 0 teisingumo klaidų visose vykdytose pakopose; patikros aprėptis 71–101 % (mažiausia K=2 N=32: 71 %). Dauguma G FAIL pakopų — pavieniai
   vėluojantys laukai (K=2: griežtai FAIL visur; tol PASS kai N=1, 2, 8, 16, 32, N=4: 2,4 % praradimų), `proc` p99 G pakopose ≈ 6 ms
   ar mažiau. **Hipotezė (neišbandyta):** žemos N pakopos nukenčia nuo žemo GPU dažnio, o K=4 N≈32 riboja VRAM; abu teiginiai
   remiasi pavieniais matavimais be užfiksuotų dažnių ir be pakartojimų. Tikslesniam G/C santykiui reikia užfiksuotų GPU dažnių ir
   pakartojimų.
 - **H** K=1 jau N=8 FAIL (`proc` p99 22 ms, artėja prie 30 ms termino).
 - **C** gerai skalėjasi mažiems K (K=1 PASS_tol iki N=16), bet K=4 jau N=8 FAIL (11,6 % praradimų, 0,53 branduolio/srautui).
-- Nemonotoniškumas (K=1 C N=4 griežtai FAIL, N=8 PASS; K=1 H N=2 FAIL, N=4 PASS) — WSL2 drebėjimas ir GPU dažnio perėjimai;
+- Nemonotoniškumas (K=1 C N=4 griežtai FAIL, N=8 PASS; K=1 H N=2 FAIL, N=4 PASS) — tikėtina, kad dėl WSL2 drebėjimo ir GPU dažnio perėjimų (netikrinta);
   pakartojimų nedaryta (viena pakopa vienam variantui). Pasikliauti reikia tendencija, ne pavieniu N.
-- `verify`: ≥ 119 mėginių kiekvienoje nepraleistoje pakopoje (išskyrus didelės apkrovos K=4 N=16: C 571, H 135 — `check_dropped`).
+- `verify` mėginių skaičius mažesnis didelės apkrovos FAIL pakopose (K=4 N=16: C 571, H 135 mėginiai; `check_dropped` ten = 0, todėl priežastis
+  neišaiškinta — tikėtina, kad verify neturėjo ką tikrinti dėl praleistų composite laukų arba dėl apkrovos; nepatikrinta).
 - Nevykdyta: v210a išėjimo kampanija, pakartojimai (išskyrus G po pataisos), G K=4 N=32 (VRAM).
 - Logo kampanija vyko kitu energijos profiliu (`2026-11-11-gpu-vs-cpu.md`), todėl logo ir composite skaičiai tiesiogiai nepalyginami.
