@@ -82,7 +82,7 @@ struct CompositeJob {
 //  - bazė (jei yra): tinkamas rastras, tas pats w / h / interlaced kaip išėjimo; base == nullptr leidžiama TIK v210a
 //    išėjimui (R12: be bazės fill neapibrėžtas v210 išėjime, nes nėra alfa jam parodyti);
 //  - kiekvienas sluoksnis: grain != nullptr, tinkamas rastras, tas pats interlaced, x >= 0 ir lyginis, y >= 0
-//    (interlaced -> y lyginis, R1), opacity ne NaN.
+//    (interlaced -> y lyginis, R1), opacity baigtinis (ne NaN / ±inf).
 // Įrenginio specifiniai reikalavimai (lygiavimas, kMaxBatchLayers) tikrinami atskirai paties varianto. why (nebūtinas) —
 // pirmos rastos klaidos aprašas.
 inline bool composite_job_valid(const CompositeJob& j, int parity, std::string* why = nullptr) {
@@ -109,7 +109,7 @@ inline bool composite_job_valid(const CompositeJob& j, int parity, std::string* 
         if (L.r.interlaced != j.out_r.interlaced) return fail("sluoksnio interlace neatitinka išėjimo");
         if (L.x < 0 || (L.x & 1) || L.y < 0) return fail("sluoksnio x / y neleistinas");
         if (j.out_r.interlaced && (L.y & 1)) return fail("nelyginis y interlaced rastre");  // R1
-        if (std::isnan(L.opacity)) return fail("opacity NaN");
+        if (!std::isfinite(L.opacity)) return fail("opacity ne baigtinis (NaN / ±inf)");
     }
     return true;
 }
@@ -161,7 +161,14 @@ inline bool raster_from_flow_def(const std::string& json, Raster& out, std::stri
     if (!detail::json_int(json, "frame_width", r.w)) { err = "flow apraše nėra frame_width"; return false; }
     if (!detail::json_int(json, "frame_height", r.h)) { err = "flow apraše nėra frame_height"; return false; }
     std::string im;
-    r.interlaced = detail::json_str(json, "interlace_mode", im) && im != "progressive";
+    // Palaikoma TIK progressive (arba nenurodyta) ir interlaced_tff (lyginis indeksas = viršutinis laukas). BFF ir kitos
+    // reikšmės atmetamos aiškiai: tylus TFF laukų tvarkos priskyrimas BFF turiniui sukeistų laukus.
+    const bool has_im = detail::json_str(json, "interlace_mode", im);
+    if (has_im && im != "progressive" && im != "interlaced_tff") {
+        err = "nepalaikomas interlace_mode " + im + " (palaikoma: progressive, interlaced_tff)";
+        return false;
+    }
+    r.interlaced = has_im && im == "interlaced_tff";
     if (r.interlaced && (r.h % 2) != 0) { err = "interlaced rastro aukštis nelyginis"; return false; }
     out = r;
     return true;

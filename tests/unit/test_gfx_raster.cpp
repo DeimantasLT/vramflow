@@ -78,6 +78,22 @@ TEST_CASE("gfx: raster_from_flow_def", "[gfx]") {
     REQUIRE(raster_from_flow_def(i50, r, err));
     CHECK((r.w == 1920 && r.h == 1080 && r.interlaced && !r.alpha));
 
+    // interlace_mode: tik progressive / nenurodyta / interlaced_tff; BFF ir nežinomos reikšmės atmetamos
+    const auto im = [](const char* m) {
+        return std::string(R"({"media_type":"video/v210a","frame_width":8,"frame_height":4,"interlace_mode":")") + m + R"("})";
+    };
+    CHECK(raster_from_flow_def(im("progressive"), r, err));
+    CHECK_FALSE(r.interlaced);
+    CHECK(raster_from_flow_def(im("interlaced_tff"), r, err));
+    CHECK(r.interlaced);
+    err.clear();
+    CHECK_FALSE(raster_from_flow_def(im("interlaced_bff"), r, err));
+    CHECK(err.find("interlaced_bff") != std::string::npos);
+    CHECK_FALSE(raster_from_flow_def(im("segmented"), r, err));
+    CHECK_FALSE(raster_from_flow_def(im(""), r, err));
+    CHECK(raster_from_flow_def(R"({"media_type":"video/v210a","frame_width":8,"frame_height":4})", r, err));  // nenurodyta = progresyvus
+    CHECK_FALSE(r.interlaced);
+
     CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video/h264","frame_width":1,"frame_height":2})", r, err));
     CHECK_FALSE(err.empty());
     CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video/v210","frame_height":2})", r, err));
@@ -120,6 +136,10 @@ TEST_CASE("gfx: composite_job_valid — vienas patikrinimas visiems variantams (
     b = L; b.y = 3;  // nelyginis y interlaced (R1)
     CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
     b = L; b.opacity = std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.opacity = std::numeric_limits<float>::infinity();
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.opacity = -std::numeric_limits<float>::infinity();
     CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
     b = L; b.r = Raster{4, 4, false, true};  // sluoksnio interlace kitoks
     CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
