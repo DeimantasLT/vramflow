@@ -1,0 +1,31 @@
+# U4: ctest, non-root user mxltest, WSL2 Ubuntu 24.04, Clang 19, CUDA 13.2, RTX 4070 Laptop, PR #653 @ 6dddc91d92f5 + patch
+# runuser -u mxltest -- ctest -R "CUDA payload" -E "another container" --timeout 60 -j1
+Test project /root/src/mxl-u4/build/Linux-Clang-Release
+    Start  4: CUDA payload : A refused second writer leaves the first writer's payload socket
+1/9 Test  #4: CUDA payload : A refused second writer leaves the first writer's payload socket ...   Passed    0.94 sec
+    Start  5: CUDA payload : Descriptors in an unknown format are refused
+2/9 Test  #5: CUDA payload : Descriptors in an unknown format are refused .......................   Passed    0.45 sec
+    Start  6: CUDA payload : Invalid options
+3/9 Test  #6: CUDA payload : Invalid options ....................................................   Passed    0.46 sec
+    Start  8: CUDA payload : Reader in another process
+4/9 Test  #8: CUDA payload : Reader in another process ..........................................   Passed    1.19 sec
+    Start  9: CUDA payload : Reader on a peer GPU
+5/9 Test  #9: CUDA payload : Reader on a peer GPU ...............................................***Skipped   0.18 sec
+    Start 10: CUDA payload : Writer and reader in one process
+6/9 Test #10: CUDA payload : Writer and reader in one process ...................................   Passed    0.58 sec
+    Start 11: CUDA payload : v210a fill and key planes reach the reader
+7/9 Test #11: CUDA payload : v210a fill and key planes reach the reader .........................   Passed    0.45 sec
+    Start 12: CUDA payload : v210a has a fill plane and a key plane
+8/9 Test #12: CUDA payload : v210a has a fill plane and a key plane .............................   Passed    0.40 sec
+    Start 13: CUDA payload : v210a partial grains cover both planes
+9/9 Test #13: CUDA payload : v210a partial grains cover both planes .............................   Passed    0.47 sec
+
+100% tests passed, 0 tests failed out of 9
+
+Total Test time (real) =   5.13 sec
+
+The following tests did not run:
+	  9 - CUDA payload : Reader on a peer GPU (Skipped)
+
+# clang-format-19 --dry-run -Werror lib/tests/cuda/test_cuda_payload.cpp
+clean

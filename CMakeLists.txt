@@ -57,6 +57,13 @@ if(MXLV_BUILD_TESTS)
   add_executable(mxlv-gpu-tests tests/gpu/test_kernels.cpp)
   target_link_libraries(mxlv-gpu-tests PRIVATE mxlv_gpu Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-gpu-tests)
+
+  # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
+  add_executable(vramflow-v210a-gpu-tests tests/gpu/test_v210a_cuda_linear.cpp)
+  target_link_libraries(vramflow-v210a-gpu-tests PRIVATE mxl::mxl CUDA::cudart_static Catch2::Catch2WithMain)
+  target_include_directories(vramflow-v210a-gpu-tests PRIVATE ${CMAKE_SOURCE_DIR}/src ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
+  set_target_properties(vramflow-v210a-gpu-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
+  catch_discover_tests(vramflow-v210a-gpu-tests)
 endif()
 
 # GPU media funkcijos (logotipas, kodavimas, dekodavimas) — architektūra docs/architektura/2026-11-10-gpu-media-funkcijos.md
