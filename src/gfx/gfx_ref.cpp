@@ -87,7 +87,7 @@ int clamp_fill(int v) { return std::clamp(v, 4, 1019); }
 }  // namespace
 
 bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r,
-                   int parity, std::uint8_t* grain) {
+                   int parity, std::uint8_t* grain, PixelOrder order) {
     if (!rgba || !grain || !raster_ok(r) || !r.alpha) return false;
     if (r.w != w || r.h != h) return false;
     if (stride < static_cast<std::size_t>(w) * 4) return false;
@@ -102,7 +102,8 @@ bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, A
         Row row(w);
         std::vector<int> a8(w), cb(w), cr(w);  // cb/cr — pikselio (ne poros) reikšmės
         for (int x = 0; x < w; ++x) {
-            int c[3] = {src[4 * x], src[4 * x + 1], src[4 * x + 2]};
+            const int ri = order == PixelOrder::BGRA ? 2 : 0;  // R baito vieta pikselyje (B — priešingame gale)
+            int c[3] = {src[4 * x + ri], src[4 * x + 1], src[4 * x + 2 - ri]};
             const int a = src[4 * x + 3];
             a8[x] = a;
             if (mode == AlphaIn::Premultiplied)

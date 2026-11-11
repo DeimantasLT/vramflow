@@ -233,6 +233,8 @@ struct RgbaScratch {
     std::vector<u16> y, cb, cr, key, cbp, crp;
 };
 
+// RI — R baito vieta pikselyje (0 = RGBA, 2 = BGRA); B — 2 - RI. Šablonas: vidinis ciklas be šakos kanalų tvarkai.
+template <int RI>
 void convert_row(const std::uint8_t* __restrict src, int w, AlphaIn mode, RgbaScratch& s) {
     for (int x = 0; x < w; ++x) {
         const int a = src[4 * x + 3];
@@ -240,13 +242,13 @@ void convert_row(const std::uint8_t* __restrict src, int w, AlphaIn mode, RgbaSc
         if (mode == AlphaIn::Premultiplied) {
             // c' = a == 0 ? 0 : min(255, (c·255 + a/2) / a)
             const int ad = a ? a : 1, half = a / 2;
-            s.r[x] = a ? std::min(255, (src[4 * x] * 255 + half) / ad) : 0;
+            s.r[x] = a ? std::min(255, (src[4 * x + RI] * 255 + half) / ad) : 0;
             s.g[x] = a ? std::min(255, (src[4 * x + 1] * 255 + half) / ad) : 0;
-            s.b[x] = a ? std::min(255, (src[4 * x + 2] * 255 + half) / ad) : 0;
+            s.b[x] = a ? std::min(255, (src[4 * x + 2 - RI] * 255 + half) / ad) : 0;
         } else {
-            s.r[x] = src[4 * x];
+            s.r[x] = src[4 * x + RI];
             s.g[x] = src[4 * x + 1];
-            s.b[x] = src[4 * x + 2];
+            s.b[x] = src[4 * x + 2 - RI];
         }
     }
     // BT.709 siauras diapazonas, 10 bitų — TA PATI double aritmetika (tokia pati operacijų tvarka, be FMA: žr. cmake
@@ -282,7 +284,7 @@ void convert_row(const std::uint8_t* __restrict src, int w, AlphaIn mode, RgbaSc
 }  // namespace
 
 bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r, int parity,
-                   std::uint8_t* grain) {
+                   std::uint8_t* grain, PixelOrder order) {
     if (!rgba || !grain || !raster_ok(r) || !r.alpha) return false;
     if (r.w != w || r.h != h) return false;
     if (stride < static_cast<std::size_t>(w) * 4) return false;
@@ -297,7 +299,8 @@ bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, A
     const int lines = grain_lines(r);
     for (int j = 0; j < lines; ++j) {
         const int frame_row = r.interlaced ? 2 * j + parity : j;
-        convert_row(rgba + static_cast<std::size_t>(frame_row) * stride, w, mode, s);
+        if (order == PixelOrder::BGRA) convert_row<2>(rgba + static_cast<std::size_t>(frame_row) * stride, w, mode, s);
+        else convert_row<0>(rgba + static_cast<std::size_t>(frame_row) * stride, w, mode, s);
         // s.y[w..], s.cb[w/2..] lieka 0 (priskirta vieną kartą, convert_row rašo tik tikrus mėginius).
         std::uint8_t* fl = grain + static_cast<std::size_t>(j) * fill_line_bytes(w);
         pack_fill(fl, groups, s.y.data(), s.cb.data(), s.cr.data());

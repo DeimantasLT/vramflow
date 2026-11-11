@@ -107,6 +107,22 @@ TEST_CASE("gfx cpu: rgba_to_v210a == ref (visi plotai, paritetai, alfa režimai)
     }
 }
 
+TEST_CASE("gfx cpu: BGRA rgba_to_v210a == ref BGRA (plotai, paritetai, alfa režimai)", "[gfx]") {
+    std::uint32_t seed = 40;
+    for (int w : {1920, 382})
+        for (AlphaIn m : {AlphaIn::Straight, AlphaIn::Premultiplied})
+            for (int parity = 0; parity < 2; ++parity) {
+                const Raster r{w, 108, parity == 1 || w == 1920, true};
+                const std::size_t stride = static_cast<std::size_t>(w) * 4 + 32;
+                const Buf px = make_rgba(w, 108, stride, seed++);
+                Buf a(grain_bytes(r), 0xA5), b(grain_bytes(r), 0x5A);
+                REQUIRE(ref::rgba_to_v210a(px.data(), w, 108, stride, m, r, parity, a.data(), PixelOrder::BGRA));
+                REQUIRE(cpu::rgba_to_v210a(px.data(), w, 108, stride, m, r, parity, b.data(), PixelOrder::BGRA));
+                INFO("w=" << w << " parity=" << parity << " il=" << r.interlaced);
+                CHECK(diff_bytes(a, b) == 0);
+            }
+}
+
 TEST_CASE("gfx cpu: rgba_to_v210a ribiniai atvejai (visos alfa, c > a premultiplied)", "[gfx]") {
     const int w = 256, h = 256;
     Buf rgba(static_cast<std::size_t>(w) * h * 4);

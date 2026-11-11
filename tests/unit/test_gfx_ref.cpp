@@ -79,6 +79,36 @@ Buf fill_only(const Buf& g, const Raster& r) { return Buf(g.begin(), g.begin() +
 
 }  // namespace
 
+// BGRA (Chromium / naršyklių, daugelio renderių tvarka): tas pats kadras su sukeistais R ir B kanalais, perduotas kaip
+// PixelOrder::BGRA, privalo duoti bitas į bitą tą patį grain'ą kaip RGBA (visi alfa režimai, paritetai, stride su tarpu).
+TEST_CASE("gfx ref: BGRA == RGBA po kanalų sukeitimo", "[gfx]") {
+    for (const AlphaIn m : {AlphaIn::Straight, AlphaIn::Premultiplied})
+        for (const bool il : {false, true})
+            for (int parity = 0; parity < (il ? 2 : 1); ++parity) {
+                const int w = 382, h = 40;
+                const std::size_t stride = static_cast<std::size_t>(w) * 4 + 12;
+                const Buf packed = make_rgba(w, h, 77, 0);
+                Buf rgba(stride * h, 0xAB), bgra(stride * h, 0xCD);
+                for (int y = 0; y < h; ++y)
+                    for (int x = 0; x < w; ++x) {
+                        const std::uint8_t* s = &packed[(static_cast<std::size_t>(y) * w + x) * 4];
+                        std::uint8_t* a = &rgba[y * stride + 4 * static_cast<std::size_t>(x)];
+                        std::uint8_t* b = &bgra[y * stride + 4 * static_cast<std::size_t>(x)];
+                        a[0] = s[0]; a[1] = s[1]; a[2] = s[2]; a[3] = s[3];
+                        b[0] = s[2]; b[1] = s[1]; b[2] = s[0]; b[3] = s[3];
+                    }
+                const Raster r{w, h, il, true};
+                Buf g1(grain_bytes(r), 0x11), g2(grain_bytes(r), 0x22);
+                REQUIRE(ref::rgba_to_v210a(rgba.data(), w, h, stride, m, r, parity, g1.data()));
+                REQUIRE(ref::rgba_to_v210a(bgra.data(), w, h, stride, m, r, parity, g2.data(), PixelOrder::BGRA));
+                INFO("il=" << il << " parity=" << parity);
+                CHECK(g1 == g2);
+                Buf g3(grain_bytes(r), 0x33);  // BGRA baitai kaip RGBA -> kitas rezultatas (testas atskiria tvarkas)
+                REQUIRE(ref::rgba_to_v210a(bgra.data(), w, h, stride, m, r, parity, g3.data(), PixelOrder::RGBA));
+                CHECK(g1 != g3);
+            }
+}
+
 TEST_CASE("gfx ref: RGBA -> key", "[gfx]") {
     // key = 64 + (a8·876 + 127)/255. a8=0: 64; a8=255: (223380+127)/255 = 876 -> 940; a8=128: (112128+127)/255 = 440 -> 504;
     // a8=1: (876+127)/255 = 3 -> 67.

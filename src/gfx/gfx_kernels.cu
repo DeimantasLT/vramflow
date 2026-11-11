@@ -116,7 +116,7 @@ struct RgbaArgs {
     std::uint8_t* grain;
     std::size_t stride, fill_line, key_line, fill_total;
     int w, lines, gpr, kwords, parity;  // gpr — grupių eilutėje su padding (fill_line / 16)
-    bool premult, interlaced, rgba_vec, grain_vec;
+    bool premult, interlaced, rgba_vec, grain_vec, bgra;
 };
 
 __global__ void k_rgba_to_v210a(const __grid_constant__ RgbaArgs a) {
@@ -144,6 +144,7 @@ __global__ void k_rgba_to_v210a(const __grid_constant__ RgbaArgs a) {
                 } else {
                     c[0] = p[0]; c[1] = p[1]; c[2] = p[2]; aa = p[3];
                 }
+                if (a.bgra) { const int t = c[0]; c[0] = c[2]; c[2] = t; }  // BGRA: baitas 0 — B, baitas 2 — R
                 if (a.premult) {
 #pragma unroll
                     for (int q = 0; q < 3; ++q) c[q] = aa == 0 ? 0 : min(255, (c[q] * 255 + aa / 2) / aa);
@@ -349,7 +350,7 @@ cudaError_t launch(const CompositeJob* jobs, int cnt, cudaStream_t s) {
 }  // namespace
 
 cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r,
-                          int parity, std::uint8_t* grain_dev, cudaStream_t s) {
+                          int parity, std::uint8_t* grain_dev, cudaStream_t s, PixelOrder order) {
     if (!rgba_dev || !grain_dev || !raster_ok(r) || !r.alpha) return cudaErrorInvalidValue;
     if (r.w != w || r.h != h) return cudaErrorInvalidValue;
     if (stride < static_cast<std::size_t>(w) * 4) return cudaErrorInvalidValue;
@@ -371,6 +372,7 @@ cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_
     a.interlaced = r.interlaced;
     a.rgba_vec = aligned(rgba_dev, 4) && stride % 4 == 0;
     a.grain_vec = aligned(grain_dev, 16);
+    a.bgra = order == PixelOrder::BGRA;
     k_rgba_to_v210a<<<blocks_for(static_cast<std::size_t>(a.lines) * a.gpr), kThreads, 0, s>>>(a);
     return cudaPeekAtLastError();
 }

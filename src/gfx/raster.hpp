@@ -51,6 +51,8 @@ constexpr void key_set(std::uint32_t* key_line, int x, std::uint32_t v) {
 
 // Bendri tipai visiems įgyvendinimams (etalonas, CPU, CUDA).
 enum class AlphaIn { Straight, Premultiplied };
+// 8 bitų kanalų tvarka atmintyje: RGBA (baitai R, G, B, A) arba BGRA (B, G, R, A — Chromium / naršyklės, GStreamer BGRA).
+enum class PixelOrder { RGBA, BGRA };
 struct Layer {
     const std::uint8_t* grain;  // host arba device
     Raster r;

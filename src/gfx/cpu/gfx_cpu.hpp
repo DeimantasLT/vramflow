@@ -14,7 +14,7 @@
 namespace vramflow::gfx::cpu {
 
 bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r,
-                   int parity, std::uint8_t* grain);
+                   int parity, std::uint8_t* grain, PixelOrder order = PixelOrder::RGBA);
 
 // Vienas darbas; pool == nullptr — viena gija (kviečianti), kitaip eilutės dalijamos tarp pool gijų.
 bool composite(const std::uint8_t* base, const Raster& base_r, const Layer* layers, int k, const Raster& out_r,

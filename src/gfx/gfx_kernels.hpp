@@ -32,7 +32,7 @@ constexpr int kMaxBatchLayers = 640;  // sluoksnių suma vienam paleidimui; dide
 // Vienas laukas (paritetas parity) iš RGBA kadro (device, w×h, stride B) -> v210a grain'as (device). Semantika kaip
 // ref::rgba_to_v210a (interlaced: kadro eilutės 2j+parity; progresyvus: visos eilutės, parity ignoruojamas).
 cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r,
-                          int parity, std::uint8_t* grain_dev, cudaStream_t s);
+                          int parity, std::uint8_t* grain_dev, cudaStream_t s, PixelOrder order = PixelOrder::RGBA);
 
 // Vienas paleidimas laukui visiems n išėjimų (kaip media::logo_fields). jobs — HOST masyvas su DEVICE rodyklėmis
 // (CompositeJob::base, layers[i].grain ir out — device; pats `layers` masyvas — host). n <= kMaxBatch; n == 0 —

@@ -24,9 +24,9 @@ constexpr int kAlphaScale = 876;  // A: alfa skalė 0…A (key 64…940)
 
 // Vienas laukas (paritetas p) iš progresyvinio RGBA kadro (w×h, stride B) -> v210a grain'as (fill + key).
 // r.alpha privalo būti true, r.w == w, r.h == h. Interlaced r: laukas = kadro eilutės 2j+parity; progresyvus r: visos
-// eilutės, parity ignoruojamas.
+// eilutės, parity ignoruojamas. order — kanalų tvarka (BGRA: baitai B, G, R, A; rezultatas kaip RGBA po sukeitimo).
 bool rgba_to_v210a(const std::uint8_t* rgba, int w, int h, std::size_t stride, AlphaIn mode, const Raster& r,
-                   int parity, std::uint8_t* grain);
+                   int parity, std::uint8_t* grain, PixelOrder order = PixelOrder::RGBA);
 
 // base: v210 arba v210a grain'as arba nullptr (--base none); out — v210 arba v210a pagal out_r.alpha. Sluoksniai
 // dedami iš apačios į viršų (R8). Sluoksnio rastras be key (v210) = visiškai nepermatomas. Nukirpimas ties išėjimo
