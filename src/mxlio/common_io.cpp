@@ -46,31 +46,6 @@ std::string flow_def_json(const Options& o, std::uint32_t n) {
     return b;
 }
 
-std::string cuda_uuid_string(int ordinal) {
-    cudaDeviceProp p{};
-    if (cudaGetDeviceProperties(&p, ordinal) != cudaSuccess) {
-        (void)cudaGetLastError();
-        return {};
-    }
-    static const char* hex = "0123456789abcdef";
-    std::string r = "GPU-";
-    for (int i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) r.push_back('-');
-        const auto v = static_cast<std::uint8_t>(p.uuid.bytes[i]);
-        r.push_back(hex[v >> 4]);
-        r.push_back(hex[v & 15]);
-    }
-    return r;
-}
-
-int cuda_device_by_uuid(const std::string& uuid) {
-    int count = 0;
-    if (cudaGetDeviceCount(&count) != cudaSuccess) return -1;
-    for (int i = 0; i < count; ++i)
-        if (uuid.empty() || cuda_uuid_string(i) == uuid) return i;
-    return -1;
-}
-
 std::string writer_options(const Options& o, const std::string& uuid) {
     if (o.storage == "host") return "";
     return R"({"payload":{"backend":"cuda-linear","deviceUuid":")" + uuid + R"("}})";

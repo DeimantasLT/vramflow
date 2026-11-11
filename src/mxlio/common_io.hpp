@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/histogram.hpp"
+#include "mxlio/cuda_uuid.hpp"  // cuda_uuid_string, cuda_device_by_uuid
 
 namespace mxlv {
 
@@ -57,8 +58,6 @@ std::string flow_id(std::uint32_t n);
 std::uint64_t flow_seed(std::uint64_t run_seed, std::uint32_t n);
 std::string flow_def_json(const Options& o, std::uint32_t n);
 std::uint32_t v210_grain_bytes(std::uint32_t width, std::uint32_t height);
-std::string cuda_uuid_string(int ordinal);       // "GPU-xxxxxxxx-xxxx-..." kaip PR testuose
-int cuda_device_by_uuid(const std::string& uuid);  // -1 jei nėra
 std::string writer_options(const Options& o, const std::string& uuid);
 
 // Atomiškai skaitomi skaitikliai (rašo viena flow gija, skaito ataskaitų gija).

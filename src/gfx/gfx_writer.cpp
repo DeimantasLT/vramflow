@@ -33,6 +33,7 @@
 #include "gfx/gfx_kernels.hpp"
 #include "gfx/gfx_writer_internal.hpp"
 #include "gfx/raster.hpp"
+#include "mxlio/cuda_uuid.hpp"
 #include "mxlio/slots.hpp"
 #include "vramflow/gfx.h"
 
@@ -60,34 +61,11 @@ struct DeviceScope {
     }
 };
 
-std::string device_uuid(int ordinal) {
-    cudaDeviceProp p{};
-    if (cudaGetDeviceProperties(&p, ordinal) != cudaSuccess) { cudaGetLastError(); return {}; }
-    static const char* hex = "0123456789abcdef";
-    std::string r = "GPU-";
-    for (int i = 0; i < 16; ++i) {
-        if (i == 4 || i == 6 || i == 8 || i == 10) r.push_back('-');
-        const auto v = static_cast<std::uint8_t>(p.uuid.bytes[i]);
-        r.push_back(hex[v >> 4]);
-        r.push_back(hex[v & 15]);
-    }
-    return r;
-}
-
-std::string lower(std::string s) {
-    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return s;
-}
-
 // Įrenginio eilės numeris pagal "deviceUuid" iš writer_options_json; -1 — nenurodyta / nerasta.
 int device_from_options(const std::string& opts) {
     std::string u;
-    if (!gfx::detail::json_str(opts, "deviceUuid", u)) return -1;
-    int n = 0;
-    if (cudaGetDeviceCount(&n) != cudaSuccess) { cudaGetLastError(); return -1; }
-    for (int d = 0; d < n; ++d)
-        if (lower(device_uuid(d)) == lower(u)) return d;
-    return -1;
+    if (!gfx::detail::json_str(opts, "deviceUuid", u) || u.empty()) return -1;
+    return mxlv::cuda_device_by_uuid(u);
 }
 
 thread_local std::string g_create_error;
@@ -268,8 +246,6 @@ void vfgfx_writer_s::pace_loop_body() {
     DeviceScope dev(device);  // gija nauja: numatytasis įrenginys 0; čia įrenginys pastovus iki gijos pabaigos
     std::uint64_t i = due_index() + 1;
     if (committed.load() > 0) i = std::max(i, out.last_committed + 1);  // restartas: niekada nekartoti commit'into indekso
-    func::ClockWatch cw;
-    cw.stepped();
     const std::size_t gb = gfx::grain_bytes(r);
     while (!stop.load()) {
         const bool back = hooks.wait ? hooks.wait(i, offset_ns, stop) : func::wait_until(i, offset_ns, stop);
@@ -311,7 +287,6 @@ void vfgfx_writer_s::pace_loop_body() {
         }
         if (wrote) bump(&gi::PacingStats::committed);
         ++i;
-        cw.stepped();
         const std::uint64_t ni = due_index();
         if (ni > i) {  // pavėlavome: praleisti laukai neįrašomi, tęsiama nuo einamojo (kaip gen)
             bump(&gi::PacingStats::late_skips, ni - i);
@@ -373,9 +348,11 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
     w->inst = inst;
     w->r = r;
     w->fields = r.interlaced ? 2 : 1;
-    {   // deviceUuid nurodytas, bet tokio įrenginio nėra: aiški klaida, ne tylus kitas įrenginys
+    // deviceUuid nurodytas, bet tokio įrenginio nėra: aiški klaida, ne tylus kitas įrenginys. Ieškoma vieną kartą per create.
+    const int uuid_dev = device_from_options(opts);
+    {
         std::string u;
-        if (gfx::detail::json_str(opts, "deviceUuid", u) && device_from_options(opts) < 0)
+        if (gfx::detail::json_str(opts, "deviceUuid", u) && !u.empty() && uuid_dev < 0)
             return fail(VFGFX_ERR_INVALID_ARG, "deviceUuid " + u + " neatitinka jokio CUDA įrenginio");
     }
     if (!w->out.create(inst, def, opts, err, r)) {
@@ -387,13 +364,14 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
     }
     w->cuda_store = mxlv::is_cuda_layout(w->out.layout);
     if (w->cuda_store) {
-        int dev = device_from_options(opts);
-        if (dev < 0 && cudaGetDevice(&dev) != cudaSuccess) {
+        // Be deviceUuid — įrenginys 0 (biblioteka turi privatų cudart, kviečiančiojo cudaSetDevice jai nematomas; gfx.h).
+        int n = 0;
+        if (uuid_dev < 0 && (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)) {
             cudaGetLastError();
             w->out.release(inst);
             return fail(VFGFX_ERR_CUDA, "nėra CUDA įrenginio");
         }
-        w->device = dev;
+        w->device = uuid_dev >= 0 ? uuid_dev : 0;
     }
     {
         DeviceScope ds(w->device);

@@ -17,7 +17,9 @@
  * paskirties atmintį. Kryžminė pora kainuoja kopiją: host kadras → cuda-linear = H2D (~8 MB 1080p) + kernel'is;
  * CUDA kadras → host saugykla = D2H + CPU konvertavimas. Ritmo režime ši kaina mokama tik vfgfx_submit metu, ne
  * kiekvieną lauką. CUDA kadras turi priklausyti tam pačiam įrenginiui kaip cuda-linear saugykla (deviceUuid iš
- * writer_options_json; kitaip — kviečiančios gijos dabartiniam), rodyklė ir stride — kartotiniai 4 B.
+ * writer_options_json). deviceUuid PRIVALOMAS daugiau nei vieno GPU kompiuteriuose: biblioteka turi savo (privatų) CUDA
+ * runtime, todėl kviečiančiojo cudaSetDevice jai nematomas; be deviceUuid naudojamas įrenginys 0. UUID — "GPU-xxxxxxxx-…",
+ * raidžių dydis nesvarbus, rodyklė ir stride — kartotiniai 4 B.
  *
  * CUDA kadro tvarka: prieš vfgfx_write / vfgfx_submit kviečiantysis privalo būti BAIGĘS rašyti į f->rgba (pvz. cudaStreamSynchronize
  * arba cudaDeviceSynchronize); šaltinio kernel'ų biblioteka nelaukia. Iškvietimas sinchroninis: grįžus, f->rgba buferį
