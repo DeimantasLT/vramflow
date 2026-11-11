@@ -51,6 +51,7 @@ InputSlot& InputSlot::operator=(InputSlot&& o) noexcept {
     inst_ = o.inst_;
     next_try_ = o.next_try_;
     next_alive_ = o.next_alive_;
+    early_since_ = o.early_since_;
     reattached_ = o.reattached_;
     reason_ = std::move(o.reason_);
     o.in_.r = nullptr;
@@ -67,6 +68,7 @@ void InputSlot::release() {
 
 void InputSlot::detach() {
     release();
+    early_since_ = 0;
     state_ = State::Detached;
     next_try_ = 0;  // kitas poll bando iškart (gamintojas gali jau būti grįžęs)
 }
@@ -77,13 +79,16 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
     next_try_ = now_tai_ns + kRetryNs;
     inst_ = inst;
     // Tik gyvas writer'is: nužudyto gamintojo pasenęs flow (failai liko) neprijungiamas.
-    if (!flow_active(inst, id_)) return state_;
+    if (!flow_active(inst, id_)) {
+        reason_.clear();  // flow nėra (arba be writer'io) — ankstesnė atmetimo priežastis nebegalioja
+        return state_;
+    }
     func::VideoIn fresh;
     std::string err;
     static const std::atomic<bool> no_stop{false};
     if (!fresh.open(inst, id_, OpenPolicy{0, 0}, no_stop, err, static_cast<const vramflow::VideoFormat*>(nullptr))) {
         fresh.release(inst);
-        reason_ = err;
+        reason_ = "flow " + id_ + " yra, bet reader'is neatsidaro: " + err;  // matoma laukimo eilutėje ir ribos klaidoje
         return state_;
     }
     // Formatas / saugykla: expect (arba pirmas prijungtas formatas) ir pirmo prijungimo saugykla.
@@ -114,7 +119,8 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
     if (ever_) ++reattached_;
     ever_ = true;
     reason_.clear();
-    next_alive_ = now_tai_ns + kAliveNs;
+    next_alive_ = 0;
+    early_since_ = 0;
     state_ = State::Attached;
     return state_;
 }
@@ -127,15 +133,19 @@ mxlStatus InputSlot::get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrain
         detach();
         return st;
     }
-    if (st == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) {
-        // Grain'o dar nėra: ar writer'is gyvas? (nužudytas gamintojas palieka flow failus — MXL to nemato)
-        const std::uint64_t now = mxlGetTime();
-        if (now >= next_alive_) {
-            next_alive_ = now + kAliveNs;
-            if (!flow_active(inst_, id_)) {
-                detach();
-                return MXL_ERR_FLOW_INVALID;
-            }
+    if (st != MXL_ERR_OUT_OF_RANGE_TOO_EARLY) {
+        early_since_ = 0;
+        return st;
+    }
+    // Grain'o nėra jau kAliveNs iš eilės: ar writer'is gyvas? (nužudytas gamintojas palieka flow failus — MXL to nemato.)
+    // Trumpiau vėluojantis gamintojas netikrinamas — įprastame tick'e sisteminio kvietimo nėra.
+    const std::uint64_t now = mxlGetTime();
+    if (!early_since_) early_since_ = now;
+    if (now - early_since_ >= kAliveNs && now >= next_alive_) {
+        next_alive_ = now + kAliveNs;
+        if (!flow_active(inst_, id_)) {
+            detach();
+            return MXL_ERR_FLOW_INVALID;
         }
     }
     return st;
@@ -161,17 +171,19 @@ bool wait_attached(const std::vector<InputSlot*>& slots, mxlInstance inst, const
         for (InputSlot* s : slots)
             if (s->state() != InputSlot::State::Attached) missing += (missing.empty() ? "" : ", ") + s->id();
         if (stop.load()) { err = "sustabdyta laukiant įėjimų: " + missing; return false; }
+        // Kodėl neprijungta, jei flow yra, bet netinka (kitas formatas, reader'io klaida): be to laukimas atrodytų kaip „nėra flow“.
+        std::string why;
+        for (InputSlot* s : slots)
+            if (s->state() != InputSlot::State::Attached && !s->reason().empty()) why += " [" + s->reason() + "]";
         const auto t = steady_clock::now();
         if (p.wait_ms == 0 || (p.wait_ms > 0 && t - t0 >= milliseconds(p.wait_ms))) {
             err = "įėjimai neatsirado per " + std::to_string(p.wait_ms) + " ms (--input-wait-ms " + std::to_string(p.wait_ms) +
-                  "; 0 — laukti neribotai): " + missing;
-            for (InputSlot* s : slots)
-                if (s->state() != InputSlot::State::Attached && !s->reason().empty()) err += " [" + s->reason() + "]";
+                  "; 0 — laukti neribotai): " + missing + why;
             return false;
         }
         if (p.log_every_ms && t >= next_log) {
-            std::fprintf(stderr, "[%s] laukiu flow %s, %lld s\n", who, missing.c_str(),
-                         static_cast<long long>(duration_cast<seconds>(t - t0).count()));
+            std::fprintf(stderr, "[%s] laukiu flow %s, %lld s%s\n", who, missing.c_str(),
+                         static_cast<long long>(duration_cast<seconds>(t - t0).count()), why.c_str());
             next_log += milliseconds(p.log_every_ms);
         }
         std::this_thread::sleep_for(milliseconds(20));

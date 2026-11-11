@@ -20,6 +20,13 @@ std::string make_run_id(const std::string& role);
 // run_id: 1…64 simboliai [A-Za-z0-9._-].
 bool valid_run_id(const std::string& run_id);
 
+// cuda-linear flow reader'is jungiasi prie `<domenas>/<uuid>.mxl-flow/payload.sock` (Unix lizdas, sun_path — 107 simboliai;
+// 59 iš jų — flow katalogas ir lizdo vardas). Ilgesnis kanoninis domeno kelias: writer'is flow sukuria, bet joks reader'is
+// kitame procese prie jo neprisijungia (vartotojas lauktų be galo). Todėl riba tikrinama paleidžiant.
+constexpr std::size_t kMaxCudaDomainPath = 48;
+// Tuščias tekstas — tinka (arba domeno dar nėra: tai praneš MXL); kitaip klaida su faktiniu ilgiu ir riba.
+std::string cuda_domain_path_error(const std::string& domain);
+
 class DomainLease {
 public:
     DomainLease() = default;

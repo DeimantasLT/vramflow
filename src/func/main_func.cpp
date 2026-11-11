@@ -159,6 +159,12 @@ int main(int argc, char** argv) {
     // Domeno nuoma (planas §P6, K8): laikoma iki proceso pabaigos; harness'as domeno netrina, kol ji gyva.
     {
         const std::string sub = app.get_subcommands().front()->get_name();
+        // cuda-linear: per ilgas domeno kelias → reader'iai neprisijungtų prie payload.sock ir lauktų be galo — klaida iškart
+        if (o.storage == "cuda-linear")
+            if (const std::string bad = mxlv::runtime::cuda_domain_path_error(o.domain); !bad.empty()) {
+                std::fprintf(stderr, "[%s] --domain: %s\n", sub.c_str(), bad.c_str());
+                return 1;
+            }
         if (o.run_id.empty()) o.run_id = mxlv::runtime::make_run_id(sub);
         std::string err;
         if (!mxlv::runtime::DomainLease::acquire(o.domain, o.run_id, domain_lease(), err)) {

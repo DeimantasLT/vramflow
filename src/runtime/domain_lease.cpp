@@ -13,9 +13,19 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <random>
 
 namespace mxlv::runtime {
+
+std::string cuda_domain_path_error(const std::string& domain) {
+    std::error_code ec;
+    const std::string canon = std::filesystem::canonical(domain, ec).string();  // MXL domeno kelią kanonizuoja taip pat
+    if (ec || canon.size() <= kMaxCudaDomainPath) return {};
+    return "domeno kelias " + canon + " — " + std::to_string(canon.size()) + " simboliai, cuda-linear flow'ams leidžiama ne daugiau kaip " +
+           std::to_string(kMaxCudaDomainPath) + ": reader'io lizdo kelias <domenas>/<uuid>.mxl-flow/payload.sock netelpa į 107 simbolius "
+           "(reader'iai neprisijungtų). Sutrumpinkite domeno kelią arba naudokite --storage host";
+}
 
 namespace {
 constexpr const char* kExt = ".lease";

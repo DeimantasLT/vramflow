@@ -382,3 +382,65 @@ TEST_CASE("domain_lease: SIGKILL atlaisvina nuomą [PF-4]", "[runtime][lease]") 
     ::close(fds[0]);
     ::close(fds[1]);
 }
+
+TEST_CASE("domain path: cuda-linear reader'io payload.sock riba — domeno kelias ≤ 48 simboliai", "[runtime][lease]") {
+    // <domenas>/<uuid>.mxl-flow/payload.sock turi tilpti į sockaddr_un::sun_path (107 simboliai): 107 − 59 = 48.
+    CHECK(runtime::kMaxCudaDomainPath == 48);
+    const std::string base = "/dev/shm/vf-rt-len-" + std::to_string(::getpid()) + "-";
+    const std::string ok = base + std::string(48 - base.size(), 'a');
+    const std::string bad = base + std::string(49 - base.size(), 'b');
+    REQUIRE(ok.size() == 48);
+    std::filesystem::create_directories(ok);
+    std::filesystem::create_directories(bad);
+    CHECK(runtime::cuda_domain_path_error(ok).empty());
+    CHECK(runtime::cuda_domain_path_error(ok + "/").empty());  // galinis '/' neskaičiuojamas (MXL kelią kanonizuoja)
+    const std::string e = runtime::cuda_domain_path_error(bad);
+    INFO(e);
+    CHECK(e.find("payload.sock") != std::string::npos);
+    CHECK(e.find("49") != std::string::npos);
+    CHECK(e.find("48") != std::string::npos);
+    CHECK(runtime::cuda_domain_path_error("/dev/shm/vf-rt-nera-tokio-katalogo").empty());  // nėra domeno — klaidą praneš MXL
+    std::filesystem::remove_all(ok);
+    std::filesystem::remove_all(bad);
+}
+
+TEST_CASE("input_slot: wait_attached klaidoje — kodėl įėjimas neprijungtas (kitas formatas, politika Wait)", "[runtime][mxl]") {
+    Domain d(13);
+    std::atomic<bool> stop{false};
+    Producer p;
+    REQUIRE(p.start(d.inst, 13, kP25));
+    InputSlot a(flow_id(kRoleGen, 13), &vramflow::kFmt1080i50, FormatChange::Wait);
+    std::vector<InputSlot*> v{&a};
+    std::string err;
+    CHECK_FALSE(runtime::wait_attached(v, d.inst, OpenPolicy{400, 0}, stop, "test", err));
+    INFO(err);
+    CHECK(err.find("1080p25") != std::string::npos);
+    CHECK(err.find("1080i50") != std::string::npos);
+    p.stop();
+}
+
+TEST_CASE("input_slot: vėluojantis, bet gyvas gamintojas neatjungiamas", "[runtime][mxl]") {
+    // Gamintojas commit'ina tik kas 60 ms (3 grain'ai, ilgiau nei gyvumo patikros slenkstis): skaitymai grąžina TOO_EARLY,
+    // gyvumo patikra vyksta, bet slot'as lieka Attached — atjungiama tik tada, kai writer'io tikrai nebėra.
+    Domain d(14);
+    Producer p;
+    REQUIRE(p.start(d.inst, 14, vramflow::kFmt1080i50));
+    InputSlot slot(flow_id(kRoleGen, 14), &vramflow::kFmt1080i50, FormatChange::Exit);
+    REQUIRE(poll_while(slot, d.inst, InputSlot::State::Waiting, 1000, &p) == InputSlot::State::Attached);
+    const mxlRational r = mxl_rate(vramflow::kFmt1080i50.grain_rate());
+    const auto t0 = Clock::now();
+    auto last_commit = t0;
+    int early = 0;
+    while (ms_since(t0) < 600) {
+        if (ms_since(last_commit) >= 60) { p.commit_now(); last_commit = Clock::now(); }
+        mxlGrainInfo info{};
+        const std::uint32_t* ptr = nullptr;
+        if (slot.get(mxlGetCurrentIndex(&r) + 1, 0, info, ptr) == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) ++early;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(early > 100);
+    CHECK(slot.state() == InputSlot::State::Attached);
+    CHECK(slot.reattached() == 0);
+    slot.release();
+    p.stop();
+}

@@ -7,9 +7,11 @@
 // formatu / saugykla ir politika Exit — galutinė). Prisijungiama tik prie flow, kuris turi gyvą writer'į (mxlIsFlowActive) ir
 // jau gamina (head žinomas): pasenęs nužudyto gamintojo flow ignoruojamas.
 //
-// Gamintojo dingimas aptinkamas dviem keliais: MXL_ERR_FLOW_INVALID (flow perkurtas / ištrintas) ir — kai grain'o dar nėra
-// (TOO_EARLY) — gyvumo patikra ne dažniau kaip kas kAliveNs (writer'is nužudytas, flow failai liko). Abiem atvejais get()
-// grąžina MXL_ERR_FLOW_INVALID, reader'is atlaisvinamas, būsena Detached.
+// Gamintojo dingimas aptinkamas dviem keliais: MXL_ERR_FLOW_INVALID (flow perkurtas / ištrintas) ir gyvumo patikra, kai
+// grain'o nėra (TOO_EARLY) jau ilgiau kaip kAliveNs iš eilės (writer'is nužudytas, flow failai liko), tada ne dažniau kaip
+// kas kAliveNs. Kol gamintojas vėluoja mažiau nei kAliveNs, patikros (sisteminio kvietimo) nėra visai — tick'ui tai nieko
+// nekainuoja. Abiem atvejais get() grąžina MXL_ERR_FLOW_INVALID, reader'is atlaisvinamas, būsena Detached; atjungtas įėjimas
+// kitų flow'ų nebevėlina (get iškart grąžina MXL_ERR_FLOW_NOT_FOUND).
 //
 // Formatas: expect != nullptr — laukiamas formatas (rastras ir grain'o ritmas); nullptr — pirmas prijungtas formatas tampa
 // laukiamu. Saugykla (cuda / host) visada užrakinama pagal pirmą prijungimą. Viena gija (tick gija) — be sinchronizacijos.
@@ -31,7 +33,7 @@ class InputSlot {
 public:
     enum class State { Waiting, Attached, Detached, Mismatch };
     static constexpr std::uint64_t kRetryNs = 100'000'000;  // prisijungimo bandymas ne dažniau kaip kas 100 ms
-    static constexpr std::uint64_t kAliveNs = 10'000'000;   // gyvumo patikra TOO_EARLY metu ne dažniau kaip kas 10 ms
+    static constexpr std::uint64_t kAliveNs = 10'000'000;   // gyvumo patikra po 10 ms TOO_EARLY iš eilės, tada kas 10 ms
 
     InputSlot(std::string flow_id, const vramflow::VideoFormat* expect, FormatChange on_change);
     InputSlot(InputSlot&& o) noexcept;  // perkeltas slot'as reader'io nebeturi (neatlaisvina dar kartą)
@@ -71,6 +73,7 @@ private:
     mxlInstance inst_ = nullptr;
     std::uint64_t next_try_ = 0;
     std::uint64_t next_alive_ = 0;
+    std::uint64_t early_since_ = 0;  // nuo kada grain'o nėra (TOO_EARLY iš eilės); 0 — paskutinis skaitymas pavyko
     std::uint64_t reattached_ = 0;
     std::string reason_;
 };
