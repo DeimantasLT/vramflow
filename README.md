@@ -258,6 +258,20 @@ A graphics flow behaves like any other flow. If a source stops or restarts, the 
 that output grain is not committed (readers see a gap, as with a stopped video writer), and output continues when the
 source returns.
 
+### 5.3 Example: an OGraf graphic over video
+
+[`examples/ograf/`](examples/ograf/) renders an [EBU OGraf](https://github.com/ebu/ograf) graphic (an HTML web component)
+with a headless browser with transparent background, feeds the RGBA frames to `libvramflow-gfx` (`vfgfx_submit`, pacing
+mode) and puts the resulting `v210a` flow over a `gen` video with `composite`. It uses only the public interfaces.
+`ograf_feed` also accepts raw RGBA/BGRA frames on stdin, so any renderer that can write frames to a pipe (for example
+GStreamer `wpesrc`) can replace the browser. The README there lists what was checked, the commands, and what was and
+was not run (the live render used the already installed Windows Edge, about 4 fps; the official EBU sample graphics were
+not downloaded).
+
+```bash
+SOURCE=edge bash examples/ograf/run-demo.sh /tmp/vf-ograf        # or SOURCE=synthetic (no renderer needed)
+```
+
 ---
 
 ## 6. Command reference
@@ -341,7 +355,21 @@ native Linux rerun will give the authoritative numbers.
   (`nvidia-smi -pm 1`, `-lgc`).
 
 Full tables and notes: [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
-The capacity campaign for the graphics compositor (N flows × K layers) is in progress.
+
+Graphics compositor (`composite`), 1 base + K layers → `v210`, 60 s per level, deadline 30 ms, same N\* rule (tolerant / strict):
+
+| Layers K | C — CPU | H — GPU, RAM flows | G — GPU, GPU flows |
+|---|---|---|---|
+| 1 (logo 384×216) | 16 / 2 | 4 / 1 | 4 / 4 |
+| 2 (logo + full-screen) | 8 / 4 | 4 / 0 | 2 / 0 |
+| 4 (logo + 3 × full-screen) | 4 / 4 | 4 / 2 | 0 / 0 |
+
+Read this table with care: the Windows power profile was "Whisper"; during the G runs the GPU clock averaged only
+210–690 MHz; every level was measured once (no repeats); G levels sometimes fail at low N while larger N pass, so N\* (all
+smaller levels pass) is pessimistic for G (the largest passing N was 32, 32 and 16 for K = 1, 2, 4; K = 4, N = 32 hit the
+8 GB VRAM limit). Whether the clock explains the failures is a hypothesis that was not tested. The first G measurement was
+invalid (a `gfxgen` bug, fixed) and was repeated. Details, latencies and VRAM model:
+[`docs/rezultatai/2026-11-11-composite.md`](docs/rezultatai/2026-11-11-composite.md).
 
 ## 9. Repository layout
 
@@ -352,6 +380,7 @@ The capacity campaign for the graphics compositor (N flows × K layers) is in pr
 | `src/gfx/` | Graphics: RGBA → v210a and compositing (CUDA, CPU, independent reference) |
 | `src/media/` | Video kernels: logo, NV12 ↔ v210, test pattern (CUDA, CPU, reference) |
 | `src/mxlio/`, `src/gpu/` | `vramflow-verify` writer and reader |
+| `examples/ograf/` | OGraf graphic → `libvramflow-gfx` → `composite` example |
 | `tests/` | `unit/`, `gpu/` (Catch2), `functional/`, `perf/` (capacity and reports) |
 | `scripts/wsl/` | Build and run scripts |
 | `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U4) with evidence |

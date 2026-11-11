@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: 2026 Deimantas Kiršinas ; SPDX-License-Identifier: Apache-2.0 -->
+<html><head><meta charset="utf-8"><style>html,body{margin:0;background:transparent;overflow:hidden}</style></head>
+<body><script type="module">
+// Primityvus OGraf „rendereris“: įkelia manifestą, užregistruoja komponentą, load -> playAction.
+const manifest = await (await fetch('lower-third.ograf.json')).json();
+const mod = await import('./' + manifest.main);
+customElements.define('vf-lower-third', mod.default);
+const g = document.createElement('vf-lower-third');
+document.body.appendChild(g);
+await g.load({ data: { title: 'VRAMFlow', subtitle: 'OGraf → libvramflow-gfx → v210a' }, renderType: 'realtime', renderCharacteristics: {} });
+window.__ograf = g;
+await g.playAction({ delta: 1 });
+window.__ready = true;
+</script></body></html>

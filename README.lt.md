@@ -62,6 +62,10 @@ README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
   Pavyzdys README.md 5.1, pilnas kodas `src/mxlio/verify_writer.cpp` ir `verify_reader.cpp`.
 - **Grafika iš bet kurios programos** — `libvramflow-gfx` (`include/vramflow/gfx.h`): `vfgfx_writer_create`, tada
   `vfgfx_submit` (biblioteka pati laiko ritmą) arba `vfgfx_write(index, …)` (ritmą valdai pats). Pavyzdys README.md 5.2.
+- **Pavyzdys: OGraf grafika ant video** — `examples/ograf/` (README.md 5.3): headless naršyklė su permatomu fonu atvaizduoja
+  [EBU OGraf](https://github.com/ebu/ograf) grafiką, `ograf_feed` per `vfgfx_submit` (ritmo režimas) paverčia ją `v210a`
+  flow'u, `composite` uždeda ant `gen` video. Gyvam renderiui panaudotas jau įdiegtas Windows Edge (~4 kadrai/s);
+  oficialių EBU pavyzdinių grafikų neatsisiųsta; kiti renderiai (pvz. GStreamer `wpesrc`) jungiami per stdin.
 - Grafikos flow'as elgiasi kaip bet kuris kitas: sustojus šaltiniui, kompozitorius nieko neišgalvoja — tas išėjimo
   grain'as necommit'inamas, šaltiniui grįžus darbas tęsiasi.
 
@@ -82,7 +86,21 @@ teisinga.
 N\* — didžiausias flow'ų skaičius, kai ši ir visos mažesnės pakopos praėjo (0 teisingumo klaidų, praradimai ≤ 0,2 %).
 Pilnoje grandinėje ties N=12 riba — vienintelis NVENC variklis, CUDA branduoliai užimti ~10 %. Visos lentelės:
 [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md). Grafikos kompozitoriaus talpos
-matavimai (N flow'ų × K sluoksnių) vyksta.
+matavimai (N flow'ų × K sluoksnių):
+
+Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pakopa, terminas 30 ms, tas pats N\* (tolerantiškai / griežtai):
+
+| Sluoksnių K | C — CPU | H — GPU, RAM flow'ai | G — GPU, GPU flow'ai |
+|---|---|---|---|
+| 1 (logotipas 384×216) | 16 / 2 | 4 / 1 | 4 / 4 |
+| 2 (logotipas + pilno ekrano) | 8 / 4 | 4 / 0 | 2 / 0 |
+| 4 (logotipas + 3 × pilno ekrano) | 4 / 4 | 4 / 2 | 0 / 0 |
+
+Lentelę skaityti atsargiai: Windows energijos profilis „Whisper“; G bėgimuose GPU dažnio vidurkis tik 210–690 MHz; kiekviena
+pakopa matuota vieną kartą (be pakartojimų); G pakopos kartais nepraeina žemuose N, nors didesni N praeina, todėl N\* G
+atveju pesimistiškas (didžiausias praėjęs N: 32, 32, 16 esant K = 1, 2, 4; K = 4, N = 32 pasiekė 8 GB VRAM ribą). Ar dažnis
+paaiškina nesėkmes — netikrinta hipotezė. Pirmas G matavimas buvo negaliojantis (`gfxgen` klaida, ištaisyta) ir pakartotas.
+Išsamiai: [`docs/rezultatai/2026-11-11-composite.md`](docs/rezultatai/2026-11-11-composite.md).
 
 ## Licencija ir autorystė
 

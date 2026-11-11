@@ -1,0 +1,17 @@
+{
+  "$schema": "https://ograf.ebu.io/v1/specification/json-schemas/graphics/schema.json",
+  "id": "vramflow-synthetic-lower-third",
+  "name": "VRAMFlow synthetic lower third",
+  "description": "Sintetinė demonstracinė grafika (ne EBU pavyzdys): plokštė su minkštu šešėliu ir tekstas.",
+  "version": "1",
+  "main": "lower-third.mjs",
+  "supportsRealTime": true,
+  "supportsNonRealTime": false,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string", "default": "VRAMFlow" },
+      "subtitle": { "type": "string", "default": "OGraf -> v210a" }
+    }
+  }
+}
