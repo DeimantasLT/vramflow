@@ -1,3 +1,5 @@
+<!-- SPDX-FileCopyrightText: 2026 Deimantas Kiršinas -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # U4 — Catch2 tests: `video/v210a` (fill + key) with the `cuda-linear` payload backend
 
 Target: dmf-mxl/mxl PR #653 (`thomastrue/mxl:feature/cuda-grain-payloads`, tested at `6dddc91d92f5`).
@@ -13,7 +15,9 @@ payload backend. Three tests in `lib/tests/cuda/test_cuda_payload.cpp` (they use
 |---|---|
 | `CUDA payload : v210a has a fill plane and a key plane` | `planeCount == 2`; plane sizes `5120·1080` and `2560·1080`; pitches = `sliceSizes[0..1]`; `planes[1].offset == planes[0].size`; `grainSize` = sum; `totalSlices` = lines |
 | `CUDA payload : v210a fill and key planes reach the reader` | pseudo random bytes written to both planes in device memory arrive byte for byte at a reader (0 differing bytes) |
-| `CUDA payload : v210a partial grains cover both planes` | commits of 270 slices: reader with `minValidSlices == validSlices` gets OK and N lines of fill **and** key; `validSlices + 1` gives `MXL_ERR_OUT_OF_RANGE_TOO_EARLY` |
+| `CUDA payload : v210a partial grains cover both planes` | commits of 270 slices: reader with `minValidSlices == validSlices` gets OK and the first N lines of fill **and** key are byte-identical to what was written; `validSlices + 1` gives `MXL_ERR_OUT_OF_RANGE_TOO_EARLY` |
+
+Not tested: that rows beyond `validSlices` are invisible (the reader returns the whole slot).
 
 (The vramflow repo test `tests/gpu/test_v210a_cuda_linear.cpp` runs the same checks on a 1080i50 field flow; both pass.)
 

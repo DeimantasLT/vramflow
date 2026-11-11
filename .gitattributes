@@ -7,3 +7,4 @@
 CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 *.py text eol=lf
+*.patch -text

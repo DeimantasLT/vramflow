@@ -101,23 +101,32 @@ struct Pair {
     std::vector<mxlGrainStorage> wslots, rslots;
 
     Pair(Domain& dom, const char* id) : d(dom) {
-        const std::string opts = R"({"payload":{"backend":"cuda-linear","deviceUuid":")" + device_uuid() + R"("}})";
-        bool created = false;
-        REQUIRE(mxlCreateFlowWriter(d.inst, v210a_def(id).c_str(), opts.c_str(), &w, &cfg, &created) == MXL_STATUS_OK);
-        REQUIRE(created);
-        REQUIRE(mxlFlowWriterGetStorageLayout(w, &wl) == MXL_STATUS_OK);
-        wslots.assign(wl.slotCount, mxlGrainStorage{});
-        REQUIRE(mxlFlowWriterMapSlots(w, wl.slotCount, wslots.data()) == MXL_STATUS_OK);
-        REQUIRE(mxlFlowWriterGetStorageLayout(w, &wl) == MXL_STATUS_OK);
-        REQUIRE(mxlCreateFlowReader(d.inst, id, "", &r) == MXL_STATUS_OK);
-        REQUIRE(mxlFlowReaderGetStorageLayout(r, &rl) == MXL_STATUS_OK);
-        rslots.assign(rl.slotCount, mxlGrainStorage{});
-        REQUIRE(mxlFlowReaderMapSlots(r, rl.slotCount, rslots.data()) == MXL_STATUS_OK);
-        REQUIRE(mxlFlowReaderGetStorageLayout(r, &rl) == MXL_STATUS_OK);
+        // REQUIRE meta išimtį — destruktorius nebus iškviestas, todėl jau sukurtus handle'us atleidžiam patys.
+        try {
+            const std::string opts = R"({"payload":{"backend":"cuda-linear","deviceUuid":")" + device_uuid() + R"("}})";
+            bool created = false;
+            REQUIRE(mxlCreateFlowWriter(d.inst, v210a_def(id).c_str(), opts.c_str(), &w, &cfg, &created) == MXL_STATUS_OK);
+            REQUIRE(created);
+            REQUIRE(mxlFlowWriterGetStorageLayout(w, &wl) == MXL_STATUS_OK);
+            wslots.assign(wl.slotCount, mxlGrainStorage{});
+            REQUIRE(mxlFlowWriterMapSlots(w, wl.slotCount, wslots.data()) == MXL_STATUS_OK);
+            REQUIRE(mxlFlowWriterGetStorageLayout(w, &wl) == MXL_STATUS_OK);
+            REQUIRE(mxlCreateFlowReader(d.inst, id, "", &r) == MXL_STATUS_OK);
+            REQUIRE(mxlFlowReaderGetStorageLayout(r, &rl) == MXL_STATUS_OK);
+            rslots.assign(rl.slotCount, mxlGrainStorage{});
+            REQUIRE(mxlFlowReaderMapSlots(r, rl.slotCount, rslots.data()) == MXL_STATUS_OK);
+            REQUIRE(mxlFlowReaderGetStorageLayout(r, &rl) == MXL_STATUS_OK);
+        } catch (...) {
+            release();
+            throw;
+        }
     }
-    ~Pair() {
+    ~Pair() { release(); }
+    void release() {
         if (r) mxlReleaseFlowReader(d.inst, r);
         if (w) mxlReleaseFlowWriter(d.inst, w);
+        r = nullptr;
+        w = nullptr;
     }
     // Plokštumos p adresas slot'e (device).
     std::uint8_t* wplane(std::uint32_t slot, std::uint32_t p) const {
@@ -176,7 +185,7 @@ TEST_CASE("v210a cuda-linear: dvi plokštumos, dydžiai", "[v210a][gpu][mxl]") {
     REQUIRE(mxlFlowWriterOpenGrainSlot(p.w, mxlGetCurrentIndex(&rate), &info, &slot) == MXL_STATUS_OK);
     CHECK(info.grainSize == kFillSize + kKeySize);
     CHECK(info.totalSlices == kFieldHeight);
-    mxlFlowWriterCancelGrain(p.w);
+    REQUIRE(mxlFlowWriterCancelGrain(p.w) == MXL_STATUS_OK);
 }
 
 TEST_CASE("v210a cuda-linear: abi plokštumos perduodamos", "[v210a][gpu][mxl]") {
@@ -247,7 +256,7 @@ TEST_CASE("v210a cuda-linear: slice'ai", "[v210a][gpu][mxl]") {
                   MXL_ERR_OUT_OF_RANGE_TOO_EARLY);
         }
         REQUIRE(mxlFlowReaderGetGrainSlot(p.r, index, valid, 0, &rinfo, &rslot) == MXL_STATUS_OK);
-        CHECK(rslot == wslot);
+        REQUIRE(rslot == wslot);
         CHECK(rinfo.validSlices == valid);
 
         // Pirmos `valid` eilutės abiejose plokštumose sutampa.

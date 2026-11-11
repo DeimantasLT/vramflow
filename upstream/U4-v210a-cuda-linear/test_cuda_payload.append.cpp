@@ -1,6 +1,7 @@
+// SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
+// SPDX-License-Identifier: Apache-2.0
 // Appended to lib/tests/cuda/test_cuda_payload.cpp (PR #653 @ 6dddc91d92f5). Uses Domain, deviceOptions, readFile and the
 // includes of that file; <algorithm> and <random> are added to its include list. Uses the existing data/v210a_flow.json (1080p).
-
 
 namespace
 {
@@ -24,31 +25,58 @@ namespace
         explicit V210aFlow(std::filesystem::path const& domain)
             : _instance{mxlCreateInstance(domain.string().c_str(), "")}
         {
-            REQUIRE(_instance != nullptr);
-            auto const flowDef = readFile(std::filesystem::path{MXL_TEST_DATA_DIR} / "v210a_flow.json");
-            auto const options = deviceOptions(mxl::tests::cuda::deviceUuid(0));
-            REQUIRE(mxlCreateFlowWriter(_instance, flowDef.c_str(), options.c_str(), &_writer, &_configInfo, nullptr) == MXL_STATUS_OK);
-            REQUIRE(mxlFlowWriterGetStorageLayout(_writer, &_layout) == MXL_STATUS_OK);
-            _writerSlots.resize(_layout.slotCount);
-            REQUIRE(mxlFlowWriterMapSlots(_writer, _layout.slotCount, _writerSlots.data()) == MXL_STATUS_OK);
+            // A failed REQUIRE throws, and the destructor does not run: release what exists so far.
+            try
+            {
+                REQUIRE(_instance != nullptr);
+                auto const flowDef = readFile(std::filesystem::path{MXL_TEST_DATA_DIR} / "v210a_flow.json");
+                auto const options = deviceOptions(mxl::tests::cuda::deviceUuid(0));
+                REQUIRE(mxlCreateFlowWriter(_instance, flowDef.c_str(), options.c_str(), &_writer, &_configInfo, nullptr) == MXL_STATUS_OK);
+                REQUIRE(mxlFlowWriterGetStorageLayout(_writer, &_layout) == MXL_STATUS_OK);
+                _writerSlots.resize(_layout.slotCount);
+                REQUIRE(mxlFlowWriterMapSlots(_writer, _layout.slotCount, _writerSlots.data()) == MXL_STATUS_OK);
 
-            REQUIRE(mxlCreateFlowReader(_instance, V210A_FLOW_ID, "", &_reader) == MXL_STATUS_OK);
-            _readerSlots.resize(_layout.slotCount);
-            REQUIRE(mxlFlowReaderMapSlots(_reader, _layout.slotCount, _readerSlots.data()) == MXL_STATUS_OK);
+                REQUIRE(mxlCreateFlowReader(_instance, V210A_FLOW_ID, "", &_reader) == MXL_STATUS_OK);
+                _readerSlots.resize(_layout.slotCount);
+                REQUIRE(mxlFlowReaderMapSlots(_reader, _layout.slotCount, _readerSlots.data()) == MXL_STATUS_OK);
+            }
+            catch (...)
+            {
+                release();
+                throw;
+            }
         }
 
         /** Release the reader and the writer before the instance, which deletes the flow. */
         ~V210aFlow()
         {
-            mxlReleaseFlowReader(_instance, _reader);
-            mxlReleaseFlowWriter(_instance, _writer);
-            mxlDestroyInstance(_instance);
+            release();
         }
 
         V210aFlow(V210aFlow const&) = delete;
         V210aFlow(V210aFlow&&) = delete;
         V210aFlow& operator=(V210aFlow const&) = delete;
         V210aFlow& operator=(V210aFlow&&) = delete;
+
+        /** Release the reader and the writer, then destroy the instance. */
+        void release() noexcept
+        {
+            if (_reader != nullptr)
+            {
+                mxlReleaseFlowReader(_instance, _reader);
+                _reader = nullptr;
+            }
+            if (_writer != nullptr)
+            {
+                mxlReleaseFlowWriter(_instance, _writer);
+                _writer = nullptr;
+            }
+            if (_instance != nullptr)
+            {
+                mxlDestroyInstance(_instance);
+                _instance = nullptr;
+            }
+        }
 
         /** \return The writer. */
         [[nodiscard]]
