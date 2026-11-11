@@ -386,6 +386,13 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
   `make_domain(tag)` → `/dev/shm/vf-<tag>-<8 hex>`) and delete it only when no live owner is left (`remove_domain`
   returns `False` and deletes nothing otherwise). Two runs with the same tag therefore never delete each other's flows.
 - `flock` works on `tmpfs` (`/dev/shm`) and local file systems, not on network file systems.
+- **Keep the domain path short: at most 48 characters for GPU (`cuda-linear`) flows.** A reader of a GPU flow connects
+  to the Unix socket `<domain>/<flow-id>.mxl-flow/payload.sock`, and a socket path cannot be longer than 107 characters.
+  With a longer domain path the writer still creates the flow, but no reader in another process can attach to it.
+  `vramflow-func` therefore refuses such a path at start (exit code `1`, the message gives the length and the limit), and
+  `make_domain` shortens a long tag. Flows in RAM (`--storage host`) have no such limit.
+- While a reader waits, its `laukiu flow …` line also says why a flow that exists was not accepted (another format, the
+  reader could not open it), so a wait never looks like a missing flow when it is something else.
 
 ### Exit code and summary
 

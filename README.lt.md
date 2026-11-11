@@ -75,6 +75,21 @@ README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo `summary-<komanda>.json`, išėjimo kodas `0` — viskas
 teisinga.
 
+Paleidimo ir sustabdymo taisyklės (plačiau — README.md, „Start order, waits and restarts“ ir „Domain ownership“):
+
+- **Paleidimo tvarka nesvarbi.** Skaitančios funkcijos (`logo`, `composite`, `verify`, `enc`) įėjimų laukia:
+  `--input-wait-ms 0` (numatyta) — neribotai, kas 5 s rašo `laukiu flow …` (ir kodėl esamas flow netinka);
+  `--input-wait-ms N` — ne ilgiau kaip N ms, tada išėjimo kodas `4` su trūkstamų flow'ų sąrašu.
+- **Gamintojas dingo ir grįžo.** Skaitytojas tęsia darbą, spragos indeksus suskaičiuoja (`missing_fields`), grįžus
+  gamintojui prisijungia pats (`reattached`). Grįžo kitu formatu — `--on-format-change exit` (numatyta, kodas `6`) arba
+  `wait`. Spragos indeksai į paties skaitytojo išėjimą kol kas nerašomi (INVALID grain'ai — plano P5 dalis).
+- **Domeno nuoma.** Kiekvienas `vramflow-func` procesas laiko `<domenas>.vramflow/<run-id>.lease` šalia domeno (`flock`,
+  atsilaisvina ir po `kill -9`); `--run-id` — paleidimo vardas. Bandant sukurti flow, kurį jau rašo kitas gyvas
+  paleidimas, klaidoje nurodomas jo run ID. Funkcijos domenų netrina; testų įrankiai (`tests/perf/domain.py`) kiekvienam
+  paleidimui kuria atskirą domeną ir trina jį tik tada, kai nebėra gyvų savininkų.
+- **Domeno kelias GPU (`cuda-linear`) flow'ams — ne ilgesnis kaip 48 simboliai** (skaitytojo lizdo
+  `<domenas>/<flow>.mxl-flow/payload.sock` kelias turi tilpti į 107 simbolius); ilgesnį `vramflow-func` atmeta iškart.
+
 ## 8. Rezultatai (RTX 4070 Laptop 8 GB, WSL2 — orientaciniai)
 
 | Funkcija | CPU (C) N\* | GPU su GPU flow'ais (G) N\* | CPU branduoliai flow'ui, C → G |
