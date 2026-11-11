@@ -232,34 +232,52 @@ Rules worth knowing:
 
 ### 5.2 Graphics from any program: `libvramflow-gfx`
 
-Your renderer (an HTML/OGraf page, a game engine, a script) produces RGBA frames. The library converts them into a
-standard `video/v210a` flow (fill + key, straight alpha) in RAM or GPU memory.
+Your renderer (an HTML/OGraf page, a game engine, a script) produces RGBA or BGRA frames. The library converts them
+into a standard `video/v210a` flow (fill + key, straight alpha) in RAM or GPU memory.
 
 ```c
 #include <vramflow/gfx.h>
 
 mxlInstance inst = mxlCreateInstance("/dev/shm/my-domain", "");
+
+vfgfx_flow_params fp = VFGFX_FLOW_PARAMS_INIT;   /* or width/height/scan/frame_rate_* for any raster */
+fp.flow_id = "5fbec3b1-1b0f-417d-9059-8b94a47197ed";
+fp.format = "1080i50";
+char def[2048];
+vfgfx_flow_def(&fp, def, sizeof def, NULL);       /* video/v210a flow definition JSON */
+
 vfgfx_writer g;
-vfgfx_writer_create(inst, flow_def_json /* video/v210a */, writer_options_json /* NULL = RAM */, &g);
+vfgfx_writer_create(inst, def, NULL /* RAM; or {"payload":{"backend":"cuda-linear","deviceUuid":"GPU-…"}} */, &g);
 
-vfgfx_frame f = { .rgba = pixels, .width = 1920, .height = 1080, .stride = 1920 * 4,
-                  .alpha = VFGFX_ALPHA_STRAIGHT, .mem = VFGFX_MEM_HOST };   /* or VFGFX_MEM_CUDA */
+vfgfx_frame f = VFGFX_FRAME_INIT;                 /* sets struct_size: never leave it out */
+f.pixels = pixels;
+f.width = 1920;
+f.height = 1080;
+f.stride = 1920 * 4;
+f.pixel_format = VFGFX_PIXEL_BGRA8;               /* or VFGFX_PIXEL_RGBA8 */
+f.alpha = VFGFX_ALPHA_STRAIGHT;
+f.mem = VFGFX_MEM_HOST;                           /* or VFGFX_MEM_CUDA (+ f.cuda_stream) */
 
-/* Option A — the library keeps the pace: it commits the latest frame every field. */
+/* Option A — the library keeps the pace: it commits the current frame every field. */
 vfgfx_start_pacing(g, 0);
-vfgfx_submit(g, &f);          /* call again whenever the picture changes */
+vfgfx_submit(g, &f);                                      /* new picture from the next field */
+vfgfx_submit_at(g, vfgfx_current_index(g) + 4, &f);       /* or exactly from a given field (frame accurate) */
 /* … */
 vfgfx_stop_pacing(g);
 
 /* Option B — you decide every grain:  vfgfx_write(g, index, &f); */
 
-vfgfx_writer_destroy(g, inst);
+vfgfx_stats st = VFGFX_STATS_INIT;
+vfgfx_get_stats(g, &st);                          /* committed, late_skips, no_frame, errors, … */
+vfgfx_writer_destroy(g);
 mxlDestroyInstance(inst);
 ```
 
-Every function except `vfgfx_committed`, `vfgfx_last_error` and `vfgfx_writer_destroy` returns `0` or an error code; `vfgfx_last_error(g)` gives the message. The full contract (threads,
-memory, timing) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h). Link with
-`-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
+Functions return `0` or an error code; `vfgfx_last_error(g)` gives the message of the last failed call (the pacing
+thread has its own, `vfgfx_pacing_error(g)`). The full contract (versioning and ABI policy, threads, memory, timing,
+grain indices, CUDA stream ordering) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h).
+The library is at 0.2 (`vfgfx_version()`); before 1.0 the SONAME carries MAJOR.MINOR (`libvramflow-gfx.so.0.2`).
+Link with `-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
 (see `tests/gfx_ctypes_smoke.py`).
 
 A graphics flow behaves like any other flow. If a source stops or restarts, the compositor does not invent a picture:

@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// ograf_feed — adapteris: RGBA kadrai (iš renderio vamzdžio arba sintetinio šaltinio) -> libvramflow-gfx ritmo režimas
-// (vfgfx_submit) -> standartinis MXL `video/v210a` flow (1920x1080i50, grain = laukas). Naudoja TIK viešą
-// <vramflow/gfx.h> ir MXL C API.
+// ograf_feed — adapteris: RGBA / BGRA kadrai (iš renderio vamzdžio arba sintetinio šaltinio) -> libvramflow-gfx ritmo
+// režimas -> standartinis MXL `video/v210a` flow (1920x1080i50, grain = laukas; aprašas — vfgfx_flow_def). Naudoja TIK
+// viešą <vramflow/gfx.h> ir MXL C API.
 //
 // Šaltiniai (--source):
 //   stdin      — neapdoroti kadrai iš stdin, W*H*4 baitai kiekvienas, --format rgba | bgra (GStreamer
-//                `video/x-raw,format=BGRA` -> --format bgra), straight alfa. Pvz. `node render_edge.mjs | ograf_feed ...`.
-//                Pasibaigus stdin paskutinis kadras toliau commit'inamas kiekvieną lauką iki --seconds.
-//   synthetic  — įmontuotas animuotas šaltinis su minkšta (gradientine, antialiasuota) alfa; renderio nereikia.
+//                `video/x-raw,format=BGRA` -> --format bgra; BGRA perduodamas bibliotekai tiesiogiai, VFGFX_PIXEL_BGRA8,
+//                be kanalų keitimo), straight alfa. Pvz. `node render_edge.mjs | ograf_feed ...`. Kadrai — vfgfx_submit
+//                (renderio greitis nepastovus). Pasibaigus stdin paskutinis kadras toliau commit'inamas iki --seconds.
+//   synthetic  — įmontuotas animuotas šaltinis su minkšta (gradientine, antialiasuota) alfa; renderio nereikia. Kadras t
+//                pririšamas prie grain'o (vfgfx_submit_at(base + 2t)): animacijos fazė nepriklauso nuo submit drebėjimo.
 //
 // SIGINT/SIGTERM: ciklai baigiami, vykdomi vfgfx_stop_pacing / vfgfx_writer_destroy / mxlDestroyInstance, exit 0.
 // stdin: skaitoma su poll(500 ms) laiko riba — jei renderis užstringa, paskutinis kadras toliau commit'inamas kiekvieną lauką.
@@ -25,6 +27,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,19 +40,15 @@ volatile sig_atomic_t g_stop = 0;
 void on_signal(int) { g_stop = 1; }
 constexpr int W = 1920, H = 1080;
 
+// MXL flow aprašas per biblioteką (1080i50 v210a); tuščias — klaida (vfgfx_last_error(NULL)).
 std::string flow_def(const std::string& id) {
+    vfgfx_flow_params p = VFGFX_FLOW_PARAMS_INIT;
+    p.flow_id = id.c_str();
+    p.label = "OGraf example";
+    p.group_hint = "vramflow-ograf:Gfx";
+    p.format = "1080i50";
     char b[2048];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"OGraf example","label":"OGraf example",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-ograf:Gfx"]},)"
-                  R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"video/v210a",)"
-                  R"("grain_rate":{"numerator":25,"denominator":1},"frame_width":%d,"frame_height":%d,)"
-                  R"("interlace_mode":"interlaced_tff","colorspace":"BT709","components":[)"
-                  R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
-                  id.c_str(), W, H, W, H, W / 2, H, W / 2, H);
-    return b;
+    return vfgfx_flow_def(&p, b, sizeof b, nullptr) == VFGFX_OK ? std::string(b) : std::string();
 }
 
 // Sintetinis kadras: judanti suapvalinta plokštė (antialiasuoti kraštai), minkštas šešėlis, horizontalus alfa gradientas.
@@ -93,7 +92,8 @@ int main(int argc, char** argv) {
     sigaction(SIGTERM, &sa, nullptr);
     mxlInstance inst = mxlCreateInstance(domain.c_str(), "");
     vfgfx_writer g = nullptr;
-    int rc = inst ? vfgfx_writer_create(inst, flow_def(id).c_str(), nullptr, &g) : 1;
+    const std::string def = flow_def(id);
+    int rc = !inst ? 1 : def.empty() ? VFGFX_ERR_INVALID_ARG : vfgfx_writer_create(inst, def.c_str(), nullptr, &g);
     if (rc) {
         std::fprintf(stderr, "vfgfx_writer_create=%d: %s\n", rc, vfgfx_last_error(nullptr));
         if (inst) mxlDestroyInstance(inst);
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     }
     if ((rc = vfgfx_start_pacing(g, 0))) {
         std::fprintf(stderr, "start_pacing=%d: %s\n", rc, vfgfx_last_error(g));
-        vfgfx_writer_destroy(g, inst);
+        vfgfx_writer_destroy(g);
         mxlDestroyInstance(inst);
         return 1;
     }
@@ -110,11 +110,18 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     const auto elapsed = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
     int frames = 0;
-    auto submit = [&] {
-        if (format == "bgra")
-            for (size_t i = 0; i < px.size(); i += 4) std::swap(px[i], px[i + 2]);  // BGRA -> RGBA
-        vfgfx_frame f{px.data(), W, H, W * 4, alpha == "straight" ? VFGFX_ALPHA_STRAIGHT : VFGFX_ALPHA_PREMULTIPLIED, VFGFX_MEM_HOST};
-        if ((rc = vfgfx_submit(g, &f))) { std::fprintf(stderr, "submit=%d: %s\n", rc, vfgfx_last_error(g)); return false; }
+    // first == VFGFX_INDEX_NONE: vfgfx_submit (iškart); kitaip vfgfx_submit_at(first) — jei jau per vėlu, iškart.
+    auto submit = [&](std::uint64_t first = VFGFX_INDEX_NONE) {
+        vfgfx_frame f = VFGFX_FRAME_INIT;
+        f.pixels = px.data();
+        f.width = W;
+        f.height = H;
+        f.stride = W * 4;
+        f.pixel_format = format == "bgra" ? VFGFX_PIXEL_BGRA8 : VFGFX_PIXEL_RGBA8;
+        f.alpha = alpha == "straight" ? VFGFX_ALPHA_STRAIGHT : VFGFX_ALPHA_PREMULTIPLIED;
+        rc = first == VFGFX_INDEX_NONE ? vfgfx_submit(g, &f) : vfgfx_submit_at(g, first, &f);
+        if (rc == VFGFX_ERR_TOO_LATE) rc = vfgfx_submit(g, &f);
+        if (rc) { std::fprintf(stderr, "submit=%d: %s\n", rc, vfgfx_last_error(g)); return false; }
         ++frames;
         if (!ready.empty() && frames == 1) {  // laukiam pirmo commit'o (ritmo gija), tada pranešam paleidimo skriptui
             for (int i = 0; i < 500 && vfgfx_committed(g) == 0 && !g_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -138,17 +145,24 @@ int main(int argc, char** argv) {
         }
         while (ok && !g_stop && elapsed() < seconds) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     } else {
+        // Kadras t rodomas nuo grain'o base + 2t (viršutinis laukas; 25 kadrai/s = 2 laukai). Ruošiama ~2 kadrus į priekį
+        // (eilė >= VFGFX_SUBMIT_AT_MIN_QUEUE), todėl animacijos fazė priklauso tik nuo indekso, ne nuo submit momento.
+        const std::uint64_t base = (vfgfx_current_index(g) + 4) & ~1ull;
         for (int t = 0; ok && !g_stop && elapsed() < seconds; ++t) {
+            const std::uint64_t first = base + 2 * static_cast<std::uint64_t>(t);
+            while (!g_stop && first > vfgfx_current_index(g) + 4) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             synth(px, t);
-            ok = submit();
-            const double next = (t + 1) / 25.0;  // 25 kadrų/s
-            if (next > elapsed()) std::this_thread::sleep_for(std::chrono::duration<double>(next - elapsed()));
+            ok = submit(first);
         }
     }
     vfgfx_stop_pacing(g);
-    std::printf("ograf_feed: source=%s submitted=%d committed=%llu\n", source.c_str(), frames,
-                static_cast<unsigned long long>(vfgfx_committed(g)));
-    vfgfx_writer_destroy(g, inst);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    vfgfx_get_stats(g, &st);
+    std::printf("ograf_feed: source=%s submitted=%d committed=%llu scheduled=%llu scheduled_late=%llu late_skips=%llu\n",
+                source.c_str(), frames, static_cast<unsigned long long>(st.committed),
+                static_cast<unsigned long long>(st.scheduled), static_cast<unsigned long long>(st.scheduled_late),
+                static_cast<unsigned long long>(st.late_skips));
+    vfgfx_writer_destroy(g);
     mxlDestroyInstance(inst);
     return ok && frames > 0 ? 0 : 1;
 }

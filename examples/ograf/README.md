@@ -15,7 +15,7 @@ renderer (Edge/CDP, WPE, CEF, …) --RGBA/BGRA frames--> ograf_feed --vfgfx_subm
 
 | File | What |
 |---|---|
-| `ograf_feed.cpp` | Adapter. `--source stdin` reads raw frames (1920×1080×4 B, straight alpha, `--format rgba\|bgra`); `--source synthetic` is a built-in animated source with soft alpha (no renderer needed). Starts the library's pacing thread and calls `vfgfx_submit` for every new frame; the library commits the latest frame every field. |
+| `ograf_feed.cpp` | Adapter. `--source stdin` reads raw frames (1920×1080×4 B, straight alpha, `--format rgba\|bgra`); `--source synthetic` is a built-in animated source with soft alpha (no renderer needed). Starts the library's pacing thread; stdin frames go to `vfgfx_submit` (BGRA passed as `VFGFX_PIXEL_BGRA8`, no channel swap), synthetic frame *t* to `vfgfx_submit_at(base + 2t)` (frame accurate: the animation phase depends on the field index, not on submit timing). The library commits the current frame every field; the flow definition comes from `vfgfx_flow_def`. |
 | `ograf_probe.cpp` | Check: reads the `v210a` output of `composite`, counts key values, saves one field as PNG (key and Y). |
 | `render_edge.mjs` | Renderer: headless Microsoft Edge driven over the Chrome DevTools Protocol (Node ≥ 22, no packages), transparent page background, frames → stdout as RGBA. |
 | `graphic/` | A small hand-written OGraf v1 graphic (`lower-third.ograf.json` + web component) and a minimal host page. Synthetic, **not** one of the EBU sample graphics. |
