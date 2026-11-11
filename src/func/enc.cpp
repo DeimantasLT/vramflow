@@ -33,6 +33,7 @@ extern "C" {
 #include "func/func_common.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
+#include "runtime/input_slot.hpp"
 
 namespace mxlv::func {
 namespace {
@@ -360,14 +361,22 @@ int run_enc(const Opts& o) {
 
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
     if (!inst) { st.fatal = "mxlCreateInstance"; return finish(2); }
-    std::vector<VideoIn> in(o.flows);
+    // Įėjimai (planas §P6): video per InputSlot (laukimas pagal --input-wait-ms, re-attach); garsas atidaromas iš naujo,
+    // kai jo video slot'as prisijungia iš naujo (tas pats gamintojas) arba skaitymas grąžina FLOW_INVALID.
+    std::vector<runtime::InputSlot> in;
+    in.reserve(o.flows);
+    for (std::uint32_t n = 0; n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
     std::vector<AudioIn> ain(o.audio ? o.flows : 0);
+    std::vector<std::uint64_t> audio_reopen_at(ain.size(), 0), seen_reattach(o.flows, 0);
     std::string err;
     int rc = 0;
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
+    {
+        std::vector<runtime::InputSlot*> in_ptr;
+        for (auto& s : in) in_ptr.push_back(&s);
+        if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "enc", err)) { st.fatal = stop.load() ? std::string{} : err; rc = stop.load() ? -1 : 4; }
+    }
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
-        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), 15000, stop, err)) { st.fatal = err; rc = 4; }
+        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), open_policy(o), stop, err)) { st.fatal = stop.load() ? std::string{} : err; rc = stop.load() ? -1 : 4; }
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
@@ -403,7 +412,7 @@ int run_enc(const Opts& o) {
     std::vector<const std::uint32_t*> top(o.flows), bot(o.flows);
     std::vector<int> state(o.flows);
     std::vector<std::vector<float>> al(o.flows), ar(o.flows);
-    const std::uint32_t gc = o.flows ? in[0].layout.slotCount : 10;
+    const std::uint32_t gc = o.flows && !rc ? in[0].in().layout.slotCount : 10;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
     std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
@@ -413,11 +422,29 @@ int run_enc(const Opts& o) {
     while (!rc && !stop.load() && now_tai() < end_tai) {
         // interlaced: kadras F = laukai 2F, 2F+1; progresyvus: kadras F = grain'as F (i_top == i_bot)
         const std::uint64_t i_top = gpf * F, i_bot = gpf * F + gpf - 1;
+        // [§P6] atjungtų įėjimų prisijungimas iš naujo (neblokuojantis); po video re-attach — ir garso reader'is
+        for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
+            if (in[n].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = in[n].reason(); rc = kExitFormatChange; }
+            if (n < ain.size() && in[n].reattached() != seen_reattach[n]) {
+                seen_reattach[n] = in[n].reattached();
+                ain[n].release(inst);
+                audio_reopen_at[n] = 0;
+            }
+            if (n < ain.size() && !ain[n].r && now_tai() >= audio_reopen_at[n]) {
+                audio_reopen_at[n] = now_tai() + runtime::InputSlot::kRetryNs;
+                std::string e;
+                if (ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), runtime::OpenPolicy{0, 0}, stop, e)) st.flows[n].inc("audio_reattached");
+            }
+        }
+        if (rc) break;
         if (wait_until(rate, i_bot, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i_bot) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::uint32_t pending = o.flows;
+        // gamintojas dingęs — kadras suskaičiuojamas kaip spraga (missing_frames), nekoduojamas
+        for (std::uint32_t n = 0; n < o.flows; ++n)
+            if (in[n].state() != runtime::InputSlot::State::Attached) { st.flows[n].inc("missing_frames"); state[n] = 2; --pending; }
         for (;;) {
             for (std::uint32_t n = 0; n < o.flows; ++n) {
                 if (state[n]) continue;
@@ -432,7 +459,8 @@ int run_enc(const Opts& o) {
                     bot[n] = pb;
                     state[n] = 1;
                 } else {
-                    st.flows[n].inc((sb == MXL_ERR_OUT_OF_RANGE_TOO_LATE || stt == MXL_ERR_OUT_OF_RANGE_TOO_LATE) ? "too_late" : "in_invalid");
+                    st.flows[n].inc(sb == MXL_ERR_FLOW_INVALID || stt == MXL_ERR_FLOW_INVALID ? "missing_frames"
+                                    : (sb == MXL_ERR_OUT_OF_RANGE_TOO_LATE || stt == MXL_ERR_OUT_OF_RANGE_TOO_LATE) ? "too_late" : "in_invalid");
                     state[n] = 2;
                 }
             }
@@ -591,17 +619,20 @@ int run_enc(const Opts& o) {
         }
     }
     if (!cpu) cudaStreamDestroy(stream);
-    for (auto& v : in) v.release(inst);
+    for (std::uint32_t n = 0; n < o.flows; ++n) {
+        st.flows[n].c["reattached"] = in[n].reattached();
+        in[n].release();
+    }
     for (auto& a : ain) a.release(inst);
     mxlDestroyInstance(inst);
     for (auto* fr : cx.frames) av_buffer_unref(&fr);
     av_buffer_unref(&cx.hw);
     if (!rc)
         for (auto& f : st.flows)
-            for (const char* k : {"late_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
+            for (const char* k : {"late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
                                   "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
-    return finish(rc);
+    return finish(rc < 0 ? 0 : rc);  // -1 — sustabdyta belaukiant įėjimų (tvarkinga pabaiga)
 }
 
 }  // namespace mxlv::func

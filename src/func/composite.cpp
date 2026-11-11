@@ -14,10 +14,11 @@
 //  - Bazė `none` (tik v210a išėjimas): išėjimo rastras = --format rastras (numatytasis 1920×1080 interlaced); kitaip išėjimo
 //    rastras = bazės (w, h, interlace), o bazė turi atitikti --format. Visų įėjimų grain'o ritmas turi sutapti su --format.
 //  - `--layer-flow K:UUID`: K — sluoksnio indeksas nuo 0 (0…layers-1); tas pats flow VISIEMS išėjimams n (grandinei N=1).
-//  - [PF-3] įėjimas, kurio skaitymas grąžina MXL_ERR_FLOW_INVALID (writer'is perkurtas), uždaromas ir atidaromas iš naujo
-//    neblokuojančiai (po vieną bandymą kas 100 ms, tarp tick'ų; skaitiklis `reopened`). Išėjimas, kurio įėjimas trūksta, tuo metu
-//    necommit'inamas (`missing_fields`), bet funkcija tęsia. Atidarytas iš naujo įėjimas privalo turėti tą patį rastrą ir
-//    saugyklą; jei ne — jis lieka uždarytas visam laikui (skaitiklis `reopen_mismatch`), o jo išėjimas nebecommit'inamas.
+//  - [PF-3, §P6] įėjimai — runtime::InputSlot: paleidžiant laukiama pagal --input-wait-ms (numatyta neribotai); gamintojas
+//    dingo (MXL_ERR_FLOW_INVALID arba nebėra gyvo writer'io) → slot'as atjungiamas ir prijungiamas iš naujo neblokuojančiai
+//    (bandymas ne dažniau kaip kas 100 ms, tarp tick'ų; skaitiklis `reopened`). Išėjimas, kurio įėjimas trūksta, tuo metu
+//    necommit'inamas (`missing_fields`), bet funkcija tęsia. Grįžęs įėjimas privalo turėti tą patį formatą ir saugyklą; jei ne —
+//    --on-format-change exit (numatyta): `reopen_mismatch`, exit 6 su abiem formatais; wait: laukiama, kol grįš tinkamas.
 //  - Skaitikliai (kiekvienam išėjimui): fields_ok, late_fields (išėjimas necommit'intas — įėjimas nesulaukė iki termino; kartą
 //    per išėjimą), too_late / in_invalid / read_errors / flow_invalid (įėjimų įvykiai), missing_fields, reopened, lapped.
 #include <cuda_runtime_api.h>
@@ -34,6 +35,7 @@
 #include "gfx/cpu/gfx_cpu.hpp"
 #include "gfx/gfx_kernels.hpp"
 #include "gfx/raster.hpp"
+#include "runtime/input_slot.hpp"
 
 namespace mxlv::func {
 namespace {
@@ -121,7 +123,10 @@ int run_composite(const Opts& o) {
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
     if (!inst) { st.fatal = "mxlCreateInstance"; return finish(2); }
     mxlGarbageCollectFlows(inst);
-    std::vector<VideoIn> in(N * per);
+    // Įėjimai per InputSlot (planas §P6, buvusi [PF-3] logika): laukiama pagal --input-wait-ms; dingęs gamintojas → slot'as
+    // atjungiamas, grįžęs → prijungiamas iš naujo (`reopened`). Laukiamas formatas ir saugykla — pirmo prijungimo.
+    std::vector<runtime::InputSlot> in;
+    in.reserve(static_cast<std::size_t>(N) * per);
     std::vector<VideoOut> out(N);
     auto idx_base = [&](std::uint32_t n) { return n * per; };
     auto idx_layer = [&](std::uint32_t n, std::uint32_t k) { return n * per + (has_base ? 1 : 0) + k; };
@@ -131,56 +136,59 @@ int run_composite(const Opts& o) {
         return layer_ids[k].empty() ? flow_id(kRoleGfx, (o.flow_base + n) * 8 + k) : layer_ids[k];
     };
     int rc = 0;
+    for (std::uint32_t n = 0; n < N; ++n)
+        for (std::uint32_t s = 0; s < per; ++s) in.emplace_back(in_flow_id(n, s), nullptr, format_change(o));
+    {
+        std::vector<runtime::InputSlot*> in_ptr;
+        for (auto& x : in) in_ptr.push_back(&x);
+        if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "composite", err)) {
+            st.fatal = stop.load() ? std::string{} : err;  // sustabdytas belaukiant — tvarkinga pabaiga (exit 0)
+            rc = stop.load() ? -1 : 4;
+        }
+    }
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
-            if (!in[n * per + s].open(inst, in_flow_id(n, s), 15000, stop, err, static_cast<const vramflow::VideoFormat*>(nullptr))) {
-                st.fatal = "in " + std::to_string(n) + "/" + std::to_string(s) + ": " + err;
-                rc = 4;
-            } else if (!vramflow::same_rate(in[n * per + s].fmt.grain_rate(), o.fmt.grain_rate())) {
-                const vramflow::Rational g = in[n * per + s].fmt.grain_rate(), w = o.fmt.grain_rate();
+            if (!vramflow::same_rate(in[n * per + s].format().grain_rate(), o.fmt.grain_rate())) {
+                const vramflow::Rational g = in[n * per + s].format().grain_rate(), w = o.fmt.grain_rate();
                 st.fatal = "in " + std::to_string(n) + "/" + std::to_string(s) + ": grain'o ritmas " + std::to_string(g.num) + "/" +
                            std::to_string(g.den) + " != " + std::to_string(w.num) + "/" + std::to_string(w.den) + " (--format " +
                            vramflow::format_name(o.fmt) + ")";
                 rc = 1;
-            } else if (has_base && s == 0 && !(in[n * per].fmt.raster == o.fmt.raster)) {
-                st.fatal = "bazė " + std::to_string(n) + ": formatas " + vramflow::format_name(in[n * per].fmt) + " != --format " +
+            } else if (has_base && s == 0 && !(in[n * per].format().raster == o.fmt.raster)) {
+                st.fatal = "bazė " + std::to_string(n) + ": formatas " + vramflow::format_name(in[n * per].format()) + " != --format " +
                            vramflow::format_name(o.fmt);
                 rc = 1;
             }
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
-            if (in[n * per + s].cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
+            if (in[n * per + s].in().cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
     // --- statinė geometrija: rastrai, išėjimo rastras, visi darbai per bendrą validatorių ---
     std::vector<Raster> out_r(N);
     std::vector<Layer> lay(static_cast<std::size_t>(N) * K);
     static const std::uint8_t dummy[8]{};
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
-        const Raster base_r = has_base ? in[idx_base(n)].raster : Raster{o.fmt.raster.w, o.fmt.raster.h, o.fmt.raster.interlaced, false};
+        const Raster base_r = has_base ? in[idx_base(n)].format().raster : Raster{o.fmt.raster.w, o.fmt.raster.h, o.fmt.raster.interlaced, false};
         out_r[n] = Raster{base_r.w, base_r.h, base_r.interlaced, out_alpha};
-        for (std::uint32_t k = 0; k < K; ++k) lay[n * K + k] = Layer{dummy, in[idx_layer(n, k)].raster, lx[k], ly[k], lop[k]};
+        for (std::uint32_t k = 0; k < K; ++k) lay[n * K + k] = Layer{dummy, in[idx_layer(n, k)].format().raster, lx[k], ly[k], lop[k]};
         const CompositeJob j{has_base ? dummy : nullptr, base_r, &lay[n * K], static_cast<int>(K), out_r[n], const_cast<std::uint8_t*>(dummy)};
         std::string why;
         for (int parity = 0; parity < 2 && !rc; ++parity)
             if (!gfx::composite_job_valid(j, parity, &why)) { st.fatal = "išėjimas " + std::to_string(n) + ": " + why; rc = 1; }
     }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
-    for (std::uint32_t n = 0; n < N && !rc; ++n)
+    for (std::uint32_t n = 0; n < N && !rc; ++n) {
+        const std::string id = flow_id(kRoleComp, o.flow_base + n);
         if (!out[n].create(inst, comp_def(o.flow_base + n, vramflow::VideoFormat{out_r[n], o.fmt.frame_rate}, o.run_seed), opts, err,
                            vramflow::VideoFormat{out_r[n], o.fmt.frame_rate})) {
-            st.fatal = "out " + std::to_string(n) + ": " + err;
+            st.fatal = "out " + std::to_string(n) + ": " + err +
+                       (out[n].existed || out[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, id) : std::string{});
             rc = 2;
-        }
-    // Įėjimai turi jau gaminti (head žinomas) — tada pirmi tick'ai neskaičiuojami kaip vėlyvi.
-    for (std::size_t a = 0; a < in.size() && !rc; ++a) {
-        const auto until = now_tai() + 15'000'000'000ull;
-        for (;;) {
-            const std::uint64_t h = in[a].head();
-            if (h != MXL_UNDEFINED_INDEX && h != 0) break;
-            if (stop.load() || now_tai() > until) { st.fatal = "įėjimas " + in[a].id + " negamina grain'ų"; rc = 4; break; }
-            mxlSleepForNs(20'000'000);
+        } else {
+            lease_output(id);
         }
     }
+    // Įėjimai jau gamina (head žinomas): InputSlot prisijungia tik tada — pirmi tick'ai neskaičiuojami kaip vėlyvi.
 
     cudaStream_t stream{};
     if (!cpu && !rc && cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) { st.fatal = "cudaStreamCreate"; rc = 2; }
@@ -188,20 +196,15 @@ int run_composite(const Opts& o) {
     std::vector<std::uint8_t*> s_in(in.size(), nullptr), s_out(N, nullptr);
     if (host_gpu)
         for (std::size_t a = 0; a < in.size() && !rc; ++a)
-            if (cudaMalloc(reinterpret_cast<void**>(&s_in[a]), gfx::grain_bytes(in[a].raster)) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
+            if (cudaMalloc(reinterpret_cast<void**>(&s_in[a]), gfx::grain_bytes(in[a].format().raster)) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
     if (host_gpu)
         for (std::uint32_t n = 0; n < N && !rc; ++n)
             if (cudaMalloc(reinterpret_cast<void**>(&s_out[n]), gfx::grain_bytes(out_r[n])) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
 
-    // Būsena per įėjimą: 0 laukia, 1 paruoštas, 2 baigtas be duomenų. closed — reader'is užmuštas / uždarytas (reopen), lost —
-    // neatitinka rastro po reopen (visam laikui).
+    // Būsena per įėjimą: 0 laukia, 1 paruoštas, 2 baigtas be duomenų. seen_reatt — kiek kartų slot'as jau prisijungė iš naujo.
     std::vector<int> state(in.size());
-    std::vector<char> closed(in.size(), 0), lost(in.size(), 0);
-    std::vector<std::uint64_t> next_reopen(in.size(), 0);
+    std::vector<std::uint64_t> seen_reatt(in.size(), 0);
     std::vector<const std::uint32_t*> ptr(in.size(), nullptr);
-    std::vector<Raster> want_r(in.size());
-    std::vector<char> want_cuda(in.size());
-    for (std::size_t a = 0; a < in.size(); ++a) { want_r[a] = in[a].raster; want_cuda[a] = in[a].cuda; }
     std::vector<char> dead(N), ready(N);
     std::vector<CompositeJob> jobs;
     std::vector<std::uint32_t> job_out;
@@ -215,26 +218,18 @@ int run_composite(const Opts& o) {
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
-        // [PF-3] uždarytų įėjimų atidarymas iš naujo — neblokuojantis, tarp tick'ų (laisvas laikas prieš wait_until)
-        for (std::size_t a = 0; a < in.size(); ++a) {
-            if (!closed[a] || lost[a] || now_tai() < next_reopen[a]) continue;
-            next_reopen[a] = now_tai() + 100'000'000ull;
-            VideoIn fresh;
-            std::string e;
-            if (fresh.open(inst, in[a].id, 0, stop, e, static_cast<const vramflow::VideoFormat*>(nullptr))) {
-                if (fresh.raster == want_r[a] && fresh.cuda == static_cast<bool>(want_cuda[a]) &&
-                    vramflow::same_rate(fresh.fmt.grain_rate(), o.fmt.grain_rate())) {
-                    in[a] = fresh;
-                    closed[a] = 0;
-                    st.flows[a / per].inc("reopened");
-                    continue;
-                }
-                lost[a] = 1;
+        // [PF-3, §P6] atjungtų įėjimų prisijungimas iš naujo — neblokuojantis (InputSlot: ne dažniau kaip kas 100 ms), tarp tick'ų
+        for (std::size_t a = 0; a < in.size() && !rc; ++a) {
+            if (in[a].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) {
                 st.flows[a / per].inc("reopen_mismatch");
-                std::fprintf(stderr, "[composite] įėjimas %s po reopen pakeitė rastrą / saugyklą — lieka uždarytas\n", in[a].id.c_str());
+                st.fatal = in[a].reason();
+                rc = kExitFormatChange;
+            } else if (in[a].reattached() != seen_reatt[a]) {
+                seen_reatt[a] = in[a].reattached();
+                st.flows[a / per].inc("reopened");
             }
-            fresh.release(inst);
         }
+        if (rc) break;
         if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
@@ -245,7 +240,7 @@ int run_composite(const Opts& o) {
         std::fill(dead.begin(), dead.end(), 0);
         for (std::uint32_t n = 0; n < N; ++n)
             for (std::uint32_t s = 0; s < per; ++s)
-                if (closed[n * per + s]) {
+                if (in[n * per + s].state() != runtime::InputSlot::State::Attached) {
                     if (!dead[n]) st.flows[n].inc("missing_fields");
                     dead[n] = 1;
                 }
@@ -266,12 +261,8 @@ int run_composite(const Opts& o) {
                     dead[n] = 1;
                     if (r == MXL_STATUS_OK) st.flows[n].inc("in_invalid");
                     else if (r == MXL_ERR_OUT_OF_RANGE_TOO_LATE) st.flows[n].inc("too_late");
-                    else if (r == MXL_ERR_FLOW_INVALID) {  // [PF-3] writer'is perkurtas → reader'is atidaromas iš naujo
-                        in[a].release(inst);
-                        closed[a] = 1;
-                        next_reopen[a] = 0;
-                        st.flows[n].inc("flow_invalid");
-                    } else {
+                    else if (r == MXL_ERR_FLOW_INVALID) st.flows[n].inc("flow_invalid");  // [PF-3] gamintojas dingo / perkurtas → slot'as atjungtas
+                    else {
                         st.flows[n].inc("read_errors");
                         st.flows[n].inc(("read_status_" + std::to_string(r)).c_str());
                     }
@@ -292,7 +283,7 @@ int run_composite(const Opts& o) {
                     std::string who;
                     for (std::uint32_t s = 0; s < per; ++s)
                         if (state[n * per + s] != 1)
-                            who += " " + in[n * per + s].id.substr(24) + "(head-i=" +
+                            who += " " + in[n * per + s].id().substr(24) + "(head-i=" +
                                    std::to_string(static_cast<long long>(in[n * per + s].head()) - static_cast<long long>(i)) + ")";
                     std::fprintf(stderr, "[composite] išėjimas %u: indeksas %llu (tick %lld, pabudimas +%.2f ms) necommit'intas, nesulaukta:%s\n", n,
                                  static_cast<unsigned long long>(i), static_cast<long long>(i - (st.first_index == ~0ull ? i : st.first_index)),
@@ -329,21 +320,21 @@ int run_composite(const Opts& o) {
                 const std::size_t a = idx_layer(n, k);
                 const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(ptr[a]);
                 if (host_gpu) {
-                    if (!ce) ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].raster), cudaMemcpyHostToDevice, stream);
+                    if (!ce) ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
                     src = s_in[a];
                 }
-                lay[n * K + k] = Layer{src, in[a].raster, lx[k], ly[k], lop[k]};
+                lay[n * K + k] = Layer{src, in[a].format().raster, lx[k], ly[k], lop[k]};
             }
             const std::uint8_t* base = nullptr;
             if (has_base) {
                 const std::size_t a = idx_base(n);
                 base = reinterpret_cast<const std::uint8_t*>(ptr[a]);
                 if (host_gpu && !ce) {
-                    ce = cudaMemcpyAsync(s_in[a], base, gfx::grain_bytes(in[a].raster), cudaMemcpyHostToDevice, stream);
+                    ce = cudaMemcpyAsync(s_in[a], base, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
                     base = s_in[a];
                 }
             }
-            jobs.push_back(CompositeJob{base, has_base ? in[idx_base(n)].raster : out_r[n], &lay[n * K], static_cast<int>(K), out_r[n],
+            jobs.push_back(CompositeJob{base, has_base ? in[idx_base(n)].format().raster : out_r[n], &lay[n * K], static_cast<int>(K), out_r[n],
                                         host_gpu ? s_out[n] : host_dst[j]});
         }
         if (cpu) {
@@ -369,7 +360,7 @@ int run_composite(const Opts& o) {
             for (std::uint32_t s = 0; s < per; ++s) {
                 const std::size_t a = n * per + s;
                 const std::uint64_t h = in[a].head();
-                if (lapped(std::max(h == MXL_UNDEFINED_INDEX ? 0 : h, now_idx), i, in[a].layout.slotCount)) lap = true;
+                if (lapped(std::max(h == MXL_UNDEFINED_INDEX ? 0 : h, now_idx), i, in[a].in().layout.slotCount)) lap = true;
             }
             if (lap) {
                 out[n].cancel();
@@ -402,14 +393,14 @@ int run_composite(const Opts& o) {
     for (auto* p : s_in) if (p) cudaFree(p);
     for (auto* p : s_out) if (p) cudaFree(p);
     for (auto& v : out) v.release(inst);
-    for (auto& v : in) v.release(inst);
+    for (auto& v : in) v.release();
     mxlDestroyInstance(inst);
     // praradimai = pajėgumo / tiekimo klaida (exit 4), jei nebuvo fatalios
     if (!rc)
         for (auto& f : st.flows)
             for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
-    return finish(rc);
+    return finish(rc < 0 ? 0 : rc);  // -1 — sustabdyta belaukiant įėjimų (tvarkinga pabaiga)
 }
 
 }  // namespace mxlv::func

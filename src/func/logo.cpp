@@ -17,6 +17,7 @@
 #include "media/media_kernels.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_ref.hpp"
+#include "runtime/input_slot.hpp"
 
 #include <thread>
 
@@ -105,16 +106,38 @@ int run_logo(const Opts& o_in) {
 
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
     if (!inst) { st.fatal = "mxlCreateInstance"; return finish(2); }
-    std::vector<VideoIn> in(o.flows);
+    // Įėjimai (planas §P6): paleidimo tvarka nesvarbi — laukiama pagal --input-wait-ms (numatyta neribotai); dingęs
+    // gamintojas → InputSlot Detached (indeksai skaičiuojami missing_fields), grįžęs → re-attach (reattached).
+    std::vector<runtime::InputSlot> in;
+    in.reserve(o.flows);
+    for (std::uint32_t n = 0; n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
+    std::vector<runtime::InputSlot*> in_ptr;
+    for (auto& s : in) in_ptr.push_back(&s);
+    if (!runtime::wait_attached(in_ptr, inst, open_policy(o), stop, "logo", err)) {
+        const bool stopped = stop.load();  // sustabdytas belaukiant — tvarkinga pabaiga
+        for (auto& s : in) s.release();
+        mxlDestroyInstance(inst);
+        if (stopped) return finish(0);
+        st.fatal = err;
+        return finish(4);
+    }
+    // Nužudyto ankstesnio logo pasenę išėjimai (be writer'io) pašalinami — kitaip perkrautas logo jų nesukurtų.
+    mxlGarbageCollectFlows(inst);
     std::vector<VideoOut> out(o.flows);
     int rc = 0;
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &o.fmt)) { st.fatal = "in " + std::to_string(n) + ": " + err; rc = 4; }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
+        const std::string id = flow_id(kRoleLogo, o.flow_base + n);
+        if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) {
+            st.fatal = "out " + std::to_string(n) + ": " + err +
+                       (out[n].existed || out[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, id) : std::string{});
+            rc = 2;
+        } else {
+            lease_output(id);
+        }
+    }
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (in[n].cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
+        if (in[n].in().cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
     const mxlRational rate = mxl_rate(o.fmt.grain_rate());
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
@@ -140,7 +163,7 @@ int run_logo(const Opts& o_in) {
     std::vector<std::uint32_t> job_flow;
     std::vector<int> state(o.flows);  // 0 laukia, 1 paruoštas, 2 baigtas (be išėjimo)
     std::vector<const std::uint32_t*> src(o.flows);
-    const std::uint32_t grain_count = o.flows ? in[0].layout.slotCount : 10;
+    const std::uint32_t grain_count = o.flows ? in[0].in().layout.slotCount : 10;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
     std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
@@ -149,12 +172,19 @@ int run_logo(const Opts& o_in) {
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
+        // [§P6] atjungtų įėjimų prisijungimas iš naujo — neblokuojantis (bandymas ne dažniau kaip kas 100 ms), prieš laukimą
+        for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
+            if (in[n].poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = in[n].reason(); rc = kExitFormatChange; }
+        if (rc) break;
         if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
         const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::uint32_t pending = o.flows;
+        // gamintojas dingęs — indeksas suskaičiuojamas kaip spraga (missing_fields), išėjimas necommit'inamas
+        for (std::uint32_t n = 0; n < o.flows; ++n)
+            if (in[n].state() != runtime::InputSlot::State::Attached) { st.flows[n].inc("missing_fields"); state[n] = 2; --pending; }
         // 3: visi įėjimai — neblokuojančiai; laukiantys kartojami kas 0,5 ms iki deadline
         for (;;) {
             for (std::uint32_t n = 0; n < o.flows; ++n) {
@@ -167,6 +197,7 @@ int run_logo(const Opts& o_in) {
                 if (s == MXL_STATUS_OK && (info.flags & MXL_GRAIN_FLAG_INVALID)) { st.flows[n].inc("in_invalid"); state[n] = 2; }
                 else if (s == MXL_STATUS_OK) { src[n] = p; state[n] = 1; }
                 else if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { st.flows[n].inc("too_late"); state[n] = 2; }
+                else if (s == MXL_ERR_FLOW_INVALID) { st.flows[n].inc("detached"); st.flows[n].inc("missing_fields"); state[n] = 2; }
                 else { st.flows[n].inc("read_errors"); st.flows[n].inc(("read_status_" + std::to_string(s)).c_str()); state[n] = 2; }
             }
             if (!pending || now_tai() >= deadline || stop.load()) break;
@@ -268,12 +299,15 @@ int run_logo(const Opts& o_in) {
         for (auto* p : s_out) cudaFree(p);
     }
     for (auto& v : out) v.release(inst);
-    for (auto& v : in) v.release(inst);
+    for (std::uint32_t n = 0; n < o.flows; ++n) {
+        st.flows[n].c["reattached"] = in[n].reattached();
+        in[n].release();
+    }
     mxlDestroyInstance(inst);
-    // praradimai = pajėgumo klaida (exit 4), jei nebuvo fatalios
+    // praradimai = pajėgumo / tiekimo klaida (exit 4), jei nebuvo fatalios; missing_fields — įėjimo spraga (gamintojas dingo)
     if (!rc)
         for (auto& f : st.flows)
-            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips"})
+            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
     return finish(rc);
 }

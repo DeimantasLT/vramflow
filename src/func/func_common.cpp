@@ -44,6 +44,27 @@ std::string cuda_options(int dev) {
 
 double warm_tai_after(double warmup_s) { return static_cast<double>(mxlGetTime()) + warmup_s * 1e9; }
 
+runtime::OpenPolicy open_policy(const Opts& o) { return runtime::policy_from_cli(o.input_wait_ms); }
+
+runtime::FormatChange format_change(const Opts& o) {
+    return o.on_format_change == "wait" ? runtime::FormatChange::Wait : runtime::FormatChange::Exit;
+}
+
+runtime::DomainLease& domain_lease() {
+    static runtime::DomainLease l;
+    return l;
+}
+
+void lease_output(const std::string& flow_id) {
+    if (domain_lease().held() && !domain_lease().add_flow(flow_id))
+        std::fprintf(stderr, "[vramflow] nepavyko užregistruoti flow %s nuomoje\n", flow_id.c_str());
+}
+
+std::string owner_note(const Opts& o, const std::string& flow_id) {
+    const std::string who = runtime::DomainLease::flow_owner(o.domain, flow_id);
+    return " — flow " + flow_id + " jau turi gyvą writer'į" + (who.empty() ? " (savininkas nežinomas: ne vramflow-func arba be nuomos)" : " (run_id " + who + ")");
+}
+
 namespace {
 std::string hist_json(const Histogram& h) {
     char b[256];
@@ -66,7 +87,7 @@ std::string map_json(const std::map<std::string, std::uint64_t>& m) {
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json) {
     std::error_code ec;
     std::filesystem::create_directories(o.out, ec);
-    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + mxlv::versions_json() + ",\"format\":\"" + vramflow::format_name(o.fmt) + "\",\"flows_n\":" + std::to_string(o.flows) +
+    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + mxlv::versions_json() + ",\"format\":\"" + vramflow::format_name(o.fmt) + "\",\"run_id\":\"" + o.run_id + "\",\"flows_n\":" + std::to_string(o.flows) +
                     ",\"duration_s\":" + std::to_string(o.duration_s) + ",\"exit_code\":" + std::to_string(s.exit_code) +
                     ",\"first_index\":" + std::to_string(s.first_index == ~0ull ? 0 : s.first_index) +
                     ",\"last_index\":" + std::to_string(s.last_index) + ",\"proc\":" + map_json(s.proc) + ",\"hist\":{";

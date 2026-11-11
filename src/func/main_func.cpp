@@ -42,6 +42,14 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--storage", o.storage, "cuda-linear | host")->check(CLI::IsMember({"cuda-linear", "host"}));
     c->add_option("--threads", o.threads, "CPU varianto gijos (0 = automatiškai)");
     c->add_option("--format", o.format, "flow formatas: 1080i50 (numatytasis), 1080p25, 1080p50, 720p50, 1080i59.94, 2160p50 …");
+    c->add_option("--run-id", o.run_id, "paleidimo ID domeno nuomoje <domain>.vramflow/ (numatyta <subkomanda>-<pid>-<8 hex>)");
+}
+// Įėjimus skaitančios funkcijos (logo, composite, verify, enc): laukimas ir formato pasikeitimas po re-attach (planas §P6).
+void inputs(CLI::App* c, Opts& o) {
+    c->add_option("--input-wait-ms", o.input_wait_ms, "kiek laukti įėjimų paleidžiant: 0 — neribotai (numatyta), N — riba ms (tada exit 4)")
+        ->check(CLI::NonNegativeNumber);
+    c->add_option("--on-format-change", o.on_format_change, "įėjimas grįžo kitu formatu: exit (exit 6, numatyta) | wait")
+        ->check(CLI::IsMember({"exit", "wait"}));
 }
 }  // namespace
 
@@ -62,11 +70,13 @@ int main(int argc, char** argv) {
         ->check(CLI::IsMember({"pace", "manual"}));
     auto* l = app.add_subcommand("logo", "logotipo įkepimas MXL → MXL GPU");
     common(l, o);
+    inputs(l, o);
     l->add_option("--inject-every", o.inject_every);
     l->add_option("--deadline-ms", o.deadline_ms);
     l->add_option("--read-offset-us", o.read_offset_us);
     auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
     common(cp, o);
+    inputs(cp, o);
     cp->add_option("--layers", o.layers, "grafikos sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
     cp->add_option("--layer-xy", o.layer_xy, "X,Y (kadro koordinatės) kiekvienam sluoksniui, kartoti K kartų; X lyginis, interlaced Y lyginis");
     cp->add_option("--opacity", o.opacity, "sluoksnio nepermatomumas 0…1 (K kartų; numatytasis 1)");
@@ -77,6 +87,7 @@ int main(int argc, char** argv) {
     cp->add_option("--read-offset-us", o.read_offset_us);
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
+    inputs(v, o);
     v->add_option("--mode", o.mode, "logo | gen | dec | composite");
     // --mode composite: tie patys parametrai kaip gfxgen / composite (verify atkuria laukiamą išėjimą CPU etalonu)
     v->add_option("--layers", o.layers, "composite: sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
@@ -92,6 +103,7 @@ int main(int argc, char** argv) {
     v->add_option("--min-chroma-db", o.min_chroma_db, "dec: Cb/Cr PSNR prieš gen etaloną (šaltinio indeksas iš barkodo) >= riba; 0 — netikrinama");
     auto* e = app.add_subcommand("enc", "MXL → H.264 + AAC MPEG-TS per UDP");
     common(e, o);
+    inputs(e, o);
     e->add_option("--encoder", o.encoder, "nvenc | x264");
     e->add_option("--preset", o.preset);
     e->add_option("--tune", o.tune);
@@ -144,6 +156,16 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("clip")) return run_clip(o, clip_frames, o.fmt.raster.interlaced ? clip_first & ~1ull : clip_first);
     if (app.got_subcommand("ref-crc")) return run_ref_crc(o, ref_path);
     if (app.got_subcommand("split-raw")) return run_split_raw(o, conv_in, conv_out, conv_chroma == "frame");
+    // Domeno nuoma (planas §P6, K8): laikoma iki proceso pabaigos; harness'as domeno netrina, kol ji gyva.
+    {
+        const std::string sub = app.get_subcommands().front()->get_name();
+        if (o.run_id.empty()) o.run_id = mxlv::runtime::make_run_id(sub);
+        std::string err;
+        if (!mxlv::runtime::DomainLease::acquire(o.domain, o.run_id, domain_lease(), err)) {
+            std::fprintf(stderr, "[%s] domeno nuoma: %s\n", sub.c_str(), err.c_str());
+            return 2;
+        }
+    }
     if (app.got_subcommand("gen")) return run_gen(o);
     if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);

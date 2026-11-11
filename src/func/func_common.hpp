@@ -16,6 +16,8 @@
 #include "func/thread_pool.hpp"
 #include "common/format.hpp"
 #include "gfx/raster.hpp"
+#include "runtime/domain_lease.hpp"
+#include "runtime/open_policy.hpp"
 
 namespace mxlv::func {
 
@@ -36,6 +38,12 @@ struct Opts {
     double warmup_s = 5;
     std::string out = ".";
     std::string device_uuid;
+    // Paleidimas ir sustabdymas (planas §P6). run_id — šio paleidimo nuoma `<domain>.vramflow/<run_id>.lease` (tuščia —
+    // "<subkomanda>-<pid>-<8 hex>"). input_wait_ms: 0 — įėjimų laukti neribotai (numatyta), N > 0 — riba (exit 4).
+    // on_format_change: exit (įėjimas grįžo kitu formatu → exit 6) | wait (laukti, kol grįš tuo pačiu formatu).
+    std::string run_id;
+    std::int64_t input_wait_ms = 0;
+    std::string on_format_change = "exit";
     // gen
     std::uint32_t complexity = 2;
     bool audio = false;
@@ -109,5 +117,17 @@ int cuda_device(const std::string& uuid);  // -1 nerasta
 std::string cuda_options(int dev);         // cuda-linear writer'io opcijos
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json = "");
 double warm_tai_after(double warmup_s);    // TAI ns, nuo kada skaičiuoti latencijas
+
+// --- Paleidimas ir sustabdymas (planas §P6) ---------------------------------------------------------------------------
+runtime::OpenPolicy open_policy(const Opts& o);      // --input-wait-ms
+runtime::FormatChange format_change(const Opts& o);  // --on-format-change
+// Proceso domeno nuoma (paima main_func.cpp prieš subkomandą; laikoma iki proceso pabaigos).
+runtime::DomainLease& domain_lease();
+// Išėjimo flow sukurtas — užregistruojamas nuomoje (kitas paleidimas, bandantis jį sukurti, gaus savininko run_id).
+void lease_output(const std::string& flow_id);
+// Išėjimo flow sukurti nepavyko, nes jis jau egzistuoja: tekstas su gyvo savininko run_id (arba kad savininkas nežinomas).
+std::string owner_note(const Opts& o, const std::string& flow_id);
+// Exit kodas, kai įėjimas grįžo kitu formatu ir --on-format-change exit (PF-3).
+constexpr int kExitFormatChange = 6;
 
 }  // namespace mxlv::func

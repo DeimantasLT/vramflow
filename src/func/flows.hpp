@@ -126,6 +126,7 @@ private:
 struct AudioOut {
     mxlFlowWriter w = nullptr;
     std::uint64_t last_end = 0;
+    bool existed = false;  // create: flow jau egzistavo (gyvas kitas writer'is)
     // grain_rate — video grain'o ritmas: rašymo riba turi talpinti ilgiausią grain'ą (vramflow::max_samples_per_grain).
     bool create(mxlInstance inst, const std::string& def, std::string& err, vramflow::Rational grain_rate = {50, 1});
     // Rašo count mėginių, kurių paskutinis (išskirtinis) indeksas = end. fill(ch, sample_index) → float.

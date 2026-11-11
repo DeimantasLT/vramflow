@@ -47,10 +47,26 @@ int run_gen(const Opts& o) {
     const bool inter = o.fmt.raster.interlaced;
     const std::size_t gbytes = media::grain_bytes(dim, inter);
     int rc = 0;
-    for (std::uint32_t n = 0; n < vout.size() && !rc; ++n)
-        if (!vout[n].create(inst, video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = "video " + std::to_string(n) + ": " + err; rc = 2; }
-    for (std::uint32_t n = 0; n < aout.size() && !rc; ++n)
-        if (!aout[n].create(inst, audio_def(o.flow_base + n, o.run_seed), err, grain)) { st.fatal = "audio " + std::to_string(n) + ": " + err; rc = 2; }
+    // Išėjimai registruojami domeno nuomoje; jau egzistuojantis (gyvas writer'is po GC) — klaida su savininko run_id (§P6).
+    for (std::uint32_t n = 0; n < vout.size() && !rc; ++n) {
+        const std::string id = flow_id(kRoleGen, o.flow_base + n);
+        if (!vout[n].create(inst, video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) {
+            st.fatal = "video " + std::to_string(n) + ": " + err +
+                       (vout[n].existed || vout[n].create_status == MXL_ERR_CONFLICT ? owner_note(o, id) : std::string{});
+            rc = 2;
+        } else {
+            lease_output(id);
+        }
+    }
+    for (std::uint32_t n = 0; n < aout.size() && !rc; ++n) {
+        const std::string id = flow_id(kRoleAudio, o.flow_base + n);
+        if (!aout[n].create(inst, audio_def(o.flow_base + n, o.run_seed), err, grain)) {
+            st.fatal = "audio " + std::to_string(n) + ": " + err + (aout[n].existed ? owner_note(o, id) : std::string{});
+            rc = 2;
+        } else {
+            lease_output(id);
+        }
+    }
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);

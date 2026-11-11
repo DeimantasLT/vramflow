@@ -33,6 +33,7 @@
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "media/media_ref.hpp"
+#include "runtime/input_slot.hpp"
 
 namespace mxlv::func {
 
@@ -113,7 +114,7 @@ int verify_composite(const Opts& o, Stats& st) {
     std::vector<VideoIn> out(N);
     int rc = 0;
     for (std::uint32_t n = 0; n < N && !rc; ++n)
-        if (!out[n].open(inst, flow_id(kRoleComp, o.flow_base + n), 20000, stop, err, &out_fmt)) { st.fatal = err; rc = 4; }
+        if (!out[n].open(inst, flow_id(kRoleComp, o.flow_base + n), open_policy(o), stop, err, &out_fmt)) { st.fatal = err; rc = 4; }
     if (rc) { mxlDestroyInstance(inst); return rc; }
 
     struct LayerCache {
@@ -328,20 +329,35 @@ int run_verify(const Opts& o_in) {
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
     if (!inst) { st.fatal = "mxlCreateInstance"; return finish(2); }
     const int out_role = logo_mode ? kRoleLogo : (dec_mode ? kRoleDec : kRoleGen);
-    std::vector<VideoIn> out(o.flows), in(logo_mode ? o.flows : 0);
+    // Tikrinami išėjimai ir (logo) įėjimai — per InputSlot (planas §P6): laukiama pagal --input-wait-ms, dingęs ir grįžęs
+    // flow prijungiamas iš naujo; kol atjungtas — indeksai skaičiuojami „missing“ (pajėgumo / tiekimo klaida).
+    std::vector<runtime::InputSlot> out, in;
+    out.reserve(o.flows);
+    in.reserve(logo_mode ? o.flows : 0);
+    for (std::uint32_t n = 0; n < o.flows; ++n) out.emplace_back(flow_id(out_role, o.flow_base + n), &o.fmt, format_change(o));
+    for (std::uint32_t n = 0; logo_mode && n < o.flows; ++n) in.emplace_back(flow_id(o.in_role, o.flow_base + n), &o.fmt, format_change(o));
+    std::vector<runtime::InputSlot*> all;
+    for (auto& s : out) all.push_back(&s);
+    for (auto& s : in) all.push_back(&s);
+    auto release_all = [&] {
+        for (auto* s : all) s->release();
+        mxlDestroyInstance(inst);
+    };
+    if (!runtime::wait_attached(all, inst, open_policy(o), stop, ("verify " + o.mode).c_str(), err)) {
+        const bool stopped = stop.load();  // sustabdytas belaukiant — tvarkinga pabaiga
+        release_all();
+        if (stopped) return finish(0);
+        st.fatal = err;
+        return finish(4);
+    }
     int rc = 0;
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].open(inst, flow_id(out_role, o.flow_base + n), 20000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
-    for (std::uint32_t n = 0; n < in.size() && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 20000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
-    if (rc) { mxlDestroyInstance(inst); return finish(rc); }
 
     const mxlRational rate = mxl_rate(o.fmt.grain_rate());
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
     const bool inter = o.fmt.raster.interlaced;
     const std::size_t gwords = media::grain_words(dim, inter);
     const int words = media::v210_words_per_line(dim.w);
-    const std::uint32_t gc = out[0].layout.slotCount;
+    const std::uint32_t gc = out[0].in().layout.slotCount;
     // Atsilikimas grain'ais: ne daugiau nei gc − 3, kad grain'as dar būtų skaitomas (readable: head − idx <= gc − 2), net kai
     // ring'as trumpas (MXL numatytasis 200 ms: 1080p25 — tik 5 grain'ai).
     const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
@@ -358,23 +374,27 @@ int run_verify(const Opts& o_in) {
         // verify sąmoningai atsilieka lag_fields laukų, todėl ilgas laukimas čia nėra laikrodžio šuolis
         wait_until(rate, i + lag, 0, stop);
         if (stop.load()) break;
+        for (auto* s : all)
+            if (s->poll(inst, now_tai()) == runtime::InputSlot::State::Mismatch) { st.fatal = s->reason(); rc = kExitFormatChange; }
+        if (rc) break;
         for (std::uint32_t n = 0; n < o.flows; ++n) {
             mxlGrainInfo info{};
             const std::uint32_t* p = nullptr;
-            const mxlStatus s = out[n].get(i, 0, info, p);
             auto& f = st.flows[n];
-            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) { f.inc("missing"); continue; }
+            if (out[n].state() != runtime::InputSlot::State::Attached) { f.inc("missing"); continue; }
+            const mxlStatus s = out[n].get(i, 0, info, p);
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || s == MXL_ERR_FLOW_INVALID) { f.inc("missing"); continue; }
             if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
             if (info.flags & MXL_GRAIN_FLAG_INVALID) { f.inc("invalid"); continue; }
             f.inc("present");
             if ((i + n) % o.every != 0) continue;
             // imtis
-            if (!copy_field(out[n], p, ho, gwords)) { f.inc("cuda_errors"); continue; }
+            if (!copy_field(out[n].in(), p, ho, gwords)) { f.inc("cuda_errors"); continue; }
             const std::uint32_t* ip = nullptr;
             if (logo_mode) {
                 mxlGrainInfo ii{};
-                if (in[n].get(i, 0, ii, ip) != MXL_STATUS_OK || (ii.flags & MXL_GRAIN_FLAG_INVALID) || !copy_field(in[n], ip, hi, gwords)) {
+                if (in[n].get(i, 0, ii, ip) != MXL_STATUS_OK || (ii.flags & MXL_GRAIN_FLAG_INVALID) || !copy_field(in[n].in(), ip, hi, gwords)) {
                     f.inc("sample_in_unavailable");
                     continue;
                 }
@@ -480,10 +500,13 @@ int run_verify(const Opts& o_in) {
             i = now_idx - lag;
         }
     }
-    for (auto& v : out) v.release(inst);
-    for (auto& v : in) v.release(inst);
-    mxlDestroyInstance(inst);
-    return finish(summarize(st));
+    for (std::uint32_t n = 0; n < o.flows; ++n) {
+        st.flows[n].c["reattached"] = out[n].reattached();
+        if (logo_mode) st.flows[n].c["in_reattached"] = in[n].reattached();
+    }
+    release_all();
+    const int sr = summarize(st);
+    return finish(rc ? rc : sr);
 }
 
 }  // namespace mxlv::func

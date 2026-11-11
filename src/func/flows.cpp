@@ -345,7 +345,7 @@ bool AudioOut::create(mxlInstance inst, const std::string& def, std::string& err
     bool created = false;
     const mxlStatus st = mxlCreateFlowWriter(inst, def.c_str(), nullptr, &w, &cfg, &created);
     if (st != MXL_STATUS_OK) { w = nullptr; err = "audio mxlCreateFlowWriter status " + std::to_string(st); return false; }
-    if (!created) { err = "audio flow jau egzistavo"; return false; }
+    if (!created) { existed = true; err = "audio flow jau egzistavo (created=false)"; return false; }
     if (cfg.continuous.channelCount != 2) { err = "audio kanalų ne 2"; return false; }
     std::size_t maxw = 0;
     const std::uint32_t need = vramflow::max_samples_per_grain(grain_rate);
