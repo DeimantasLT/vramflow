@@ -74,6 +74,21 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   target_link_libraries(mxlv_gfx_writer PUBLIC mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
   set_target_properties(mxlv_gfx_writer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+  # Versija — vienintelis šaltinis include/vramflow/gfx.h (VFGFX_VERSION_*). SONAME politika (gfx.h „VERSIONING AND
+  # ABI“): iki 1.0 kiekviena MINOR versija gali laužti ABI, todėl SOVERSION = MAJOR.MINOR (libvramflow-gfx.so.0.2);
+  # nuo 1.0 — SOVERSION = MAJOR.
+  file(STRINGS ${CMAKE_SOURCE_DIR}/include/vramflow/gfx.h _vfgfx_ver REGEX "^#define VFGFX_VERSION_(MAJOR|MINOR|PATCH) [0-9]+$")
+  foreach(_part MAJOR MINOR PATCH)
+    string(REGEX REPLACE ".*#define VFGFX_VERSION_${_part} ([0-9]+).*" "\\1" VFGFX_VERSION_${_part} "${_vfgfx_ver}")
+  endforeach()
+  set(VFGFX_VERSION "${VFGFX_VERSION_MAJOR}.${VFGFX_VERSION_MINOR}.${VFGFX_VERSION_PATCH}")
+  if(VFGFX_VERSION_MAJOR EQUAL 0)
+    set(VFGFX_SOVERSION "${VFGFX_VERSION_MAJOR}.${VFGFX_VERSION_MINOR}")
+  else()
+    set(VFGFX_SOVERSION "${VFGFX_VERSION_MAJOR}")
+  endif()
+  message(STATUS "libvramflow-gfx ${VFGFX_VERSION}, SOVERSION ${VFGFX_SOVERSION}")
+
   add_library(vramflow-gfx SHARED src/gfx/gfx_writer.cpp)
   vramflow_warnings(vramflow-gfx)
   target_include_directories(vramflow-gfx PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
@@ -82,7 +97,7 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   target_link_libraries(vramflow-gfx PUBLIC mxl::mxl PRIVATE mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
   target_include_directories(vramflow-gfx INTERFACE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   target_link_options(vramflow-gfx PRIVATE -Wl,--version-script=${CMAKE_SOURCE_DIR}/cmake/vramflow-gfx.map)
-  set_target_properties(vramflow-gfx PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib" VERSION 0.1.0 SOVERSION 0)
+  set_target_properties(vramflow-gfx PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib" VERSION ${VFGFX_VERSION} SOVERSION ${VFGFX_SOVERSION})
   # Pastaba: INSTALL_RPATH nenustatytas — įdiegtą .so vartotojas turi rasti libmxl per LD_LIBRARY_PATH / ldconfig.
   install(TARGETS vramflow-gfx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
   install(FILES include/vramflow/gfx.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/vramflow)
@@ -96,6 +111,14 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
                           BUILD_RPATH "${MXL_ROOT}/lib")
     target_compile_options(vramflow-gfx-c-check PRIVATE -Wall -Wextra -pedantic -Werror)
     add_test(NAME gfx_writer_c_header COMMAND vramflow-gfx-c-check)
+
+    # R20 / auditas 9 prieš PRISTATOMĄ .so su atskira dinamine cudart (kaip tikras naudotojas); --bench — kainos matavimas.
+    add_executable(vramflow-gfx-so-cuda-check tests/gpu/gfx_so_cuda_check.cu)
+    vramflow_warnings(vramflow-gfx-so-cuda-check)
+    target_link_libraries(vramflow-gfx-so-cuda-check PRIVATE vramflow-gfx mxlv_flows CUDA::cudart)
+    set_target_properties(vramflow-gfx-so-cuda-check PROPERTIES CUDA_RUNTIME_LIBRARY Shared BUILD_RPATH "${MXL_ROOT}/lib")
+    add_test(NAME gfx_so_cuda_r20 COMMAND vramflow-gfx-so-cuda-check)
+    set_tests_properties(gfx_so_cuda_r20 PROPERTIES SKIP_RETURN_CODE 77)
 
     add_executable(vramflow-gfx-writer-tests tests/gpu/test_gfx_writer.cpp)
     vramflow_warnings(vramflow-gfx-writer-tests)

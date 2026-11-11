@@ -81,8 +81,8 @@ struct Src {
 
     std::size_t bytes() const { return static_cast<std::size_t>(r.w) * static_cast<std::size_t>(r.h) * 4; }
     vfgfx_frame view(int slot, bool cuda) const {
-        vfgfx_frame f{};
-        f.rgba = cuda ? d[slot] : static_cast<const void*>(h[slot].data());
+        vfgfx_frame f = VFGFX_FRAME_INIT;
+        f.pixels = cuda ? d[slot] : static_cast<const void*>(h[slot].data());
         f.width = static_cast<std::uint32_t>(r.w);
         f.height = static_cast<std::uint32_t>(r.h);
         f.stride = static_cast<std::uint32_t>(r.w) * 4;
@@ -296,7 +296,7 @@ int run_gfxgen(const Opts& o) {
     for (auto& f : st.flows) f.inc("errors", 0);  // raktas visada yra summary
     if (!rc && errs) { st.fatal = std::to_string(errs) + " klaidų (žr. stderr)"; rc = 3; }
     for (auto& s : src) {
-        if (s.w) vfgfx_writer_destroy(s.w, inst);
+        if (s.w) vfgfx_writer_destroy(s.w);
         for (void*& d : s.d)
             if (d) { cudaFree(d); d = nullptr; }
     }

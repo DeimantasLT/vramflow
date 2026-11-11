@@ -3,51 +3,132 @@
 #ifndef VRAMFLOW_GFX_H
 #define VRAMFLOW_GFX_H
 /*
- * libvramflow-gfx: bet kuri programa gali rašyti RGBA kadrus į standartinį MXL `video/v210a` flow'ą
- * (fill v210 + key, straight alfa, video diapazonas; host arba cuda-linear saugykla).
+ * libvramflow-gfx — public C API. This comment is the contract.
  *
- * Du režimai (vienu metu negalimi):
- *  - rankinis: vfgfx_write(index, kadras) rašo grain'ą `index` (interlaced rastre laukas index%2 — paritetas 0 =
- *    lyginis indeksas = viršutinis laukas = kadro eilutės 0, 2, 4…; progresyviame rastre paritetas ignoruojamas);
- *  - ritmo: vfgfx_start_pacing(offset_ns) paleidžia bibliotekos giją, kuri kas grain'ą (TAI laikas, flow grain'o dažniu) commit'ina
- *    PASKUTINĮ vfgfx_submit kadrą. Iki pirmo submit grain'ų nėra. Kol ritmo gija veikia, ji vienintelė liečia MXL writer'į.
+ * The library turns 8-bit RGBA/BGRA frames into a standard MXL `video/v210a` flow (v210 fill + 10-bit key, straight
+ * alpha, BT.709 video range) in host memory or in GPU memory (MXL `cuda-linear` payload backend). The output is
+ * bit-exact with the repository's independent reference (src/gfx/gfx_ref.*) for every supported input.
  *
- * Kadro atmintis ir kaina: abi atminties rūšys (VFGFX_MEM_HOST / VFGFX_MEM_CUDA) veikia su abiem saugyklomis.
- * Atitinkanti pora (host→host, CUDA→cuda-linear) — vienas konvertavimas (CPU ciklas arba kernel'is) tiesiai į
- * paskirties atmintį. Kryžminė pora kainuoja kopiją: host kadras → cuda-linear = H2D (~8 MB 1080p) + kernel'is;
- * CUDA kadras → host saugykla = D2H + CPU konvertavimas. Ritmo režime ši kaina mokama tik vfgfx_submit metu, ne
- * kiekvieną lauką. CUDA kadras turi priklausyti tam pačiam įrenginiui kaip cuda-linear saugykla (deviceUuid iš
- * writer_options_json). deviceUuid PRIVALOMAS daugiau nei vieno GPU kompiuteriuose: biblioteka turi savo (privatų) CUDA
- * runtime, todėl kviečiančiojo cudaSetDevice jai nematomas; be deviceUuid naudojamas įrenginys 0. UUID — "GPU-xxxxxxxx-…",
- * raidžių dydis nesvarbus, rodyklė ir stride — kartotiniai 4 B.
+ * VERSIONING AND ABI
+ *  - Compile time: VFGFX_VERSION_MAJOR / _MINOR / _PATCH (and VFGFX_VERSION, VFGFX_VERSION_STRING) describe the header.
+ *    Run time: vfgfx_version() / vfgfx_version_string() describe the loaded library.
+ *  - SONAME policy. Before 1.0 every MINOR release may break the ABI, so the SONAME carries MAJOR.MINOR:
+ *    libvramflow-gfx.so.0.2 for all 0.2.x. A program built against 0.2 therefore never loads 0.3 by accident (the
+ *    dynamic loader refuses it instead of the program misreading structs). PATCH releases keep the ABI. From 1.0 on the
+ *    SONAME is libvramflow-gfx.so.MAJOR and the ABI only grows within a MAJOR (new functions, new fields at struct ends).
+ *  - Only `vfgfx_*` symbols are exported; the library carries its own private, statically linked CUDA runtime.
+ *  - Extensible structs. Every struct that crosses the API starts with `uint32_t struct_size` (the caller sets it to
+ *    sizeof the struct as the caller's header declares it; the *_INIT macros and *_init() functions do this) followed by
+ *    `uint32_t flags`, and ends with reserved space. For input structs the library
+ *      - rejects struct_size below the minimum it needs or above 4096 (VFGFX_ERR_STRUCT_SIZE);
+ *      - accepts a larger struct from a newer header only if every byte it does not know is zero, otherwise
+ *        VFGFX_ERR_UNSUPPORTED (a field it cannot honour is never silently ignored);
+ *      - rejects unknown flag bits and non-zero reserved fields (VFGFX_ERR_UNSUPPORTED).
+ *    For the output struct (vfgfx_stats) the library fills the fields it knows within the caller's struct_size and
+ *    zeroes the rest; struct_size and flags are not modified.
  *
- * CUDA kadro tvarka: numatytai biblioteka pati palaukia, kol baigsis visi GPU darbai tame kontekste, ir tik tada skaito
- * f->rgba — pusiau įrašytas kadras (pvz. po „sinchroninio“ cudaMemcpy H2D iš pageable atminties, kuris gali grįžti prieš DMA
- * pabaigą) neįmanomas. Kviečiantysis, kuris pats sinchronizuoja (cudaStreamSynchronize prieš kvietimą), gali tą laukimą
- * išjungti: vfgfx_set_caller_synced(w, 1). Kitas CUDA kontekstas nei pirminis (cuCtxCreate) — kviečiančiojo atsakomybė.
- * Iškvietimas sinchroninis:
- * grįžus, f->rgba buferį (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
+ * WRITER LIFETIME
+ *  vfgfx_writer_create() creates the MXL flow (from a flow definition JSON, see vfgfx_flow_def()) and its writer on the
+ *  given mxlInstance; vfgfx_writer_destroy() stops pacing, releases the writer and frees everything. The instance must
+ *  outlive the writer (destroy writers before mxlDestroyInstance). Creating a flow that already exists in the domain
+ *  fails with VFGFX_ERR_STATE.
  *
- * Ritmo laikas: vfgfx_start_pacing(offset_ns) — grain indeksas i commit'inamas laiku T(i) + offset_ns, kur T(i) — indekso
- * pradžios TAI laikas (flow grain'o dažnis: interlaced — 2 × kadrų dažnis). offset_ns > 0 = vėliau, < 0 = anksčiau (iš anksto). Pirmas indeksas — pirmas, kurio laikas
- * dar nepraėjo; sustabdžius ir vėl paleidus, jau commit'inti indeksai nekartojami. Jei gija pavėluoja, vėluojantis indeksas
- * vis tiek įrašomas, o praleisti laukai nerašomi (jokio „catch-up“ srauto).
+ * TWO MODES (mutually exclusive at any moment)
+ *  - Manual: vfgfx_write(w, index, frame) converts and commits grain `index` now. Interlaced flows: grain = field of
+ *    parity index % 2 — even index = top field = frame rows 0, 2, 4…; progressive flows: grain = frame, parity ignored.
+ *  - Paced: vfgfx_start_pacing(w, offset_ns) starts a library thread that commits one grain per grain period of the
+ *    flow (TAI clock; interlaced: 2 x frame rate). The content of grain i is the frame that is current at i:
+ *      * vfgfx_submit(w, frame) makes `frame` current from the next grain the thread processes;
+ *      * vfgfx_submit_at(w, first_index, frame) makes `frame` current from grain `first_index` on (frame accurate).
+ *    Until the first frame exists no grains are committed. While pacing runs, the thread is the only user of the MXL
+ *    writer and vfgfx_write fails with VFGFX_ERR_STATE. vfgfx_submit / vfgfx_submit_at are also allowed before
+ *    vfgfx_start_pacing (the frames are then ready when pacing starts).
  *
- * Interlace: palaikomas TIK `interlaced_tff` (lyginis grain indeksas = viršutinis laukas) ir progresyvus (`progressive` arba
- * nenurodytas) rastras; `interlaced_bff` ir kitos interlace_mode reikšmės atmetamos (vfgfx_writer_create -> INVALID_ARG).
+ * GRAIN INDICES AND TIMING (paced mode)
+ *  - Index i is committed at T(i) + offset_ns, T(i) = TAI start of grain i (mxlIndexToTimestamp at the flow grain rate).
+ *    offset_ns > 0 commits later, < 0 earlier (ahead of time).
+ *  - Guaranteed: indices are committed in strictly increasing order, never twice (also across stop/start), and a grain
+ *    is never committed before its commit time. The first index after vfgfx_start_pacing is the first one whose commit
+ *    time has not passed.
+ *  - Not guaranteed: every index. If the thread wakes up late, the index it was waiting for is still committed (late),
+ *    then the indices whose time has already passed are skipped (stats.late_skips) — no catch-up burst. If the clock
+ *    steps backwards, the thread waits until time catches up (stats.clock_backward).
+ *  - vfgfx_submit_at(w, first_index, frame):
+ *      * accepted when stats.next_pacing_index <= first_index <= vfgfx_current_index(w) + VFGFX_SUBMIT_AT_MAX_LEAD_S x
+ *        grain rate; earlier -> VFGFX_ERR_TOO_LATE, later -> VFGFX_ERR_TOO_EARLY (nothing is queued in either case);
+ *      * next_pacing_index is the first index whose content the pacing thread has not chosen yet (with offset 0 normally
+ *        vfgfx_current_index(w) + 1; when not pacing, the index pacing would start with now). Use first_index >=
+ *        vfgfx_current_index(w) + 2 for a margin of one grain;
+ *      * up to stats.queue_capacity (at least VFGFX_SUBMIT_AT_MIN_QUEUE) frames may be pending; one more fails with
+ *        VFGFX_ERR_QUEUE_FULL. A frame for an index that is already pending replaces the pending one
+ *        (stats.scheduled_replaced);
+ *      * a pending frame becomes current exactly at grain first_index if that grain is processed. If the thread skips
+ *        first_index (late wake-up) or pacing was stopped over it, the frame becomes current at the next grain the
+ *        thread processes (stats.scheduled_late); of several frames due at the same grain the one with the highest
+ *        first_index wins, the others count as replaced. A pending frame is never shown before first_index;
+ *      * vfgfx_submit does not clear the queue: pending frames still take over at their indices.
+ *  - vfgfx_current_index(w): the index of the grain period that contains "now" (TAI) at the flow grain rate (same as
+ *    mxlGetCurrentIndex for that rate); independent of offset_ns.
  *
- * ABI: SOVERSION 0 — iki 1.0 struktūrų išdėstymas (vfgfx_frame, vfgfx_pacing_stats…) gali keistis; stabilumo pažado dar nėra.
+ * FRAMES (vfgfx_frame)
+ *  - pixel_format: VFGFX_PIXEL_RGBA8 (bytes R, G, B, A) or VFGFX_PIXEL_BGRA8 (bytes B, G, R, A — Chromium/browsers,
+ *    GStreamer BGRA). Both give identical output for the same picture. Other values -> VFGFX_ERR_UNSUPPORTED.
+ *  - width/height must equal the flow raster (VFGFX_ERR_GEOMETRY); stride >= width x 4 bytes; CUDA frames: pointer and
+ *    stride multiples of 4 bytes; host frames into a cuda-linear flow: stride multiple of 4 bytes.
+ *  - alpha: VFGFX_ALPHA_STRAIGHT or VFGFX_ALPHA_PREMULTIPLIED; mem: VFGFX_MEM_HOST or VFGFX_MEM_CUDA (device pointer
+ *    on the device the writer uses). Other values -> VFGFX_ERR_INVALID_ARG.
+ *  - Ownership: calls are synchronous. When vfgfx_write / vfgfx_submit / vfgfx_submit_at return, the library has
+ *    finished reading the pixels; the buffer may be reused or freed immediately. The library keeps no pointer to it.
+ *  - Cost: matching pairs (host frame -> host flow, CUDA frame -> cuda-linear flow) are one conversion straight into
+ *    the destination. Crossed pairs add a copy (host -> cuda-linear: H2D of the frame; CUDA -> host flow: D2H). In paced
+ *    mode the conversion is paid once per submit, not per grain (the thread only copies the prepared field).
  *
- * Klaidos: funkcijos grąžina 0 arba kodą (VFGFX_ERR_* žemiau, 1..1023 — mxlStatus). C++ išimtys neperženg ribos
- * (VFGFX_ERR_INTERNAL). Jei ritmo gijoje įvyko išimtis, gija baigiasi, bet režimas lieka „veikiantis“ (vfgfx_write -> STATE)
- * iki vfgfx_stop_pacing. vfgfx_last_error(w): paskutinė kviečiančiosios pusės (bet kurios gijos) klaida, bendra visam writer'iui (jei jos nėra — paskutinė ritmo
- * gijos klaida); vfgfx_last_error(NULL): ŠIOS gijos paskutinė vfgfx_writer_create klaida. Rodyklė galioja iki kito
- * vfgfx_last_error iškvietimo toje pačioje gijoje; niekada NULL.
+ * CUDA FRAMES: ORDERING WITH THE CALLER'S GPU WORK
+ *  The library has a private CUDA runtime, so it cannot see the caller's streams implicitly. Before reading a CUDA frame
+ *  it orders itself after the caller's work in one of three ways:
+ *   1. cuda_stream == NULL and no VFGFX_FRAME_CALLER_SYNCED (default): cudaDeviceSynchronize() on the writer's device
+ *      (primary context) — waits for ALL GPU work in that context, including unrelated streams. Always safe; costly when
+ *      the process keeps the GPU busy (a 100 ms kernel on another stream delays the call by up to 100 ms).
+ *   2. cuda_stream = the caller's cudaStream_t (as void*; cudaStreamLegacy / cudaStreamPerThread handles are accepted):
+ *      the library records an event on that stream and makes its own stream wait for it, so it reads the frame after
+ *      exactly the work queued on that stream before the call; unrelated GPU work is not waited for and the caller's
+ *      stream is not blocked. The stream must belong to the writer's device (primary context).
+ *   3. flags |= VFGFX_FRAME_CALLER_SYNCED: the caller guarantees the frame is complete (e.g. cudaStreamSynchronize before
+ *      the call); the library does not wait.
+ *  Measured cost of vfgfx_write (1080i50 cuda-linear flow, CUDA frame, one field; RTX 4070 Laptop, WSL2; tool
+ *  tests/gpu/gfx_so_cuda_check.cu --bench against the shipped .so): idle GPU 0.74 / 0.74 / 0.62 ms for paths 1 / 2 / 3;
+ *  with a 100 ms kernel running on another stream 99.6 / 0.55 / 0.57 ms.
+ *  cuda_stream together with VFGFX_FRAME_CALLER_SYNCED, or cuda_stream on a host frame -> VFGFX_ERR_INVALID_ARG.
+ *  Note: a "synchronous" cudaMemcpy from pageable host memory may return before the DMA has finished; use 1 or 2 then.
+ *  Devices: a cuda-linear flow uses the device named by "deviceUuid" in writer_options_json (REQUIRED on multi-GPU
+ *  machines: the caller's cudaSetDevice is invisible to the private runtime; without it device 0 is used). A host
+ *  flow downloads CUDA frames on the "deviceUuid" device (or device 0). UUID format "GPU-xxxxxxxx-…", any case.
+ *  A host flow fed only host frames never touches CUDA (works without a GPU).
  *
- * Gijų sauga: vienas vfgfx_writer — vfgfx_write / vfgfx_submit / start / stop gali būti kviečiami iš kelių gijų (vidinės
- * užraktai juos serializuoja), tačiau vfgfx_write ritmo metu grąžina VFGFX_ERR_STATE. Laiko žymės: indeksai iš TAI
- * (mxlGetTime), grain'ų ritmas — flow aprašo grain_rate (25p, 50p, 29,97p, 59,94p, 50i, 59,94i).
+ * SUPPORTED FLOWS
+ *  `video/v210a`, any raster with even width (interlaced: even height), scan progressive or `interlaced_tff`
+ *  (`interlaced_bff` is rejected), frame rates 25, 50, 30000/1001, 60000/1001 progressive; 25, 30000/1001 interlaced.
+ *
+ * ERRORS
+ *  Functions return VFGFX_OK (0) or a code: 1..1023 = mxlStatus from libmxl, >= 2000 = VFGFX_ERR_*. No C++ exception
+ *  crosses the API (VFGFX_ERR_INTERNAL). Messages:
+ *   - vfgfx_last_error(w): message of the most recent failed call on w (any caller thread); cleared (returns "") by the
+ *     next successful int-returning call on w. Writer-wide, so with concurrent callers it may describe another thread's
+ *     call — decide on return codes.
+ *   - vfgfx_pacing_error(w): most recent error of the pacing thread (open/copy/commit failure, or the exception that
+ *     ended the thread); cleared by the next successful commit of the pacing thread. If the thread ended on an exception
+ *     the mode stays "running" (vfgfx_write -> VFGFX_ERR_STATE) until vfgfx_stop_pacing.
+ *   - vfgfx_last_error(NULL): this thread's most recent vfgfx_writer_create / vfgfx_flow_def error; cleared by the next
+ *     successful one of these calls in this thread.
+ *  The returned pointer is never NULL and stays valid until the next vfgfx_last_error / vfgfx_pacing_error call in the
+ *  same thread.
+ *
+ * THREADING
+ *  For one writer, vfgfx_write, vfgfx_submit, vfgfx_submit_at, start/stop pacing and the queries may be called from
+ *  several threads (internally serialized). vfgfx_writer_destroy must not race with other calls on the same writer.
+ *  Different writers are independent.
  */
+#include <stddef.h>
 #include <stdint.h>
 
 #include <mxl/mxl.h>
@@ -56,29 +137,167 @@
 extern "C" {
 #endif
 
+/* --- Version --------------------------------------------------------------------------------------------------------- */
+#define VFGFX_VERSION_MAJOR 0
+#define VFGFX_VERSION_MINOR 2
+#define VFGFX_VERSION_PATCH 0
+#define VFGFX_MAKE_VERSION(major, minor, patch) (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
+#define VFGFX_VERSION VFGFX_MAKE_VERSION(VFGFX_VERSION_MAJOR, VFGFX_VERSION_MINOR, VFGFX_VERSION_PATCH)
+#define VFGFX_VERSION_STRING "0.2.0"
+
+/* --- Error codes ------------------------------------------------------------------------------------------------------ */
+#define VFGFX_OK 0
+#define VFGFX_ERR_INVALID_ARG 2001      /* NULL pointer, unknown alpha/mem value, contradictory fields, bad JSON */
+#define VFGFX_ERR_GEOMETRY 2002         /* frame size/stride/alignment does not fit the flow; unsupported raster/rate */
+#define VFGFX_ERR_CUDA 2003             /* CUDA runtime error (the message has the CUDA error string) */
+#define VFGFX_ERR_STATE 2004            /* call not allowed in this mode; flow already exists */
+#define VFGFX_ERR_INTERNAL 2005         /* unexpected internal exception (never propagated across the API) */
+#define VFGFX_ERR_STRUCT_SIZE 2006      /* struct_size smaller than required or larger than 4096 */
+#define VFGFX_ERR_UNSUPPORTED 2007      /* unknown flag, pixel format, non-zero reserved field or unknown trailing bytes */
+#define VFGFX_ERR_TOO_LATE 2008         /* vfgfx_submit_at: first_index < next_pacing_index */
+#define VFGFX_ERR_TOO_EARLY 2009        /* vfgfx_submit_at: first_index too far in the future */
+#define VFGFX_ERR_QUEUE_FULL 2010       /* vfgfx_submit_at: queue_capacity frames already pending */
+#define VFGFX_ERR_BUFFER_TOO_SMALL 2011 /* vfgfx_flow_def: buf_size < *required */
+
+#define VFGFX_INDEX_NONE UINT64_MAX   /* "no index" (nothing committed yet, NULL writer) */
+#define VFGFX_SUBMIT_AT_MIN_QUEUE 4   /* the vfgfx_submit_at queue holds at least this many pending frames */
+#define VFGFX_SUBMIT_AT_MAX_LEAD_S 10 /* vfgfx_submit_at accepts first_index at most this many seconds ahead */
+
+/* --- Types ------------------------------------------------------------------------------------------------------------ */
 typedef struct vfgfx_writer_s* vfgfx_writer;
+
 typedef enum { VFGFX_ALPHA_STRAIGHT = 0, VFGFX_ALPHA_PREMULTIPLIED = 1 } vfgfx_alpha;
 typedef enum { VFGFX_MEM_HOST = 0, VFGFX_MEM_CUDA = 1 } vfgfx_mem;
-typedef struct { const void* rgba; uint32_t width, height, stride; vfgfx_alpha alpha; vfgfx_mem mem; } vfgfx_frame;
-/* 0 = OK; 1..1023 = mxlStatus; >= 2000 = VFGFX_ERR_* (INVALID_ARG 2001, GEOMETRY 2002, CUDA 2003, STATE 2004, INTERNAL 2005) */
-#define VFGFX_ERR_INVALID_ARG 2001
-#define VFGFX_ERR_GEOMETRY 2002
-#define VFGFX_ERR_CUDA 2003
-#define VFGFX_ERR_STATE 2004 /* taip pat: flow jau egzistuoja (created == false) */
-#define VFGFX_ERR_INTERNAL 2005 /* netikėta vidinė išimtis (niekada neperduodama per C ABI ribą) */
+/* Pixel format layout: bits 0..7 = channel order (0 = RGBA, 1 = BGRA), bits 8..15 = bytes per channel - 1 (0 = 8 bit).
+ * 16-bit formats, when added, will be 0x0100 | order (RGBA16 = 0x0100, BGRA16 = 0x0101) with stride >= width x 8. */
+typedef enum { VFGFX_PIXEL_RGBA8 = 0x0000, VFGFX_PIXEL_BGRA8 = 0x0001 } vfgfx_pixel_format;
+typedef enum { VFGFX_SCAN_PROGRESSIVE = 0, VFGFX_SCAN_INTERLACED_TFF = 1 } vfgfx_scan;
+
+/* vfgfx_frame.flags */
+#define VFGFX_FRAME_CALLER_SYNCED 0x1u /* CUDA frame already complete: the library does not wait (see CUDA FRAMES) */
+
+/* One input frame. Initialise with VFGFX_FRAME_INIT or vfgfx_frame_init(), then set the fields. */
+typedef struct vfgfx_frame {
+    uint32_t struct_size;  /* sizeof(vfgfx_frame) */
+    uint32_t flags;        /* VFGFX_FRAME_* */
+    const void* pixels;    /* first byte of row 0 (host or CUDA device pointer, see mem) */
+    uint32_t width;        /* pixels; must equal the flow width */
+    uint32_t height;       /* rows of the full frame (interlaced: both fields); must equal the flow height */
+    uint32_t stride;       /* bytes from one row to the next, >= width x 4 */
+    uint32_t pixel_format; /* vfgfx_pixel_format */
+    uint32_t alpha;        /* vfgfx_alpha */
+    uint32_t mem;          /* vfgfx_mem */
+    void* cuda_stream;     /* optional cudaStream_t whose prior work produces the frame (CUDA frames only), or NULL */
+    uint64_t reserved[4];  /* must be zero */
+} vfgfx_frame;
+
+#define VFGFX_FRAME_INIT                                                                                                  \
+    { (uint32_t)sizeof(vfgfx_frame), 0u, NULL, 0u, 0u, 0u, VFGFX_PIXEL_RGBA8, VFGFX_ALPHA_STRAIGHT, VFGFX_MEM_HOST, NULL, \
+      {0u, 0u, 0u, 0u} }
+
+/* Writer counters and state (vfgfx_get_stats). Counters are cumulative since vfgfx_writer_create. */
+typedef struct vfgfx_stats {
+    uint32_t struct_size;          /* in: sizeof(vfgfx_stats) */
+    uint32_t flags;                /* in: must be 0 */
+    uint64_t committed;            /* grains committed, both modes (== vfgfx_committed) */
+    uint64_t written;              /* of which by vfgfx_write */
+    uint64_t paced;                /* of which by the pacing thread */
+    uint64_t submitted;            /* frames accepted by vfgfx_submit */
+    uint64_t scheduled;            /* frames accepted by vfgfx_submit_at */
+    uint64_t scheduled_late;       /* scheduled frames that became current after their first_index */
+    uint64_t scheduled_replaced;   /* scheduled frames that never became current (replaced, see GRAIN INDICES) */
+    uint64_t late_skips;           /* grains skipped because the pacing thread was late */
+    uint64_t no_frame;             /* grain periods without any frame (nothing committed) */
+    uint64_t clock_backward;       /* backward clock steps seen by the pacing thread */
+    uint64_t pacing_errors;        /* pacing thread open/copy/commit failures and exceptions */
+    uint64_t caller_errors;        /* failed calls on this writer */
+    uint64_t last_committed_index; /* index of the most recent commit, VFGFX_INDEX_NONE if none */
+    uint64_t next_pacing_index;    /* smallest first_index vfgfx_submit_at accepts right now */
+    uint32_t pacing;               /* 1 while paced mode is active (between start and stop) */
+    uint32_t queue_depth;          /* vfgfx_submit_at frames pending */
+    uint32_t queue_capacity;       /* maximum pending frames (>= VFGFX_SUBMIT_AT_MIN_QUEUE) */
+    uint32_t reserved0;
+    uint64_t reserved[8];
+} vfgfx_stats;
+
+#define VFGFX_STATS_INIT                                                                                    \
+    { (uint32_t)sizeof(vfgfx_stats), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, \
+      {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u} }
+
+/* Flow definition parameters (vfgfx_flow_def): either `format`, or width/height/scan/frame rate. */
+typedef struct vfgfx_flow_params {
+    uint32_t struct_size;   /* sizeof(vfgfx_flow_params) */
+    uint32_t flags;         /* must be 0 */
+    const char* flow_id;    /* required: UUID "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" (hex digits) */
+    const char* label;      /* optional, NULL -> "vramflow-gfx"; also the description; <= 256 bytes (JSON-escaped) */
+    const char* group_hint; /* optional NMOS grouphint "<group>:<role>" (<= 256 bytes), NULL ->
+                               "vramflow-gfx-<flow_id>:Video" */
+    const char* format;     /* optional broadcast name ("1080i50", "1080p25", "720p59.94", "2160p50", …); when set,
+                               width, height, scan and frame_rate_* must be 0 */
+    uint32_t width;         /* pixels, even */
+    uint32_t height;        /* rows of the full frame (even when interlaced) */
+    uint32_t scan;          /* vfgfx_scan */
+    uint32_t reserved0;
+    int64_t frame_rate_num; /* FRAMES per second: 1080i50 -> 25/1, 59.94p -> 60000/1001 */
+    int64_t frame_rate_den;
+    uint64_t reserved[4];
+} vfgfx_flow_params;
+
+#define VFGFX_FLOW_PARAMS_INIT \
+    { (uint32_t)sizeof(vfgfx_flow_params), 0u, NULL, NULL, NULL, NULL, 0u, 0u, VFGFX_SCAN_PROGRESSIVE, 0u, 0, 0, {0u, 0u, 0u, 0u} }
+
+static inline vfgfx_frame vfgfx_frame_init(void) {
+    vfgfx_frame f = VFGFX_FRAME_INIT;
+    return f;
+}
+static inline vfgfx_stats vfgfx_stats_init(void) {
+    vfgfx_stats s = VFGFX_STATS_INIT;
+    return s;
+}
+static inline vfgfx_flow_params vfgfx_flow_params_init(void) {
+    vfgfx_flow_params p = VFGFX_FLOW_PARAMS_INIT;
+    return p;
+}
+
+/* --- Functions -------------------------------------------------------------------------------------------------------- */
+/* Version of the loaded library: VFGFX_MAKE_VERSION(major, minor, patch) and "major.minor.patch". */
+uint32_t vfgfx_version(void);
+const char* vfgfx_version_string(void);
+
+/* Builds the `video/v210a` MXL flow definition JSON into buf (NUL-terminated). *required (if not NULL) receives the
+ * size needed including the NUL. buf == NULL with buf_size == 0 only queries the size (returns VFGFX_OK). buf_size too
+ * small -> VFGFX_ERR_BUFFER_TOO_SMALL (buf gets "" if buf_size > 0). Validates like vfgfx_writer_create (raster, scan,
+ * rate); errors -> vfgfx_last_error(NULL). */
+int vfgfx_flow_def(const vfgfx_flow_params* p, char* buf, size_t buf_size, size_t* required);
+
+/* Creates the flow described by flow_def_json (`video/v210a`) and a writer for it. writer_options_json: MXL writer
+ * options (NULL or "" = host memory; {"payload":{"backend":"cuda-linear","deviceUuid":"GPU-…"}} = GPU memory). On
+ * error *out = NULL and vfgfx_last_error(NULL) has the message. */
 int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out);
-int vfgfx_write(vfgfx_writer w, uint64_t index, const vfgfx_frame* f);   /* rankinis: grain index (laukas index%2) */
-int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns);                 /* ritmo gija, kas laukas */
-int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f);                    /* ritmo režimas: naujas kadras */
+/* Stops pacing, releases the MXL writer and frees all resources. NULL is a no-op. */
+void vfgfx_writer_destroy(vfgfx_writer w);
+
+/* Manual mode: converts f and commits grain `index` (interlaced: field index % 2). VFGFX_ERR_STATE while pacing. */
+int vfgfx_write(vfgfx_writer w, uint64_t index, const vfgfx_frame* f);
+
+/* Paced mode. start: VFGFX_ERR_STATE if already running. stop: joins the thread; no-op when not running. */
+int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns);
 int vfgfx_stop_pacing(vfgfx_writer w);
-uint64_t vfgfx_committed(vfgfx_writer w);                                  /* commit'intų grain'ų skaičius */
-/* CUDA kadrų sinchronizavimas (R20). Numatyta (0): prieš skaitydama CUDA kadrą biblioteka palaukia, kol baigsis VISI
- * GPU darbai tame CUDA kontekste (cudaDeviceSynchronize pirminiame kontekste), todėl pusiau įrašytas kadras neįmanomas,
- * net jei kviečiantysis pamiršo sinchronizuoti. Kaina — laukimas ir kitų stream'ų darbų. synced = 1: kviečiantysis
- * garantuoja, kad kadras jau įrašytas (cudaStreamSynchronize prieš kvietimą), ir biblioteka nelaukia. */
-int vfgfx_set_caller_synced(vfgfx_writer w, int synced);
+/* Makes f the current content from the next grain the pacing thread processes. */
+int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f);
+/* Makes f the content from grain first_index on (accepted range and queue: see GRAIN INDICES AND TIMING). */
+int vfgfx_submit_at(vfgfx_writer w, uint64_t first_index, const vfgfx_frame* f);
+
+/* Index of the grain period containing now (TAI) at the flow grain rate; VFGFX_INDEX_NONE for NULL. */
+uint64_t vfgfx_current_index(vfgfx_writer w);
+/* Grains committed so far (both modes); 0 for NULL. */
+uint64_t vfgfx_committed(vfgfx_writer w);
+/* Fills *out; out->struct_size and out->flags are set by the caller (VFGFX_STATS_INIT / vfgfx_stats_init()). */
+int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out);
+
+/* Error messages (see ERRORS). Never NULL; "" when there is no error. */
 const char* vfgfx_last_error(vfgfx_writer w);
-void vfgfx_writer_destroy(vfgfx_writer w, mxlInstance inst);
+const char* vfgfx_pacing_error(vfgfx_writer w);
 
 #ifdef __cplusplus
 }
