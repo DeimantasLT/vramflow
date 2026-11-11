@@ -189,6 +189,7 @@ for (;; ++index) {
     void* dst = mxlCudaLinearDevicePointer(slots[slot]);   // RAM: slots[slot].host.pointer
     my_kernel<<<grid, block, 0, stream>>>(dst /*, … */);   // write the field on the GPU
     cudaStreamSynchronize(stream);
+    info.validSlices = info.totalSlices;                   // whole grain written: required, see rules below
     mxlFlowWriterCommitGrain(w, &info);
     // … wait until the next field time (TAI)
 }
@@ -220,7 +221,14 @@ Rules worth knowing:
 - Writer and reader must use the same GPU (same `deviceUuid`). Moving VRAM flows between machines is not covered here.
 - Grains are addressed by index = time. A reader should stay a little behind the writer (a few milliseconds) and ask
   for the index it wants, not "the next one".
-- A skipped grain reads as OK with the `MXL_GRAIN_FLAG_INVALID` flag; check `info.flags` and `info.index`.
+- **Set `info.validSlices = info.totalSlices` before `mxlFlowWriterCommitGrain`** when the whole grain is written.
+  Readers that ask for all slices (`MXL_GRAIN_VALID_SLICES_ALL`, e.g. MXL's `mxl-gst-sink`) otherwise wait forever
+  (`MXL_ERR_OUT_OF_RANGE_TOO_EARLY`).
+- **Commit every index.** A missing index can stall readers that step through the flow one index at a time
+  (`mxl-gst-sink` retries the same index). When you have no content for an index, commit the grain with
+  `MXL_GRAIN_FLAG_INVALID` instead of skipping it; do not invent a picture.
+- A grain flagged `MXL_GRAIN_FLAG_INVALID` reads as OK; check `info.flags` and `info.index` (MXL does not check that
+  the index you got is the one you asked for).
 
 ### 5.2 Graphics from any program: `libvramflow-gfx`
 
