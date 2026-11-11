@@ -114,10 +114,7 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("gen")) return run_gen(o);
     if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);
-    if (app.got_subcommand("composite")) {
-        o.out_alpha = o.out_format == "v210a";
-        return run_composite(o);
-    }
+    if (app.got_subcommand("composite")) return run_composite(o);
     if (app.got_subcommand("verify")) return run_verify(o);
     if (app.got_subcommand("enc")) return run_enc(o);
     if (app.got_subcommand("dec")) return run_dec(o);

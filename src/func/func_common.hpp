@@ -51,7 +51,6 @@ struct Opts {
     std::vector<float> opacity;           // kiekvienam sluoksniui (tuščia = visi 1.0)
     std::string base = "gen";             // gen | none
     std::string out_format = "v210";      // v210 | v210a
-    bool out_alpha = false;               // išvestinis iš out_format
     std::vector<std::string> layer_flow;  // "k:UUID" — k-tojo sluoksnio (0-based) flow ID perrašymas
     // verify
     std::string mode = "logo";

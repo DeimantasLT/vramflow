@@ -529,6 +529,26 @@ def fcomp5(out):
     return res
 
 
+def fcli1(out):
+    """CR2 #1: --layer-flow K:UUID argumentų tikrinimas (exit 1 prieš bet kokį MXL darbą)."""
+    u = "5fbec3b8-0000-4000-8000-000000000001"
+    bad = {"0x": f"0x:{u}", "neigiamas": f"-1:{u}", "per didelis": f"1:{u}", "be K": f":{u}", "be UUID": "0:",
+           "be dvitaškio": "0", "dublikatas": None}
+    d = fresh_domain("fcli1")
+    res = []
+    for name, val in bad.items():
+        lf = ["--layer-flow", f"0:{u}", "--layer-flow", f"0:{u}"] if val is None else ["--layer-flow", val]
+        r = subprocess.run([FUNC_BIN, "composite", "--domain", str(d), "--out", str(out / f"fcli1-{name}"), "--flows", "1", "--layers", "1",
+                            "--layer-xy", "0,0", *lf], capture_output=True, text=True, timeout=30)
+        res.append(result(f"fcli1[{name}]", "PASS" if r.returncode == 1 else "FAIL", why=f"exit {r.returncode}"))
+    ok = subprocess.run([FUNC_BIN, "composite", "--domain", str(d), "--out", str(out / "fcli1-ok"), "--flows", "1", "--layers", "1",
+                         "--layer-xy", "0,0", "--layer-flow", f"0:{u}", "--duration", "1"], capture_output=True, text=True, timeout=60)
+    # galiojantis argumentas praeina parsinimą (toliau gali baigtis kitu kodu — įėjimų nėra), bet ne exit 1 dėl --layer-flow
+    res.append(result("fcli1[galiojantis]", "PASS" if "tikimasi K:UUID" not in ok.stderr + ok.stdout and "daugiau nei kartą" not in ok.stderr else "FAIL",
+                      why=f"exit {ok.returncode}"))
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -539,7 +559,7 @@ def main():
     out.mkdir(parents=True)
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
-             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp5": lambda: fcomp5(out)}
+             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp5": lambda: fcomp5(out), "fcli1": lambda: fcli1(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):

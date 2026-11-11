@@ -52,10 +52,15 @@ bool parse_layer_flows(const Opts& o, std::vector<std::string>& ids, std::string
     ids.assign(o.layers, std::string{});
     for (const std::string& s : o.layer_flow) {
         const std::size_t c = s.find(':');
+        const std::string ks = c == std::string::npos ? std::string{} : s.substr(0, c);  // vardinis lokalus: strtol `end` rodo į jo buferį
         char* end = nullptr;
-        const long k = c == std::string::npos ? -1 : std::strtol(s.substr(0, c).c_str(), &end, 10);
+        const long k = c == std::string::npos || c == 0 ? -1 : std::strtol(ks.c_str(), &end, 10);
         if (c == std::string::npos || c == 0 || *end != '\0' || k < 0 || k >= static_cast<long>(o.layers) || c + 1 >= s.size()) {
             err = "--layer-flow '" + s + "': tikimasi K:UUID, K = 0…" + std::to_string(o.layers - 1);
+            return false;
+        }
+        if (!ids[static_cast<std::size_t>(k)].empty()) {
+            err = "--layer-flow: sluoksnis " + std::to_string(k) + " nurodytas daugiau nei kartą";
             return false;
         }
         ids[static_cast<std::size_t>(k)] = s.substr(c + 1);
@@ -161,7 +166,7 @@ int run_composite(const Opts& o) {
     }
 
     cudaStream_t stream{};
-    if (!cpu && !rc) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    if (!cpu && !rc && cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess) { st.fatal = "cudaStreamCreate"; rc = 2; }
     // H: device scratch kiekvienam įėjimui ir išėjimui
     std::vector<std::uint8_t*> s_in(in.size(), nullptr), s_out(N, nullptr);
     if (host_gpu)
@@ -303,7 +308,7 @@ int run_composite(const Opts& o) {
                 const std::size_t a = idx_layer(n, k);
                 const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(ptr[a]);
                 if (host_gpu) {
-                    ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].raster), cudaMemcpyHostToDevice, stream);
+                    if (!ce) ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].raster), cudaMemcpyHostToDevice, stream);
                     src = s_in[a];
                 }
                 lay[n * K + k] = Layer{src, in[a].raster, lx[k], ly[k], lop[k]};

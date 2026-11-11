@@ -7,6 +7,8 @@
 // Režimai:
 //  pace   — kiekvienam flow'ui kadras 0 submit'inamas VIENĄ kartą, toliau kas lauką jį commit'ina bibliotekos ritmo gija
 //           (ši funkcija tik laukia --duration). Kaina: viena konversija submit metu, ne per lauką.
+//           Sėkmės taisyklė: ≥ 1 s bėgime kiekvienas flow turi commit'inti ≥ 90 % tikėtinų laukų (0 — visada klaida), kitaip
+//           klaida + exit 3 su vfgfx_last_error tekstu stderr.
 //  manual — kadras = index/2 kiekvienam indeksui (abu laukai gauna tą patį kadrą, paritetą parenka biblioteka); ši funkcija
 //           pati laikosi ritmo (wait_until kaip gen) ir kviečia vfgfx_write kiekvienam laukui. Kito kadro turinys sukuriamas
 //           iš anksto (tarp lyginio ir nelyginio lauko), kad kūrimas nepatektų į lyginio lauko commit'ą.
@@ -194,11 +196,19 @@ int run_gfxgen(const Opts& o) {
             st.last_index = idx1;
         }
         const std::uint64_t expected = idx0 && idx1 >= idx0 ? idx1 - idx0 + 1 : 0;
+        // Ritmo gijos sėkmės taisyklė (bibliotekos stop_pacing klaidų negrąžina): ≥ 1 s trukmės bėgime flow turi commit'inti
+        // bent 90 % tikėtinų laukų, o 0 commit'ų — visada klaida. Pažeidimas → klaidų skaitiklis (→ rc 3) + vfgfx_last_error tekstas.
+        const bool judge = !stop.load() && o.duration_s >= 1.0 && expected > 0;
         for (std::size_t i = 0; i < src.size(); ++i) {
             const std::uint64_t cm = vfgfx_committed(src[i].w);
             st.flows[i].inc("commits", cm);
             st.flows[i].inc("expected_fields", expected);
             st.flows[i].inc("missed", expected > cm ? expected - cm : 0);
+            if (judge && (cm == 0 || cm * 10 < expected * 9)) {
+                std::fprintf(stderr, "[gfxgen] flow %u/%u: ritmo gija commit'ino %llu iš %llu laukų: %s\n", src[i].n, src[i].k,
+                             static_cast<unsigned long long>(cm), static_cast<unsigned long long>(expected), vfgfx_last_error(src[i].w));
+                st.flows[i].inc("errors");
+            }
         }
         cw.stepped();
         st.proc["clock_steps"] = cw.steps;
