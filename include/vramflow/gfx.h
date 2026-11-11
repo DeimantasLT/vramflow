@@ -31,6 +31,11 @@
  * dar nepraėjo; sustabdžius ir vėl paleidus, jau commit'inti indeksai nekartojami. Jei gija pavėluoja, vėluojantis indeksas
  * vis tiek įrašomas, o praleisti laukai nerašomi (jokio „catch-up“ srauto).
  *
+ * Interlace: palaikomas TIK `interlaced_tff` (lyginis grain indeksas = viršutinis laukas) ir progresyvus (`progressive` arba
+ * nenurodytas) rastras; `interlaced_bff` ir kitos interlace_mode reikšmės atmetamos (vfgfx_writer_create -> INVALID_ARG).
+ *
+ * ABI: SOVERSION 0 — iki 1.0 struktūrų išdėstymas (vfgfx_frame, vfgfx_pacing_stats…) gali keistis; stabilumo pažado dar nėra.
+ *
  * Klaidos: funkcijos grąžina 0 arba kodą (VFGFX_ERR_* žemiau, 1..1023 — mxlStatus). C++ išimtys neperženg ribos
  * (VFGFX_ERR_INTERNAL). Jei ritmo gijoje įvyko išimtis, gija baigiasi, bet režimas lieka „veikiantis“ (vfgfx_write -> STATE)
  * iki vfgfx_stop_pacing. vfgfx_last_error(w): paskutinė kviečiančiosios pusės (bet kurios gijos) klaida, bendra visam writer'iui (jei jos nėra — paskutinė ritmo

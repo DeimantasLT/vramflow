@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "nežinomas parametras %s\n", k.c_str()); return 2; }
     }
     if (domain.empty() || id.empty() || (source != "stdin" && source != "synthetic") || (format != "rgba" && format != "bgra") || (alpha != "straight" && alpha != "premultiplied")) {
-        std::fprintf(stderr, "naudojimas: ograf_feed --domain D --flow-id UUID [--source stdin|synthetic] [--format rgba|bgra] [--alpha straight|premultiplied] [--seconds N]\n");
+        std::fprintf(stderr, "naudojimas: ograf_feed --domain D --flow-id UUID [--source stdin|synthetic] [--format rgba|bgra] [--alpha straight|premultiplied] [--ready-file F] [--seconds N]\n");
         return 2;
     }
     struct sigaction sa{};
@@ -94,8 +94,17 @@ int main(int argc, char** argv) {
     mxlInstance inst = mxlCreateInstance(domain.c_str(), "");
     vfgfx_writer g = nullptr;
     int rc = inst ? vfgfx_writer_create(inst, flow_def(id).c_str(), nullptr, &g) : 1;
-    if (rc) { std::fprintf(stderr, "vfgfx_writer_create=%d: %s\n", rc, vfgfx_last_error(nullptr)); return 1; }
-    if ((rc = vfgfx_start_pacing(g, 0))) { std::fprintf(stderr, "start_pacing=%d: %s\n", rc, vfgfx_last_error(g)); return 1; }
+    if (rc) {
+        std::fprintf(stderr, "vfgfx_writer_create=%d: %s\n", rc, vfgfx_last_error(nullptr));
+        if (inst) mxlDestroyInstance(inst);
+        return 1;
+    }
+    if ((rc = vfgfx_start_pacing(g, 0))) {
+        std::fprintf(stderr, "start_pacing=%d: %s\n", rc, vfgfx_last_error(g));
+        vfgfx_writer_destroy(g, inst);
+        mxlDestroyInstance(inst);
+        return 1;
+    }
 
     std::vector<std::uint8_t> px(static_cast<size_t>(W) * H * 4);
     const auto t0 = std::chrono::steady_clock::now();

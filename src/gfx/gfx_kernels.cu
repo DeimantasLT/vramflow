@@ -57,8 +57,9 @@ static_assert(sizeof(Large) <= 32764, "didelė partija viršija CUDA 12.1+ kerne
 // Pilna užduoties patikra: bendra gfx::composite_job_valid (R13; parity — taip pat) + tik įrenginiui būdingi reikalavimai
 // (k riba, 4 B lygiavimas).
 bool job_valid(const CompositeJob& j, int parity) {
+    if (j.k > kMaxBatchLayers) return false;  // prieš bendrą validatorių (jis eina per j.k sluoksnių)
     if (!composite_job_valid(j, parity)) return false;
-    if (j.k > kMaxBatchLayers || !aligned(j.out, 4)) return false;
+    if (!aligned(j.out, 4)) return false;
     if (j.base && !aligned(j.base, 4)) return false;
     for (int l = 0; l < j.k; ++l)
         if (!aligned(j.layers[l].grain, 4)) return false;

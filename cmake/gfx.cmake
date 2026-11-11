@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 # SPDX-License-Identifier: Apache-2.0
 # Alfa grafika ir kompozitorius: bendras rastro aprašas (src/gfx/raster.hpp) ir jo testai.
-# Vėlesnės užduotys čia pridės libvramflow-gfx bibliotekos taikinį.
+# Čia pat: CPU (variantas C) ir CUDA kompozitoriaus branduoliai, libvramflow-gfx (C ABI, vfgfx_*) ir jų testai.
 # Nepriklausomas bitų tikslumo etalonas (src/gfx/gfx_ref.*): RGBA -> v210a ir composite. RGB->YCbCr ima iš mxlv_media
 # (ref::rgb_to_ycbcr10), todėl reikia MXLV_BUILD_MEDIA.
 # Pastovus gijų baseinas (iš func_common išskirtas, R3): be CUDA / MXL, todėl jį gali naudoti ir gfx::cpu, ir vramflow-func.
@@ -22,6 +22,7 @@ if(MXLV_BUILD_MEDIA)
   add_library(mxlv_gfx_ref STATIC src/gfx/gfx_ref.cpp)
   target_include_directories(mxlv_gfx_ref PUBLIC ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(mxlv_gfx_ref PUBLIC mxlv_common mxlv_media)
+  target_compile_options(mxlv_gfx_ref PRIVATE -ffp-contract=off)  # etalonas niekada nenaudoja FMA (clang / -march=native)
   set_target_properties(mxlv_gfx_ref PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 

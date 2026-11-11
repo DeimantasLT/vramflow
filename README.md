@@ -249,7 +249,7 @@ vfgfx_writer_destroy(g, inst);
 mxlDestroyInstance(inst);
 ```
 
-Every function returns `0` or an error code; `vfgfx_last_error(g)` gives the message. The full contract (threads,
+Every function except `vfgfx_committed`, `vfgfx_last_error` and `vfgfx_writer_destroy` returns `0` or an error code; `vfgfx_last_error(g)` gives the message. The full contract (threads,
 memory, timing) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h). Link with
 `-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
 (see `tests/gfx_ctypes_smoke.py`).
@@ -304,7 +304,9 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `clip`, `ref-crc` | helpers for the decode test clip | — |
 
 `composite --base none --out-format v210a` builds a graphics-only layer; `--layer-flow K:UUID` takes another flow
-(for example another compositor's output) as layer K, so compositors can be chained.
+(for example another compositor's output) as layer K, so compositors can be chained. The base flow is `flow_id(--in-role, n)`; a
+`v210a` (or other) base flow produced by another tool can be selected with `--in-role` / `--flow-base`. Interlaced inputs must be
+`interlaced_tff`; `interlaced_bff` is rejected.
 
 ### Flow IDs
 

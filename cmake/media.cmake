@@ -7,7 +7,8 @@ add_library(mxlv_media STATIC src/media/media_kernels.cu src/media/media_ref.cpp
 target_include_directories(mxlv_media PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(mxlv_media PUBLIC mxlv_common CUDA::cudart_static PRIVATE PkgConfig::LIBAV)
 set_target_properties(mxlv_media PROPERTIES CUDA_SEPARABLE_COMPILATION OFF POSITION_INDEPENDENT_CODE ON)
-target_compile_options(mxlv_media PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -lineinfo>)
+target_compile_options(mxlv_media PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -lineinfo>
+    $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>)  # media_ref.cpp etalonas be FMA kontrakcijos
 
 # Variantas C: CPU media branduoliai be CUDA (architektūra 2026-11-11-gpu-vs-cpu-ir-upstream.md §1.3).
 # -march=x86-64-v3 (AVX2/FMA/BMI2): kompiliatoriaus vektorizacija; vėliavėlės skelbiamos ataskaitoje.
