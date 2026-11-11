@@ -42,6 +42,10 @@ struct Opts {
     std::uint32_t deadline_ms = 30;  // įėjimų laukimo riba po lauko laiko (WDDM/Windows sutrikimų atsarga; ring 10 laukų)
     std::int64_t read_offset_us = 500;
     int in_role = 1;
+    // gfxgen
+    std::uint32_t layers = 1;        // K: grafikos sluoksnių (flow'ų) skaičius vienam šaltiniui, <= 8
+    std::string layer_geom;          // "logo,full,full,full" (logo 384x216, full 1920x1080, arba WxH); tuščia = k=0 logo, kiti full
+    std::string gfx_mode = "pace";   // pace | manual
     // verify
     std::string mode = "logo";
     std::uint32_t every = 25;

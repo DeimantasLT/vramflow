@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Funkciniai gedimų testai (architektūra §6.1: F5a, F5b, F6a–d, F7, F8). Kiekvienas procesas — atskiras.
 
-Naudojimas: functional.py <out_dir> [--only F5a,F6]
+Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1]  (vardai be didžiųjų/mažųjų skirtumo)
+Aplinka: VERIFY_BIN (senieji testai), FUNC_BIN + MXL_INFO (fgfx1 ir kiti vramflow-func testai).
 Rezultatas: <out_dir>/functional.json; išėjimas 0 tik jei nė vienas testas nėra FAIL.
 """
 import argparse
@@ -17,6 +18,8 @@ import sys
 import time
 
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
+FUNC_BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
+MXL_INFO = os.environ.get("MXL_INFO", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin/mxl-info")
 LIB = os.environ.get("MXL_LIB", str(pathlib.Path.home() / "src/mxl-pr653/install/Linux-Clang-Release/lib"))
 ENV = dict(os.environ, LD_LIBRARY_PATH=LIB)
 
@@ -215,6 +218,52 @@ def f8(out):
                   big_writer_exit=bcode, leftovers=left[:10], reader=counters(rs))
 
 
+def gfx_flow_id(n, k):
+    return "4d584c47-0005-4000-8000-%012x" % (n * 8 + k)
+
+
+def fgfx1(out):
+    """gfxgen: N x K sintetinių v210a šaltinių (pace režimas), abu variantai: host/cpu ir cuda-linear/gpu.
+    Tikrina: mxl-info mato N*K v210a flow'us, summary be klaidų, commit'ų >= 240 kiekvienam per 5 s (250 laukų)."""
+    res = []
+    N, K, DUR = 2, 2, 5
+    for tag, impl, storage in (("host-cpu", "cpu", "host"), ("cuda-gpu", "gpu", "cuda-linear")):
+        tid = f"fgfx1[{tag}]"
+        d = fresh_domain(f"fgfx1-{tag}")
+        o = pathlib.Path(out) / f"fgfx1-{tag}"
+        o.mkdir(parents=True, exist_ok=True)
+        err = open(o / "gfxgen.err", "w")
+        p = subprocess.Popen([FUNC_BIN, "gfxgen", "--domain", str(d), "--flows", str(N), "--layers", str(K), "--layer-geom",
+                              "logo,full", "--mode", "pace", "--impl", impl, "--storage", storage, "--duration", str(DUR),
+                              "--out", str(o)], stdout=subprocess.PIPE, stderr=err, env=ENV, text=True)
+        time.sleep(DUR / 2)
+        seen, bad = 0, []
+        for n in range(N):
+            for k in range(K):
+                r = subprocess.run([MXL_INFO, "-d", str(d), "-f", gfx_flow_id(n, k)], capture_output=True, text=True, env=ENV)
+                fd = d / f"{gfx_flow_id(n, k)}.mxl-flow" / "flow_def.json"  # mxl-info nerodo media_type — žiūrim flow aprašą
+                if (r.returncode == 0 and "Format: Video" in r.stdout and "50/1" in r.stdout and fd.exists()
+                        and json.loads(fd.read_text()).get("media_type") == "video/v210a"):
+                    seen += 1
+                else:
+                    bad.append(gfx_flow_id(n, k))
+        try:
+            rc = p.wait(timeout=DUR + 30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+            rc = None
+        sf = o / "summary-gfxgen.json"
+        s = json.loads(sf.read_text()) if sf.exists() else None
+        commits = [f.get("commits", 0) for f in s["flows"]] if s else []
+        errors = [f.get("errors", -1) for f in s["flows"]] if s else []
+        ok = (rc == 0 and seen == N * K and s is not None and len(commits) == N * K and min(commits) >= 240
+              and all(e == 0 for e in errors))
+        res.append(result(tid, "PASS" if ok else "FAIL", why=f"exit={rc} v210a flow'ų={seen}/{N * K} commits={commits} klaidos={errors}"
+                          + (f" nerasti={bad}" if bad else "")))
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -224,10 +273,10 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
-             "F8": lambda: [f8(out)]}
+             "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out)}
     results = []
     for name, fn in tests.items():
-        if a.only and name not in a.only.split(","):
+        if a.only and name.lower() not in a.only.lower().split(","):
             continue
         try:
             results += fn()

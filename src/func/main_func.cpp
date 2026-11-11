@@ -8,6 +8,7 @@
 
 namespace mxlv::func {
 int run_gen(const Opts&);
+int run_gfxgen(const Opts&);
 int run_logo(const Opts&);
 int run_verify(const Opts&);
 int run_enc(const Opts&);
@@ -48,6 +49,12 @@ int main(int argc, char** argv) {
     common(g, o);
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
+    auto* gg = app.add_subcommand("gfxgen", "N × K sintetinių v210a grafikos šaltinių (tik libvramflow-gfx)");
+    common(gg, o);
+    gg->add_option("--layers", o.layers, "sluoksnių (flow'ų) skaičius šaltiniui, 1…8")->check(CLI::Range(1u, 8u));
+    gg->add_option("--layer-geom", o.layer_geom, "pvz. logo,full,full,full (logo 384x216, full 1920x1080 arba WxH); numatytoji: k=0 logo, kiti full");
+    gg->add_option("--mode", o.gfx_mode, "pace (statinis kadras 0, bibliotekos ritmas) | manual (kadras = index/2)")
+        ->check(CLI::IsMember({"pace", "manual"}));
     auto* l = app.add_subcommand("logo", "logotipo įkepimas MXL → MXL GPU");
     common(l, o);
     l->add_option("--inject-every", o.inject_every);
@@ -94,6 +101,7 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("clip")) return run_clip(o, clip_frames, clip_first & ~1ull);
     if (app.got_subcommand("ref-crc")) return run_ref_crc(ref_path);
     if (app.got_subcommand("gen")) return run_gen(o);
+    if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);
     if (app.got_subcommand("verify")) return run_verify(o);
     if (app.got_subcommand("enc")) return run_enc(o);

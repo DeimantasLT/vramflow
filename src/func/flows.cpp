@@ -34,6 +34,24 @@ std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed) {
     return b;
 }
 
+std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::gfx::Raster& r, std::uint64_t run_seed) {
+    char b[2048];
+    const std::uint32_t idx = n * 8 + k;
+    std::snprintf(b, sizeof b,
+                  R"({"id":"%s","description":"vramflow-func gfx %u/%u","label":"vramflow-func gfx %u/%u",)"
+                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:Gfx %u/%u"]},)"
+                  R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
+                  R"("grain_rate":{"numerator":%d,"denominator":1},"frame_width":%d,"frame_height":%d,)"
+                  R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
+                  R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
+                  R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
+                  R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
+                  flow_id(kRoleGfx, idx).c_str(), n, k, n, k, static_cast<unsigned long long>(run_seed), kRoleGfx, n, k,
+                  r.alpha ? "video/v210a" : "video/v210", r.interlaced ? 25 : 50, r.w, r.h,
+                  r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
+    return b;
+}
+
 std::string audio_def(std::uint32_t n, std::uint64_t run_seed) {
     char b[1024];
     std::snprintf(b, sizeof b,

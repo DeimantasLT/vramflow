@@ -26,7 +26,7 @@ if(MXLV_BUILD_MEDIA)
 endif()
 
 if(MXLV_BUILD_TESTS)
-  set(GFX_UNIT_SRC tests/unit/test_gfx_raster.cpp)
+  set(GFX_UNIT_SRC tests/unit/test_gfx_raster.cpp tests/unit/test_gfx_content.cpp)
   if(MXLV_BUILD_MEDIA)
     list(APPEND GFX_UNIT_SRC tests/unit/test_gfx_ref.cpp tests/unit/test_gfx_cpu.cpp)
   endif()

@@ -17,10 +17,13 @@
 namespace mxlv::func {
 
 // Flow rolės identifikatoriuose: 4d584c47-00RR-4000-8000-%012x
-enum Role : int { kRoleGen = 1, kRoleLogo = 2, kRoleAudio = 3, kRoleDec = 4 };
+enum Role : int { kRoleGen = 1, kRoleLogo = 2, kRoleAudio = 3, kRoleDec = 4, kRoleGfx = 5 };
 
 std::string flow_id(int role, std::uint32_t n);
 std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed);
+// Standartinis v210a (arba v210, jei !r.alpha) flow aprašas grafikos šaltiniui: flow_id(kRoleGfx, n * 8 + k), k < 8.
+// Interlaced: grain = laukas, grain_rate 25/1 (MXL kadrų ritmas; grain'ų ritmas 50/1, kaip video_def); progresyvus: 50/1.
+std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::gfx::Raster& r, std::uint64_t run_seed = 0);
 std::string audio_def(std::uint32_t n, std::uint64_t run_seed);
 
 constexpr mxlRational kFieldRate{50, 1};
