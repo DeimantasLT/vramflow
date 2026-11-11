@@ -5,10 +5,12 @@
 
 Sintetinis progresyvus NV12 (FFmpeg `zoneplate` + `vramflow-func clip --format <progresyvus>`) → mūsų 4:2:2 10 bitų
 (`vramflow-func split-raw`, nepriklausomas etalonas; CUDA ir CPU jam lygūs bitas į bitą) prieš
-`ffmpeg -pix_fmt yuv422p10le`. Palyginimas — FFmpeg `psnr` filtras (pikas 1023).
-  * kadro chroma (FrameSited): U ir V PSNR >= --min-db (numatyta 60), Y — identiškas (PSNR y = inf);
-  * neigiamas: tas pats per lauko chromą (FieldSited, kadras kaip du laukai) — max(U, V) < --neg-max-db (numatyta 56),
-    t. y. testas skiria teisingą ir neteisingą kelią (brief'o pamoka 5: 50 / 54 dB).
+`ffmpeg -vf scale=flags=bilinear -pix_fmt yuv422p10le` (swscale tiesinė vertikali interpoliacija — ta pati 0 tipo
+padėtis ir formulė kaip mūsų). Palyginimas — FFmpeg `psnr` filtras (pikas 1023).
+  * kadro chroma (FrameSited): Y, U ir V — bitas į bitą (PSNR = inf);
+  * neigiamas: tas pats per lauko chromą (FieldSited, kadras kaip du laukai) — max(U, V) < --neg-max-db (numatyta 50),
+    t. y. testas skiria teisingą ir neteisingą kelią (brief'o pamoka 5);
+  * PSNR prieš swscale numatytąjį bicubic spausdinamas tik informacijai (ne kriterijus: kita interpoliacija).
 Tik sintetinė medžiaga. Išėjimas: 0 — PASS, 1 — FAIL, 77 — SKIP (nėra ffmpeg / psnr filtro).
 
 Naudojimas: chroma_psnr.py --bin <vramflow-func> [--format 1080p50] [--frames 3] [--work DIR] [--ffmpeg ffmpeg]
@@ -46,11 +48,10 @@ def main():
     ap.add_argument("--bin", required=True, help="vramflow-func")
     ap.add_argument("--format", default="1080p50")
     ap.add_argument("--frames", type=int, default=3)
-    ap.add_argument("--min-db", type=float, default=60.0)
-    ap.add_argument("--neg-max-db", type=float, default=56.0)
+    ap.add_argument("--neg-max-db", type=float, default=50.0)
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--work", default="")
-    ap.add_argument("--zoneplate", default="kx2=10:ky2=10:kt2=4:ku=96:kv=160", help="zoneplate parametrai (dažnių juosta)")
+    ap.add_argument("--zoneplate", default="kx2=20:ky2=20:kt2=4:ku=96:kv=160", help="zoneplate parametrai (dažnių juosta)")
     a = ap.parse_args()
     ff = shutil.which(a.ffmpeg) or (a.ffmpeg if pathlib.Path(a.ffmpeg).exists() else None)
     if not ff:
@@ -81,22 +82,29 @@ def main():
     sources["clip"] = clip
 
     results, ok = {}, True
+    inf = float("inf")
     for name, src in sources.items():
-        ref = work / f"{name}.ref.yuv"
-        run([ff, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "nv12", "-video_size", f"{w}x{h}", "-i", str(src),
-             "-f", "rawvideo", "-pix_fmt", "yuv422p10le", str(ref)])
+        # etalonas — swscale BILINEAR (tiesinė vertikali interpoliacija, ta pati 0 tipo padėtis kaip mūsų formulė);
+        # bicubic (numatytasis swscale) — tik informacijai
+        refs = {}
+        for flt in ("bilinear", "bicubic"):
+            refs[flt] = work / f"{name}.ref.{flt}.yuv"
+            run([ff, "-hide_banner", "-y", "-f", "rawvideo", "-pix_fmt", "nv12", "-video_size", f"{w}x{h}", "-i", str(src),
+                 "-vf", f"scale=flags={flt}", "-f", "rawvideo", "-pix_fmt", "yuv422p10le", str(refs[flt])])
         res = {}
         for chroma in ("frame", "field"):
             ours = work / f"{name}.{chroma}.v210"
             run([a.bin, "split-raw", "--format", a.format, "--chroma", chroma, "--in", str(src), "--out", str(ours)])
-            res[chroma] = psnr(ff, w, h, ours, ref)
-        good = (res["frame"]["u"] >= a.min_db and res["frame"]["v"] >= a.min_db and res["frame"]["y"] == float("inf")
+            res[chroma] = psnr(ff, w, h, ours, refs["bilinear"])
+            res[chroma + "_bicubic"] = psnr(ff, w, h, ours, refs["bicubic"])
+        good = (res["frame"]["y"] == inf and res["frame"]["u"] == inf and res["frame"]["v"] == inf
                 and max(res["field"]["u"], res["field"]["v"]) < a.neg_max_db)
         ok = ok and good
         results[name] = res
-        print(f"[{'PASS' if good else 'FAIL'}] {name}: kadro chroma Y {res['frame']['y']} U {res['frame']['u']:.2f} V "
-              f"{res['frame']['v']:.2f} dB (riba >= {a.min_db}); lauko chroma U {res['field']['u']:.2f} V {res['field']['v']:.2f} dB "
-              f"(riba < {a.neg_max_db})", flush=True)
+        fb = res["frame_bicubic"]
+        print(f"[{'PASS' if good else 'FAIL'}] {name}: kadro chroma prieš bilinear Y {res['frame']['y']} U {res['frame']['u']} "
+              f"V {res['frame']['v']} (reikia: bitas į bitą = inf); lauko chroma U {res['field']['u']:.2f} V {res['field']['v']:.2f} dB "
+              f"(riba < {a.neg_max_db}); informacijai prieš bicubic: U {fb['u']:.2f} V {fb['v']:.2f} dB", flush=True)
     (work / "chroma_psnr.json").write_text(json.dumps({"format": a.format, "frames": a.frames, "results": results}, indent=1))
     print(f"CHROMA_PSNR: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
