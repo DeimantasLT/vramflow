@@ -722,9 +722,9 @@ def ffmt_logo(out):
 
 
 def ffmt_comp(out):
-    """gen | gfxgen(pace) | composite | verify --mode composite kiekvienam formatui ir variantui. libvramflow-gfx priima tik
-    50/1 grain'o ritmą (R9, test_gfx_writer „25p -> GEOMETRY“), todėl kitiems formatams tikrinama, kad gfxgen atsisako su aiškia
-    klaida (SKIP su priežastimi, ne PASS)."""
+    """gen | gfxgen(pace) | composite | verify --mode composite kiekvienam formatui ir variantui: 0 teisingumo klaidų,
+    late_fields == 0, o composite laukia savo grain'o ritmu: early_wakes == 0 (jei laukiama 50/1 laikrodžiu, 25p tick'as
+    pabunda prieš grain'o laiką ir laukia įėjimo beveik visą grain'ą — išmatuota wait_ms p50 39 ms)."""
     res = []
     N, K, D = 1, 2, max(6, FMT_DUR // 2)
     xy = ["--layer-xy", "1488,64", "--layer-xy", "0,0"]
@@ -734,15 +734,6 @@ def ffmt_comp(out):
             sub = f"ffmt-comp-{fmt}-{tag}"
             d = fresh_domain(sub)
             v = vcommon(impl, storage) + ["--format", fmt]
-            if FMT_GRAIN_HZ[fmt] != 50:
-                x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", "pace",
-                          "--duration", 5, *v)
-                rx = x.wait(timeout=30)
-                txt = x.err_path.read_text(errors="replace")
-                ok = rx == 1 and "50/1" in txt
-                res.append(result(tid, "SKIP" if ok else "FAIL",
-                                  why=f"libvramflow-gfx tik 50/1 (R9): gfxgen exit={rx}, klaida {'aiški' if ok else 'NEAIŠKI'}"))
-                continue
             g = FProc(out, sub, "gen", d, "--flows", N, "--duration", D + 60, *v)
             x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", "pace",
                       "--duration", D + 60, *v)
@@ -771,11 +762,14 @@ def ffmt_comp(out):
             sc, sv = vsummary(c, "composite"), vsummary(va, "verify-composite")
             late = sum(f.get("late_fields", 0) for f in (sc or {}).get("flows") or [])
             pv = (sv or {}).get("proc") or {}
+            wait_p50 = (((sc or {}).get("hist") or {}).get("wait_ms") or {}).get("p50_ms")
+            early = ((sc or {}).get("proc") or {}).get("early_wakes", 0)
             ok = (sc is not None and sv is not None and rc == 0 and late == 0 and pv.get("verification_errors", 1) == 0
-                  and pv.get("samples_total", 0) > 0)
+                  and pv.get("samples_total", 0) > 0 and early == 0)
             res.append(result(tid, "PASS" if ok else "FAIL",
-                              why=f"composite exit={rc} late_fields={late} verify exit={rv} verification_errors={pv.get('verification_errors')} "
-                                  f"samples={pv.get('samples_total')}", composite=sc, verify=sv))
+                              why=f"composite exit={rc} late_fields={late} early_wakes={early} wait_ms p50={wait_p50} verify exit={rv} "
+                                  f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')}",
+                              composite=sc, verify=sv))
     return res
 
 

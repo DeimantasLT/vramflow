@@ -235,9 +235,11 @@ int run_composite(const Opts& o) {
             }
             fresh.release(inst);
         }
-        if (wait_until(i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
+        if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
+        // tick'as niekada nepabunda prieš savo grain'o laiką (kitas laikrodis / dažnis — klaida; funkcinis testas tikrina 0)
+        if (t_wake < mxlIndexToTimestamp(&rate, i)) st.proc["early_wakes"]++;
         const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::fill(dead.begin(), dead.end(), 0);
