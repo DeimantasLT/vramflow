@@ -15,7 +15,8 @@ live in GPU memory instead. This repository answers three questions about that b
 2. **Is it stable?** Long runs, sanitizers, clock steps, start/stop, many flows.
 3. **What is it worth?** How many full broadcast flows fit on one GPU compared with the CPU, for the same work.
 
-It also contains draft upstream patches (tests and a fix) for PR #653, with evidence.
+It also contains an **alpha graphics compositor** (graphics as standard `video/v210a` MXL flows, combined on the GPU)
+and draft upstream patches (tests and a fix) for PR #653, with evidence.
 
 ## What is in here
 
@@ -23,10 +24,11 @@ It also contains draft upstream patches (tests and a fix) for PR #653, with evid
 |---|---|
 | `src/mxlio/`, `src/gpu/` | `vramflow-verify`: writer/reader that checks every grain (pattern, CRC32C, index, timing) on host and cuda-linear flows |
 | `src/media/` | Media kernels for 1080i50 v210: logo burn-in, NV12↔v210 weave/split, test pattern generator. CUDA (`media_kernels.cu`), CPU (`cpu/`) and an independent reference (`media_ref.cpp`) |
-| `src/func/` | `vramflow-func`: real media functions on MXL flows — `gen`, `logo`, `dec` (H.264 TS/UDP → MXL, NVDEC or software), `enc` (MXL → H.264 + AAC TS, NVENC or x264), `verify` |
+| `src/gfx/`, `include/vramflow/gfx.h` | Alpha graphics: RGBA → `v210a` (fill + key) and K-layer compositing. CUDA, CPU and an independent reference; `libvramflow-gfx` C library |
+| `src/func/` | `vramflow-func`: real media functions on MXL flows — `gen`, `logo`, `dec` (H.264 TS/UDP → MXL, NVDEC or software), `enc` (MXL → H.264 + AAC TS, NVENC or x264), `gfxgen`, `composite`, `verify` |
 | `tests/` | Unit tests (Catch2), GPU kernel tests, functional tests, capacity harness (`perf/capacity.py`), comparison report (`perf/compare_report.py`) |
 | `scripts/wsl/` | Build and run scripts (WSL2 or native Ubuntu 24.04) |
-| `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U3), each with evidence |
+| `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U4), each with evidence |
 | `docs/architektura/` | Design documents (Lithuanian): verification design, GPU media functions, time and synchronization, GPU-vs-CPU method |
 
 ## Three variants of every function
@@ -75,6 +77,38 @@ rerun on native Linux servers, where the numbers become authoritative.
 
 Detailed tables are produced by `tests/perf/compare_report.py` from the raw JSON of each run.
 
+## Alpha graphics compositor
+
+Graphics in MXL are ordinary flows. The MXL standard already defines `video/v210a`: a v210 fill plane plus a 10-bit
+key plane (straight alpha, video range 64–940). VRAMFlow adds the pieces to make and combine such flows, on the CPU,
+on the GPU with host flows, and on the GPU with `cuda-linear` flows (C / H / G), bit-exact against one independent
+reference.
+
+- **`libvramflow-gfx`** (`include/vramflow/gfx.h`, C ABI, shared library): any program — a renderer, an OGraf/HTML
+  page, a game engine, a script — hands over RGBA frames (host or CUDA memory, straight or premultiplied alpha) and
+  gets a standard `video/v210a` flow. Two modes: *manual* (`vfgfx_write(index, frame)`, the caller decides the grain)
+  and *paced* (`vfgfx_submit(frame)`; a library thread commits the latest frame every field on TAI time).
+- **`vramflow-func gfxgen`**: synthetic v210a sources (N × K flows, logo 384×216 or full 1920×1080 layers).
+- **`vramflow-func composite`**: base video + K graphics layers (1–8; position, opacity) → `v210` or `v210a`.
+  `--base none --out-format v210a` builds a graphics-only layer, and `--layer-flow K:UUID` feeds one compositor's output
+  into another, so compositors chain.
+- **`vramflow-func verify --mode composite`**: rebuilds the expected output with the CPU reference and checks it.
+
+A graphics flow behaves like any other flow. If a layer's source stops or is restarted, the compositor does not
+invent a picture: that output grain is not committed (readers see a gap, exactly as with a stopped video writer), and
+the compositor reattaches when the source returns.
+
+```bash
+D=/dev/shm/vf-gfx; mkdir -p $D
+vramflow-func gen     --domain $D --flows 1 --duration 60 --impl gpu --storage cuda-linear &
+vramflow-func gfxgen  --domain $D --flows 1 --layers 2 --layer-geom logo,full --mode pace                       --duration 60 --impl gpu --storage cuda-linear &
+vramflow-func composite --domain $D --flows 1 --layers 2 --layer-xy 1488,64 --layer-xy 0,0                       --opacity 1 --opacity 0.5 --base gen --out-format v210 --duration 50                       --impl gpu --storage cuda-linear
+```
+
+Status: library, `gfxgen`, `composite` and `verify --mode composite` are done and tested (unit, GPU and functional
+tests, all 12 mode × format combinations of C/H/G pass the reference check). The N × K capacity campaign and the OGraf
+example are in progress.
+
 ## Requirements
 
 - Ubuntu 24.04 (native or WSL2), NVIDIA GPU with NVENC/NVDEC, driver with CUDA 13.x support
@@ -122,8 +156,8 @@ bash scripts/wsl/71-compare.sh ~/evidence/cmp-chain chain 1,2,4,6,8,10,12
 python3 tests/perf/compare_report.py report.md ~/evidence/cmp-logo ~/evidence/cmp-dec ~/evidence/cmp-chain
 ```
 
-`vramflow-func <subcommand> --help` lists the options of each function (`gen`, `logo`, `verify`, `enc`, `dec`, `clip`,
-`ref-crc`). Every run writes `summary-<function>.json` with counters (lost, late, invalid, verified fields) and a
+`vramflow-func <subcommand> --help` lists the options of each function (`gen`, `logo`, `gfxgen`, `composite`, `verify`,
+`enc`, `dec`, `clip`, `ref-crc`). Every run writes `summary-<function>.json` with counters (lost, late, invalid, verified fields) and a
 latency histogram; `capacity.py` turns them into PASS/FAIL and CPU / VRAM per flow.
 
 Only synthetic test media are used: generated patterns and a generated test clip.
@@ -131,7 +165,8 @@ Only synthetic test media are used: generated patterns and a generated test clip
 ## Upstream patches
 
 See [`upstream/README.md`](upstream/README.md). U1 fixes a hang of the container test for non-root users; U2 and U3 add
-Catch2 tests for synchronization groups and partial grains with payload-backend storage. They are drafts: the author
+Catch2 tests for synchronization groups and partial grains with payload-backend storage; U4 adds tests for
+`video/v210a` (fill + key planes) on `cuda-linear`. They are drafts: the author
 applies them and commits with `git commit -s` (DCO) before proposing them to dmf-mxl/mxl.
 
 ## Status and limits

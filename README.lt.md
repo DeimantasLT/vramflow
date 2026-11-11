@@ -3,7 +3,7 @@
 **Media funkcijos, kurių duomenys gyvena GPU atmintyje ant [MXL](https://github.com/dmf-mxl/mxl), ir bandymų stendas,
 kuris įrodo, kad jos elgiasi lygiai taip pat kaip MXL ant CPU.**
 
-Pagrindinis aprašymas — [README.md](README.md) (anglų k.). Čia trumpai.
+Pagrindinis aprašymas — [README.md](README.md) (anglų k., ten ir komandų pavyzdžiai). Čia trumpai.
 
 ## Kam to reikia
 
@@ -38,6 +38,30 @@ GPU dažnių. Dec ir grandinės matavimai vyko su Windows „Whisper“ (tyliuoj
 
 N\* — didžiausias flow'ų skaičius, kai ši ir visos mažesnės pakopos praėjo (0 teisingumo klaidų, praradimai ≤ 0,2 %).
 Autoritetingi skaičiai bus po pakartojimo natyviame Linux.
+
+## Alfa grafikos kompozitorius
+
+Grafika MXL'e — paprastas flow'as. MXL standartas jau turi `video/v210a`: v210 fill plokštuma + 10 bitų key plokštuma
+(straight alfa, video diapazonas 64–940). VRAMFlow prideda įrankius tokiems flow'ams kurti ir sujungti — ant CPU,
+ant GPU su host flow'ais ir ant GPU su `cuda-linear` (C / H / G), bitų tikslumu prieš vieną nepriklausomą etaloną.
+
+- **`libvramflow-gfx`** (`include/vramflow/gfx.h`, C ABI): bet kuri programa (rendereris, OGraf/HTML puslapis,
+  žaidimų variklis, skriptas) paduoda RGBA kadrus (host arba CUDA atmintis, straight arba premultiplied alfa) ir gauna
+  standartinį `video/v210a` flow'ą. Rankinis režimas (`vfgfx_write(index, kadras)`) arba ritmo režimas
+  (`vfgfx_submit(kadras)`; bibliotekos gija kas lauką pagal TAI commit'ina paskutinį kadrą).
+- **`vramflow-func gfxgen`** — sintetiniai v210a šaltiniai (N × K flow'ų, logo 384×216 arba pilnas 1920×1080).
+- **`vramflow-func composite`** — bazinis vaizdas + K grafikos sluoksnių (1–8; padėtis, nepermatomumas) → `v210` arba
+  `v210a`. `--base none --out-format v210a` sukuria vien grafikos sluoksnį, `--layer-flow K:UUID` paduoda vieno
+  kompozitoriaus išėjimą kitam — kompozitorius galima jungti grandine.
+- **`vramflow-func verify --mode composite`** — atkuria laukiamą išėjimą CPU etalonu ir tikrina.
+
+Grafikos flow'as elgiasi kaip bet kuris kitas: jei sluoksnio šaltinis sustoja ar perkraunamas, kompozitorius nieko
+neišgalvoja — to išėjimo grain'as necommit'inamas (skaitytojai mato tarpą, kaip ir sustojus video writer'iui), o
+šaltiniui grįžus kompozitorius vėl prisijungia.
+
+Būsena: biblioteka, `gfxgen`, `composite` ir `verify --mode composite` padaryti ir ištestuoti (vienetų, GPU ir
+funkciniai testai; visi 12 režimų × formatų derinių C/H/G praeina etalono patikrą). N × K talpos kampanija ir OGraf
+pavyzdys — vykdomi.
 
 ## Kaip naudotis
 
