@@ -7,6 +7,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <cuda_runtime_api.h>
+#include <dlfcn.h>
 #include <mxl/flow.h>
 #include <mxl/mxl.h>
 #include <mxl/time.h>
@@ -679,4 +680,35 @@ TEST_CASE("gfx_writer: keli cuda-linear rašytojai viename procese, ritmas — v
     }
     chk.clear();
     for (int k = 0; k < kW; ++k) vfgfx_writer_destroy(w[k], d.inst);
+}
+
+// Host saugyklos rašytuvas su host kadrais neturi sukurti CUDA konteksto (srautas s_conv kuriamas tingiai, tik CUDA kadrui).
+// Tikrinama per vairuotojo API (dlopen, be tiesioginio linkinimo): pirminis konteksto būsena po create + write + ritmo.
+// catch_discover_tests kiekvieną test case paleidžia atskirame procese, todėl kiti testai kontekstu neužteršia.
+TEST_CASE("gfx_writer: host rašytuvas nekuria CUDA konteksto", "[gfx_writer][mxl][nocontext]") {
+    void* lib = dlopen("libcuda.so.1", RTLD_NOW);
+    if (!lib) SKIP("nėra libcuda.so.1");
+    using InitFn = int (*)(unsigned);
+    using StateFn = int (*)(int, unsigned*, int*);
+    auto cu_init = reinterpret_cast<InitFn>(dlsym(lib, "cuInit"));
+    auto cu_state = reinterpret_cast<StateFn>(dlsym(lib, "cuDevicePrimaryCtxGetState"));
+    if (!cu_init || !cu_state || cu_init(0) != 0) SKIP("vairuotojo API neprieinamas (nėra GPU)");
+    const auto active = [&] {
+        unsigned flags = 0;
+        int act = -1;
+        REQUIRE(cu_state(0, &flags, &act) == 0);
+        return act;
+    };
+    REQUIRE(active() == 0);  // pradžioje kontekstas nesukurtas
+    Domain d(40);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, true).c_str(), nullptr, &w) == 0);
+    Frame fr(64, 16, 5, VFGFX_ALPHA_STRAIGHT, false);
+    const std::uint64_t base = mxlGetCurrentIndex(&kRate) & ~1ull;
+    REQUIRE(vfgfx_write(w, base, &fr.f) == 0);
+    REQUIRE(vfgfx_write(w, base + 1, &fr.f) == 0);
+    CHECK(active() == 0);  // host -> host: jokio CUDA konteksto
+    vfgfx_writer_destroy(w, d.inst);
+    CHECK(active() == 0);
 }

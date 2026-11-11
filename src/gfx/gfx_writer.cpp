@@ -77,9 +77,10 @@ struct vfgfx_writer_s {
     func::VideoOut out;
     gfx::Raster r{};
     bool cuda_store = false;
-    int device = -1;
+    int device = -1;       // cuda-linear saugyklos įrenginys; host saugykloje -1 (jokių CUDA kvietimų)
+    int conv_dev = -1;     // host saugykla: įrenginys CUDA kadrų atsisiuntimui (deviceUuid arba -1 = numatytasis); s_conv kuriamas tik tada
     int fields = 1;  // paruoštų grain'ų skaičius vienoje aibėje (2 interlaced, 1 progresyviam)
-    cudaStream_t s_conv = nullptr;  // create / write / submit (po conv_m)
+    cudaStream_t s_conv = nullptr;  // create / write / submit (po conv_m); host saugykloje kuriamas tingiai (convert)
     cudaStream_t s_pace = nullptr;  // tik ritmo gija
 
     // Tarpiniai buferiai (kuriami pirmą kartą prireikus)
@@ -178,6 +179,14 @@ struct vfgfx_writer_s {
         }
         const std::uint8_t* src = static_cast<const std::uint8_t*>(f->rgba);
         if (f->mem == VFGFX_MEM_CUDA) {
+            // Host saugyklos rašytuvas CUDA kontekstą kuria TIK čia, kai pirmą kartą ateina CUDA kadras (po conv_m);
+            // host kadrų rašytuvas niekada neliečia CUDA (veikia ir be GPU / su CUDA_VISIBLE_DEVICES="").
+            DeviceScope cd(conv_dev);
+            if (!s_conv && cudaStreamCreateWithFlags(&s_conv, cudaStreamNonBlocking) != cudaSuccess) {
+                cudaGetLastError();
+                s_conv = nullptr;
+                return fail(VFGFX_ERR_CUDA, "cudaStreamCreate (CUDA kadro atsisiuntimui)");
+            }
             if (h_stage.size() < span) h_stage.resize(span);
             cudaError_t e = cudaMemcpyAsync(h_stage.data(), f->rgba, span, cudaMemcpyDeviceToHost, s_conv);
             if (e == cudaSuccess) e = cudaStreamSynchronize(s_conv);
@@ -306,7 +315,10 @@ void vfgfx_writer_s::free_all() {
         }
     if (d_stage) cudaFree(d_stage);
     d_stage = nullptr;
-    if (s_conv) cudaStreamDestroy(s_conv);
+    if (s_conv) {
+        DeviceScope cd(cuda_store ? -1 : conv_dev);  // cuda_store: jau esame `dev` įrenginyje
+        cudaStreamDestroy(s_conv);
+    }
     if (s_pace) cudaStreamDestroy(s_pace);
     s_conv = s_pace = nullptr;
 }
@@ -363,6 +375,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         return fail(code, err);
     }
     w->cuda_store = mxlv::is_cuda_layout(w->out.layout);
+    if (!w->cuda_store) w->conv_dev = uuid_dev;
     if (w->cuda_store) {
         // Be deviceUuid — įrenginys 0 (biblioteka turi privatų cudart, kviečiančiojo cudaSetDevice jai nematomas; gfx.h).
         int n = 0;
@@ -383,10 +396,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
                 w->out.release(inst);
                 return fail(VFGFX_ERR_CUDA, "cudaStreamCreate");
             }
-        } else if (cudaStreamCreateWithFlags(&w->s_conv, cudaStreamNonBlocking) != cudaSuccess) {
-            cudaGetLastError();  // host saugykla: srautas reikalingas tik CUDA kadro atsisiuntimui; nėra GPU -> be jo
-            w->s_conv = nullptr;
-        }
+        }  // host saugykla: nė vieno CUDA kvietimo (s_conv sukuriamas tingiai convert(), tik CUDA kadrui)
         const std::size_t gb = gfx::grain_bytes(r);
         for (int s = 0; s < 2; ++s)
             for (int p = 0; p < w->fields; ++p) {
@@ -403,7 +413,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
                     if (!ptr) {
                         w->free_all();
                         w->out.release(inst);
-                        return fail(VFGFX_ERR_CUDA, "nepavyko išskirti paruošto lauko");
+                        return fail(VFGFX_ERR_INTERNAL, "nepavyko išskirti paruošto lauko (host atmintis)");
                     }
                 }
                 w->prep[s][p] = static_cast<std::uint8_t*>(ptr);
