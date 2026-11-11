@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Funkciniai gedimų testai (architektūra §6.1: F5a, F5b, F6a–d, F7, F8). Kiekvienas procesas — atskiras.
 
-Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1,fcomp1]  (vardai be didžiųjų/mažųjų skirtumo)
+Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1,fcomp1,ffmt_logo]  (vardai be didžiųjų/mažųjų skirtumo)
+Formatų testai (P2): ffmt_neg, ffmt_logo, ffmt_comp, ffmt_enc, ffmt_dec; FFMT_FORMATS=1080i50,1080p25,1080p50 (numatyta),
+FFMT_DURATION=20 (s), FCOMP_VARIANTS=C,H,G.
 Aplinka: VERIFY_BIN (senieji testai), FUNC_BIN + MXL_INFO (fgfx1 ir kiti vramflow-func testai).
 Rezultatas: <out_dir>/functional.json; išėjimas 0 tik jei nė vienas testas nėra FAIL.
 """
@@ -649,6 +651,258 @@ def fcomp6(out):
     return res
 
 
+# --- P2: formatui neutralūs flow'ai (planas §P2): kiekviena funkcija 1080i50, 1080p25, 1080p50 ---------------------------
+# Aplinka FFMT_FORMATS=1080i50,1080p25 apriboja formatus; FCOMP_VARIANTS — variantus (kaip composite testams).
+FMT_DEFAULT = ["1080i50", "1080p25", "1080p50"]
+FMT_GRAIN_HZ = {"1080i50": 50, "1080p25": 25, "1080p50": 50, "720p50": 50, "1080i59.94": 59.94, "1080p59.94": 59.94,
+                "1080p29.97": 29.97, "720p59.94": 59.94}
+FMT_FPS = {"1080i50": 25, "1080p25": 25, "1080p50": 50, "720p50": 50, "1080i59.94": 29.97, "1080p59.94": 59.94,
+           "1080p29.97": 29.97, "720p59.94": 59.94}
+FMT_DUR = int(os.environ.get("FFMT_DURATION", "20"))
+
+
+def fmt_list():
+    want = [x for x in os.environ.get("FFMT_FORMATS", "").split(",") if x]
+    return want or FMT_DEFAULT
+
+
+def vimpl(impl, storage):
+    """verify varianto argumentai: host flow'ams — be CUDA (kaip capacity.py)."""
+    return ["--impl", "cpu" if (impl == "cpu" or storage == "host") else "gpu", "--storage", storage]
+
+
+def vsummary(pr, role):
+    f = pr.out / f"summary-{role}.json" if pr is not None else None
+    return json.loads(f.read_text()) if f is not None and f.exists() else None
+
+
+def ffmt_logo(out):
+    """gen | logo | verify --mode logo kiekvienam formatui ir variantui C/H/G, FFMT_DURATION s: logo be praradimų
+    (late/lapped/too_late == 0, fields_ok >= 90 % laukų), verify 0 teisingumo klaidų ir > 0 imčių."""
+    res = []
+    N, D = 2, FMT_DUR
+    for fmt in fmt_list():
+        hz = FMT_GRAIN_HZ[fmt]
+        for tag, impl, storage in comp_variants():
+            tid = f"ffmt_logo[{fmt}/{tag}]"
+            sub = f"ffmt-logo-{fmt}-{tag}"
+            d = fresh_domain(sub)
+            v = vcommon(impl, storage) + ["--format", fmt]
+            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", D + 40, *v)
+            lg = vf = None
+            try:
+                if not wait_flows(d, [role_flow_id(1, n) for n in range(N)]):
+                    res.append(result(tid, "FAIL", why="gen flow'ai neatsirado"))
+                    continue
+                lg = FProc(out, sub, "logo", d, "--flows", N, "--duration", D + 8, "--warmup", 2, *v)
+                if not wait_flows(d, [role_flow_id(2, n) for n in range(N)], 20):
+                    res.append(result(tid, "FAIL", why="logo išėjimo flow'ai neatsirado"))
+                    continue
+                vf = FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", D, "--warmup", 2,
+                           *vimpl(impl, storage), "--format", fmt)
+                rv = vf.wait(timeout=D + 60)
+                rl = lg.wait(timeout=D + 60)
+            finally:
+                for pr in (vf, lg, g):
+                    if pr is not None:
+                        pr.term()
+            sl, sv = vsummary(lg, "logo"), vsummary(vf, "verify-logo")
+            fl = (sl or {}).get("flows") or []
+            lost = sum(f.get(k, 0) for f in fl for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips"))
+            okf = [f.get("fields_ok", 0) for f in fl]
+            pv = (sv or {}).get("proc") or {}
+            ok = (sl is not None and sv is not None and rl == 0 and lost == 0 and len(okf) == N and min(okf) >= 0.9 * D * hz
+                  and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0 and sl.get("format") == fmt)
+            res.append(result(tid, "PASS" if ok else "FAIL",
+                              why=f"logo exit={rl} praradimai={lost} fields_ok={okf} (>= {0.9 * D * hz:.0f}) verify exit={rv} "
+                                  f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
+                                  f"capacity_errors={pv.get('capacity_errors')} proc_ms={((sl or {}).get('hist') or {}).get('proc_ms')}",
+                              logo=sl, verify=sv))
+    return res
+
+
+def ffmt_comp(out):
+    """gen | gfxgen(pace) | composite | verify --mode composite kiekvienam formatui ir variantui. libvramflow-gfx priima tik
+    50/1 grain'o ritmą (R9, test_gfx_writer „25p -> GEOMETRY“), todėl kitiems formatams tikrinama, kad gfxgen atsisako su aiškia
+    klaida (SKIP su priežastimi, ne PASS)."""
+    res = []
+    N, K, D = 1, 2, max(6, FMT_DUR // 2)
+    xy = ["--layer-xy", "1488,64", "--layer-xy", "0,0"]
+    for fmt in fmt_list():
+        for tag, impl, storage in comp_variants():
+            tid = f"ffmt_comp[{fmt}/{tag}]"
+            sub = f"ffmt-comp-{fmt}-{tag}"
+            d = fresh_domain(sub)
+            v = vcommon(impl, storage) + ["--format", fmt]
+            if FMT_GRAIN_HZ[fmt] != 50:
+                x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", "pace",
+                          "--duration", 5, *v)
+                rx = x.wait(timeout=30)
+                txt = x.err_path.read_text(errors="replace")
+                ok = rx == 1 and "50/1" in txt
+                res.append(result(tid, "SKIP" if ok else "FAIL",
+                                  why=f"libvramflow-gfx tik 50/1 (R9): gfxgen exit={rx}, klaida {'aiški' if ok else 'NEAIŠKI'}"))
+                continue
+            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", D + 60, *v)
+            x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", "pace",
+                      "--duration", D + 60, *v)
+            ids = [role_flow_id(1, n) for n in range(N)] + [role_flow_id(5, n * 8 + k) for n in range(N) for k in range(K)]
+            c = va = None
+            rc = rv = None
+            try:
+                if not wait_flows(d, ids):
+                    res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                    continue
+                c = FProc(out, sub, "composite", d, "--flows", N, "--layers", K, *xy, "--opacity", "0.7", "--opacity", "0.5",
+                          "--base", "gen", "--out-format", "v210", "--deadline-ms", COMP_DEADLINE_MS, "--duration", D + 14,
+                          "--warmup", 2, *v)
+                if not wait_flows(d, [role_flow_id(6, n) for n in range(N)], 20):
+                    res.append(result(tid, "FAIL", why="composite išėjimo flow'ai neatsirado"))
+                    continue
+                va = FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", K, "--layer-geom", "logo,full",
+                           "--gfx-mode", "pace", "--base", "gen", "--out-format", "v210", "--every", 5, "--duration", D, "--warmup", 1,
+                           *xy, "--opacity", "0.7", "--opacity", "0.5", *v)
+                rv = va.wait(timeout=D + 60)
+                rc = c.wait(timeout=D + 60)
+            finally:
+                for pr in (va, c, x, g):
+                    if pr is not None:
+                        pr.term()
+            sc, sv = vsummary(c, "composite"), vsummary(va, "verify-composite")
+            late = sum(f.get("late_fields", 0) for f in (sc or {}).get("flows") or [])
+            pv = (sv or {}).get("proc") or {}
+            ok = (sc is not None and sv is not None and rc == 0 and late == 0 and pv.get("verification_errors", 1) == 0
+                  and pv.get("samples_total", 0) > 0)
+            res.append(result(tid, "PASS" if ok else "FAIL",
+                              why=f"composite exit={rc} late_fields={late} verify exit={rv} verification_errors={pv.get('verification_errors')} "
+                                  f"samples={pv.get('samples_total')}", composite=sc, verify=sv))
+    return res
+
+
+def ts_totals(path):
+    try:
+        return json.loads(pathlib.Path(path).read_text()).get("totals", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def ffmt_enc(out):
+    """gen(+audio) | enc | ts_sink kiekvienam formatui: C (cpu + x264) ir G (gpu + nvenc). enc be praradimų, kadrų >= 90 %,
+    TS be sync / CC klaidų, video PES > 0."""
+    res = []
+    N, D = 1, max(8, FMT_DUR // 2)
+    for fmt in fmt_list():
+        for tag, impl, storage, enc in (("C", "cpu", "host", "x264"), ("G", "gpu", "cuda-linear", "nvenc")):
+            if tag not in [t for t, _, _ in comp_variants()]:
+                continue
+            tid = f"ffmt_enc[{fmt}/{tag}]"
+            sub = f"ffmt-enc-{fmt}-{tag}"
+            d = fresh_domain(sub)
+            port = 23000 + 10 * len(res)
+            v = vcommon(impl, storage) + ["--format", fmt]
+            g = FProc(out, sub, "gen", d, "--flows", N, "--audio", 1, "--duration", D + 30, *v)
+            sink_json = pathlib.Path(out) / sub / "sink.json"
+            sink = e = None
+            re_ = None
+            try:
+                if not wait_flows(d, [role_flow_id(1, n) for n in range(N)]):
+                    res.append(result(tid, "FAIL", why="gen flow'ai neatsirado"))
+                    continue
+                sink = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "perf/ts_sink.py"),
+                                         "--port-base", str(port), "--flows", str(N), "--seconds", str(D + 2), "--out", str(sink_json)],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                ea = ["--encoder", enc, "--audio", 1, "--port-base", port] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
+                e = FProc(out, sub, "enc", d, "--flows", N, "--duration", D, "--warmup", 2, *ea, *v)
+                re_ = e.wait(timeout=D + 60)
+                sink.wait(timeout=D + 30)
+            finally:
+                if sink is not None and sink.poll() is None:
+                    sink.kill()
+                for pr in (e, g):
+                    if pr is not None:
+                        pr.term()
+            se = vsummary(e, "enc")
+            fl = ((se or {}).get("flows") or [{}])[0]
+            frames = fl.get("frames_encoded", 0)
+            tt = ts_totals(sink_json)
+            want = 0.9 * (D - 2) * FMT_FPS[fmt]
+            ok = (se is not None and re_ == 0 and frames >= want and tt.get("sync_errors", 1) == 0 and tt.get("cc_errors", 1) == 0
+                  and tt.get("video_pes", 0) > 0 and se.get("format") == fmt)
+            res.append(result(tid, "PASS" if ok else "FAIL",
+                              why=f"enc exit={re_} frames_encoded={frames} (>= {want:.0f}) ts={tt} fatal={(se or {}).get('fatal')}", enc=se))
+    return res
+
+
+def ffmt_dec(out):
+    """gen | enc | dec | verify --mode dec kiekvienam formatui: C (x264 + programinis dekoderis) ir G (nvenc + NVDEC).
+    dec be praradimų po paleidimo, verify: 0 teisingumo klaidų (lauko tvarka interlaced formatams), imčių > 0."""
+    res = []
+    N, D = 1, max(10, FMT_DUR // 2)
+    for fmt in fmt_list():
+        for tag, impl, storage, enc in (("C", "cpu", "host", "x264"), ("G", "gpu", "cuda-linear", "nvenc")):
+            if tag not in [t for t, _, _ in comp_variants()]:
+                continue
+            tid = f"ffmt_dec[{fmt}/{tag}]"
+            sub = f"ffmt-dec-{fmt}-{tag}"
+            d = fresh_domain(sub)
+            port = 24000 + 10 * len(res)
+            v = vcommon(impl, storage) + ["--format", fmt]
+            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", D + 60, *v)
+            dc = e = vf = None
+            rd = rv = None
+            try:
+                if not wait_flows(d, [role_flow_id(1, n) for n in range(N)]):
+                    res.append(result(tid, "FAIL", why="gen flow'ai neatsirado"))
+                    continue
+                dc = FProc(out, sub, "dec", d, "--flows", N, "--port-base", port, "--duration", D + 14, "--warmup", 6, *v)
+                time.sleep(1)
+                ea = ["--encoder", enc, "--port-base", port] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
+                e = FProc(out, sub, "enc", d, "--flows", N, "--duration", D + 16, *ea, *v)
+                if not wait_flows(d, [role_flow_id(4, n) for n in range(N)], 20):
+                    res.append(result(tid, "FAIL", why="dec išėjimo flow'ai neatsirado"))
+                    continue
+                vf = FProc(out, sub, "verify", d, "--mode", "dec", "--flows", N, "--every", 5, "--duration", D, "--warmup", 6,
+                           *vimpl(impl, storage), "--format", fmt)
+                rv = vf.wait(timeout=D + 60)
+                rd = dc.wait(timeout=D + 60)
+            finally:
+                for pr in (vf, e, dc, g):
+                    if pr is not None:
+                        pr.term()
+            sd, sv = vsummary(dc, "dec"), vsummary(vf, "verify-dec")
+            fl = ((sd or {}).get("flows") or [{}])[0]
+            pv = (sv or {}).get("proc") or {}
+            vfl = ((sv or {}).get("flows") or [{}])[0]
+            ok = (sd is not None and sv is not None and fl.get("fields_ok", 0) > 0 and pv.get("verification_errors", 1) == 0
+                  and pv.get("samples_total", 0) > 0 and fl.get("decode_errors", 0) == 0 and sd.get("format") == fmt)
+            res.append(result(tid, "PASS" if ok else "FAIL",
+                              why=f"dec exit={rd} fields_ok={fl.get('fields_ok')} underrun={fl.get('underrun_fields')} "
+                                  f"decode_errors={fl.get('decode_errors')} flag_mismatch={fl.get('flag_mismatch')} verify exit={rv} "
+                                  f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
+                                  f"parity_mismatch={vfl.get('parity_mismatch')} seq_jump={vfl.get('seq_jump')}", dec=sd, verify=sv))
+    return res
+
+
+def ffmt_neg(out):
+    """Neigiamas: logo su 720p50 įėjimu ir logotipu už ribų (X 1488 + 384 > 1280) → exit != 0 su aiškiu tekstu; nežinomas
+    formatas (1080i25) → exit != 0 su tekstu."""
+    res = []
+    d = fresh_domain("ffmt-neg")
+    p = FProc(out, "ffmt-neg/logo", "logo", d, "--flows", 1, "--format", "720p50", "--logo-x", 1488, "--duration", 2,
+              "--impl", "cpu", "--storage", "host")
+    rc = p.wait(timeout=30)
+    s = p.summary()
+    fatal = (s or {}).get("fatal", "")
+    ok = rc not in (0, None) and "netelpa" in fatal and "720p50" in fatal
+    res.append(result("ffmt_neg[logo-720p]", "PASS" if ok else "FAIL", why=f"exit={rc} fatal={fatal!r}"))
+    q = FProc(out, "ffmt-neg/fmt", "gen", d, "--flows", 1, "--format", "1080i25", "--duration", 1)
+    rq = q.wait(timeout=30)
+    txt = q.err_path.read_text(errors="replace")
+    ok = rq not in (0, None) and "1080i25" in txt
+    res.append(result("ffmt_neg[1080i25]", "PASS" if ok else "FAIL", why=f"exit={rq} stderr={txt.strip()[:160]!r}"))
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -660,7 +914,9 @@ def main():
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
-             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out)}
+             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "ffmt_neg": lambda: ffmt_neg(out),
+             "ffmt_logo": lambda: ffmt_logo(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
+             "ffmt_dec": lambda: ffmt_dec(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):
