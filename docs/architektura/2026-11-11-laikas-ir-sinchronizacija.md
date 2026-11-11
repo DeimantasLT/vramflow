@@ -239,6 +239,29 @@ Pastabos:
 | `config/thresholds.json:18` `max_clock_steps: 3` | sinchronizacijos testams **0**; 3 palikti tik talpos pakopoms kaip „aplinkos triukšmą", kol A1 neįdiegta. Naujas blokas `"time"` su §3 slenksčiais. |
 | [F] §7 A/V riba 5 ms | → 1 ms (T6b) ir 0 mėginių (T6a). |
 
+### 3.4 PTS modelis (`mxlv_timing`, planas §P1)
+
+Ingest funkcijos (P3) įėjimo laiką verčia į MXL laiką viena biblioteka `src/timing/` (be MXL, libav ir GPU; testai
+`tests/unit/test_source_clock.cpp`, `test_timing_index.cpp`):
+
+- **Vienas poslinkis šaltiniui** (`SourceClock`): `TAI = ns(PTS išvyniotas) + off`, bendras visiems šaltinio flow'ams —
+  video ir garsas su tuo pačiu PTS gauna tą patį TAI (lūpų sinchronas pagal konstrukciją). Žymima demux metu
+  (`observe()` kiekvienam paketui), todėl vėlesnis poslinkio pokytis neliečia jau kelyje esančių kadrų.
+- **Fiksavimas** ties pirmu video paketu: `off = a + L − ns(DTS)`, po to kvantuojama į kadrų tinklelį (`align_rate`) —
+  kiekvienas kadras krinta tiksliai ant grain'o laiko, 90 kHz apvalinimas (±1 tikas) indeksų nekeičia.
+- **33 bitų wrap** išvyniojamas kiekvienam srautui; PTS — DTS atžvilgiu (PTS ir DTS gali būti skirtingose wrap pusėse).
+  Naujo srauto (ar srauto po nutrūkimo) pirmas paketas pririšamas prie paskutinio šaltinio paketo — visi srautai
+  išvynioti vienodai.
+- **Nutrūkimas** (DTS šuolis > 1 s pirmyn arba bet koks atgal): perfiksuojama ties kitu video paketu; jei atvykimas
+  tolydus (`|tęsinys − naujas| ≤ relock_slack`), išėjimo laikas tęsiasi be šuolio, kitaip — naujas fiksavimas.
+- **Dreifas (K6):** atsarga `m = dts_tai − a`, 10 s langų minimumai; 3 langai iš eilės už `L ± 200 ms` → poslinkis ±1
+  kadras (`Event::Slipped`, interlaced lieka laukų poromis, nes tinklelis kadrų). Įvertis `ClockStats::drift_ppm`
+  (mažiausių kvadratų nuolydis per 30 langų) — juo P3 nustato `swr_set_compensation` garsui. Pirmi ~200 ms dreifo
+  sugeriami be slydimo (200 ppm per 1 val. → 13 slydimų, ne 18).
+- **Laikrodžio šuolis** (`ClockWatch` → `on_clock_step(Δ)`): `off += round(Δ / Tf) · Tf`.
+- **Garsas** (`AudioCursor`): mėginio indeksas `round(TAI · 48000 / 10⁹)`; ≤ 1 ms nuokrypis tęsiamas be plyšio,
+  didesnis — spraga arba persidengimas (mėginiais).
+
 ---
 
 ## 4. Rizikos ir darbai natyviuose Linux serveriuose
