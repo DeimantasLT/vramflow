@@ -43,6 +43,6 @@ Test v210a with the cuda-linear payload backend
 
 Add tests that a v210a flow in cuda-linear storage has two planes (fill, then key)
 with the sizes and pitches of the flow definition, that both planes written in device
-memory reach a reader unchanged, and that partial grain commits and minValidSlices
-apply to both planes.
+memory reach a reader unchanged, and that after partial grain commits a reader with
+minValidSlices sees the committed lines of both planes, and one slice more is too early.
 ```
