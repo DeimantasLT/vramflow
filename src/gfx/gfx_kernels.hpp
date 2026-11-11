@@ -7,7 +7,7 @@
 // nullptr, paritetas ne 0/1 interlaced rastre, NaN opacity, k per didelis, base == nullptr su v210 išėjimu) ->
 // cudaErrorInvalidValue, NIEKAS nepaleidžiama: bent vienas netinkamas job'as atmeta visą batch'ą (R11; patikra —
 // bendra gfx::composite_job_valid, R13, visa host pusėje, prieš bet kokį paleidimą). Klaidų būsena: po paleidimo
-// naudojamas cudaPeekAtLastError (neišvalo svetimų klaidų). Sėkmės atveju visas išėjimo grain'as perrašomas (padding = 0,
+// grąžinama TIK šio paleidimo būsena (cudaLaunchKernel; sena svetima klaida neperduodama, sava — išvaloma). Sėkmės atveju visas išėjimo grain'as perrašomas (padding = 0,
 // net jei device buferis purvinas).
 //
 // Rodyklės (grain, rgba, bazė, sluoksniai, išėjimas) — device atmintis, išlygiuota bent 4 B. Funkcijos asinchroninės

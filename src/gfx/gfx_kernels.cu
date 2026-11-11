@@ -179,6 +179,13 @@ __global__ void k_rgba_to_v210a(const __grid_constant__ RgbaArgs a) {
     }
 }
 
+// Paleidimo būsena — TIK šio paleidimo (cudaLaunchKernel grąžina savo klaidą; auditas 21: cudaPeekAtLastError grąžindavo
+// seną svetimą klaidą). Nesėkmės atveju savo klaidą išvalome iš gijos būsenos, kad ji neprilipdavo prie kitų kvietimų.
+cudaError_t launch_status(cudaError_t e) {
+    if (e != cudaSuccess) cudaGetLastError();
+    return e;
+}
+
 // ---- composite ----
 template <class B>
 __global__ void k_composite(const __grid_constant__ B b) {
@@ -343,8 +350,8 @@ cudaError_t launch(const CompositeJob* jobs, int cnt, cudaStream_t s) {
         for (int l = 0; l < j.k; ++l) b.layer[nl++] = make_layer(j.layers[l], j.out_r);
         maxt = std::max(maxt, job_threads(b.job[i]));
     }
-    k_composite<B><<<dim3(blocks_for(maxt), static_cast<unsigned>(cnt)), kThreads, 0, s>>>(b);
-    return cudaPeekAtLastError();  // neištrina svetimos (kitos gijos / ankstesnės) klaidos būsenos
+    void* args[] = {&b};
+    return launch_status(cudaLaunchKernel(k_composite<B>, dim3(blocks_for(maxt), static_cast<unsigned>(cnt)), dim3(kThreads), args, 0, s));
 }
 
 }  // namespace
@@ -373,8 +380,9 @@ cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_
     a.rgba_vec = aligned(rgba_dev, 4) && stride % 4 == 0;
     a.grain_vec = aligned(grain_dev, 16);
     a.bgra = order == PixelOrder::BGRA;
-    k_rgba_to_v210a<<<blocks_for(static_cast<std::size_t>(a.lines) * a.gpr), kThreads, 0, s>>>(a);
-    return cudaPeekAtLastError();
+    void* args[] = {&a};
+    return launch_status(
+        cudaLaunchKernel(k_rgba_to_v210a, dim3(blocks_for(static_cast<std::size_t>(a.lines) * a.gpr)), dim3(kThreads), args, 0, s));
 }
 
 cudaError_t composite_batch(const CompositeJob* jobs, int n, int parity, cudaStream_t s) {
