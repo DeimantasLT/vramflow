@@ -699,7 +699,7 @@ TEST_CASE("gfx_writer: host rašytuvas nekuria CUDA konteksto", "[gfx_writer][mx
         REQUIRE(cu_state(0, &flags, &act) == 0);
         return act;
     };
-    REQUIRE(active() == 0);  // pradžioje kontekstas nesukurtas
+    if (active() != 0) SKIP("CUDA kontekstą jau sukūrė ankstesnis testas šiame procese (paleisk atskirai: ctest -R nekuria)");
     Domain d(40);
     FlowId fid;
     vfgfx_writer w = nullptr;
