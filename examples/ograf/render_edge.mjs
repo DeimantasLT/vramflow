@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // OGraf grafikos renderis: jau įdiegtas Microsoft Edge (headless) per CDP, permatomas fonas, kadrai -> stdout kaip
 // neapdoroti RGBA baitai (W*H*4, straight alfa). Be išorinių paketų (tik Node >= 22). Naudojimas:
-//   node render_edge.mjs [--seconds 8] [--w 1920] [--h 1080] [--edge <msedge.exe>] > frames.rgba
-import { spawn } from 'node:child_process';
+//   node render_edge.mjs [--seconds 8] [--w 1920] [--h 1080] [--edge <msedge.exe>] [--stop-on-stdin-eof] > frames.rgba
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { readFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -54,8 +54,35 @@ function png(buf) { // 8 bitų RGBA be interlace (tokį duoda Chromium)
 }
 
 const ud = mkdtempSync(join(tmpdir(), 'vf-edge-'));
-const edge = spawn(EDGE, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--remote-debugging-port=0',
+let edge = null, cleaned = false;
+// Valymas: Edge procesų medis (taskkill /T) ir laikinas profilio katalogas; kviečiamas visais išėjimo keliais.
+function cleanup() {
+  if (cleaned) return; cleaned = true;
+  try { srv.close(); } catch {}
+  // msedge.exe paleidėjas grįžta iškart, o tikri procesai gyvena toliau -> naikinami visi procesai, kurių komandinėje
+  // eilutėje yra šio paleidimo profilio katalogas (PID medis čia nepatikimas).
+  try {
+    spawnSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${ud.replace(/'/g, "''")}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`],
+      { stdio: 'ignore', timeout: 15000 });
+  } catch {}
+  for (let i = 0; i < 40; i++) { // Edge procesai gali dar trumpai laikyti failus (iki ~8 s)
+    try { rmSync(ud, { recursive: true, force: true }); break; } catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200); }
+  }
+}
+function die(code, msg) { if (msg) console.error('render_edge: ' + msg); cleanup(); process.exit(code); }
+for (const s of ['SIGINT', 'SIGTERM', 'SIGBREAK']) process.on(s, () => die(0, 'signalas ' + s));
+process.on('exit', cleanup);
+process.on('uncaughtException', e => die(1, String(e && e.stack || e)));
+process.on('unhandledRejection', e => die(1, String(e && e.stack || e)));
+// --stop-on-stdin-eof: stdin EOF = sustabdyti (paleidimo skriptas taip nutraukia renderį; WSL->Windows vamzdyje EPIPE nepatikimas)
+if (process.argv.includes('--stop-on-stdin-eof')) { process.stdin.on('end', () => die(0, 'stdin uždarytas')); process.stdin.resume(); }
+process.stdout.on('error', e => die(e.code === 'EPIPE' ? 0 : 1, e.code === 'EPIPE' ? 'stdout uždarytas (vartotojas baigė)' : String(e)));
+
+edge = spawn(EDGE, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--remote-debugging-port=0',
   `--user-data-dir=${ud}`, `--window-size=${W},${H}`, 'about:blank'], { stdio: 'ignore' });
+edge.on('error', e => die(1, 'Edge nepasileido: ' + e.message));
+// (paleidėjo procesas baigiasi iškart — jo 'exit' nelaikomas klaida; nutrūkus CDP ryšiui baigiama per ws 'close')
 // Windows GUI procesas stderr į vamzdį nerašo -> DevTools adresas imamas iš <user-data-dir>/DevToolsActivePort.
 const wsUrl = await new Promise((res, rej) => {
   const t0 = Date.now();
@@ -66,25 +93,33 @@ const wsUrl = await new Promise((res, rej) => {
     } catch { if (Date.now() - t0 > 20000) { clearInterval(iv); rej(new Error('Edge nepasileido (nėra DevToolsActivePort)')); } }
   }, 100);
 });
-const bws = new WebSocket(wsUrl); await new Promise(r => bws.addEventListener('open', r));
+const bws = new WebSocket(wsUrl);
+bws.addEventListener('error', () => die(1, 'CDP ws klaida'));
+bws.addEventListener('close', () => { if (!cleaned) die(1, 'CDP ws uždarytas'); });
+await new Promise(r => bws.addEventListener('open', r));
 let id = 0; const pend = new Map(); let sess = null;
 bws.addEventListener('message', e => {
   const m = JSON.parse(e.data);
-  if (m.id && pend.has(m.id)) { const [ok, ko] = pend.get(m.id); pend.delete(m.id); m.error ? ko(new Error(JSON.stringify(m.error))) : ok(m.result); }
+  if (m.id && pend.has(m.id)) { const [ok, ko, tm] = pend.get(m.id); clearTimeout(tm); pend.delete(m.id); m.error ? ko(new Error(JSON.stringify(m.error))) : ok(m.result); }
 });
+const CDP_TIMEOUT_MS = 15000;
 const send = (method, params = {}, sessionId = sess) => new Promise((ok, ko) => {
-  const i = ++id; pend.set(i, [ok, ko]); bws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
+  const i = ++id;
+  const tm = setTimeout(() => { pend.delete(i); ko(new Error(`CDP ${method}: laiko riba ${CDP_TIMEOUT_MS} ms`)); }, CDP_TIMEOUT_MS);
+  pend.set(i, [ok, ko, tm]);
+  bws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
 });
 const { targetId } = await send('Target.createTarget', { url: 'about:blank' }, undefined);
 sess = (await send('Target.attachToTarget', { targetId, flatten: true }, undefined)).sessionId;
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 await send('Emulation.setDefaultBackgroundColorOverride', { color: { r: 0, g: 0, b: 0, a: 0 } });
 await send('Page.navigate', { url: `http://127.0.0.1:${port}/host.html` });
-for (let i = 0; i < 100; i++) {
-  const r = await send('Runtime.evaluate', { expression: 'window.__ready===true' });
-  if (r.result.value) break;
-  await new Promise(r => setTimeout(r, 100));
+let ready = false;
+for (let i = 0; i < 100 && !ready; i++) {
+  ready = (await send('Runtime.evaluate', { expression: 'window.__ready===true' })).result.value === true;
+  if (!ready) await new Promise(r => setTimeout(r, 100));
 }
+if (!ready) throw new Error('grafika nepasiruošė per 10 s (window.__ready nebuvo true)');
 
 const t0 = Date.now(); let n = 0;
 while (Date.now() - t0 < SECONDS * 1000) {
@@ -94,5 +129,4 @@ while (Date.now() - t0 < SECONDS * 1000) {
   if (!process.stdout.write(f.rgba)) await new Promise(r => process.stdout.once('drain', r));
   n++;
 }
-console.error(`render_edge: ${n} kadrų per ${SECONDS} s (${(n / SECONDS).toFixed(1)} fps), ${W}x${H}`);
-edge.kill(); srv.close(); process.exit(0);
+die(0, `${n} kadrų per ${SECONDS} s (${(n / SECONDS).toFixed(1)} fps), ${W}x${H}`);

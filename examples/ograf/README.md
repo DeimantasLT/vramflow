@@ -19,9 +19,9 @@ renderer (Edge/CDP, WPE, CEF, …) --RGBA/BGRA frames--> ograf_feed --vfgfx_subm
 | `ograf_probe.cpp` | Check: reads the `v210a` output of `composite`, counts key values, saves one field as PNG (key and Y). |
 | `render_edge.mjs` | Renderer: headless Microsoft Edge driven over the Chrome DevTools Protocol (Node ≥ 22, no packages), transparent page background, frames → stdout as RGBA. |
 | `graphic/` | A small hand-written OGraf v1 graphic (`lower-third.ograf.json` + web component) and a minimal host page. Synthetic, **not** one of the EBU sample graphics. |
-| `run-demo.sh` | Builds the two programs and runs the whole demo in WSL. |
+| `run-demo.sh` | Builds the two programs and runs the whole demo in WSL: `gen` and the graphics source start first, the compositors start only after the first graphics grain is committed (`--ready-file`), and the source is stopped only after the compositors finish. |
 
-## 11.1 Research: what can render HTML with alpha, headless, today
+## Which renderers give HTML with alpha, headless, today
 
 Checked on 2026-11-11 on this workstation (nothing was downloaded or installed):
 
@@ -56,7 +56,7 @@ Windows → WSL hop is a plain pipe (`node.exe … | ograf_feed`).
 - Renderers named by the project: OGraf Devtool (SuperFlyTV/ograf-devtool) and OGraf Simple Rendering System
   (SuperFlyTV/ograf-server). Neither is documented as headless-with-alpha; not evaluated.
 
-## 11.2 Run
+## Run it
 
 ```bash
 # WSL, repo built with scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
@@ -64,24 +64,39 @@ SOURCE=edge      bash examples/ograf/run-demo.sh /tmp/vf-ograf   # live OGraf re
 SOURCE=synthetic bash examples/ograf/run-demo.sh /tmp/vf-ograf   # built-in source, nothing else needed
 ```
 
-The script starts `gen` (2 flows), `ograf_feed`, then two compositors on the same graphics flow:
+The script starts `gen` (2 flows) and `ograf_feed`, waits until the graphics flow has committed its first grain (with Edge this takes a few seconds), then starts two compositors on the same graphics flow:
 
 - **A**: `composite --base gen --out-format v210` — the program picture (graphic over video). The base is opaque, so the
   key of a `v210a` output over a `gen` base would be 940 everywhere by definition; that is why A is `v210`.
 - **B**: `composite --base none --out-format v210a` — the graphic alone, alpha preserved; `ograf_probe` checks this one.
 
-Result of the runs on 2026-11-11 (RTX 4070 Laptop, WSL2, `--impl cpu --storage host`, 20–24 s, power profile "Whisper"):
+Result of the runs on 2026-11-11 (RTX 4070 Laptop, WSL2, `--impl cpu --storage host`, compositors 20 s each, power profile "Whisper"):
 
-| Source | Frames submitted | Probe (300 fields of the `v210a` output) |
-|---|---|---|
-| `edge` (OGraf lower third) | 88 (4.0 fps) | key = 64: 259 409 930; key = 940: 955 670; **64 < key < 940: 51 711 200** (of 312 076 800) |
-| `synthetic` | 528 | key = 64: 221 173 443; key = 940: 82 153; **64 < key < 940: 90 821 204** (of 312 076 800) |
+| Source | Frames submitted | Probe (300 fields of the `v210a` output) | Compositors' exit code |
+|---|---|---|---|
+| `edge` (OGraf lower third) | 86 (about 4 fps) | key = 64: 258 548 100; key = 940: 952 500; **64 < key < 940: 51 539 400** (of 311 040 000) | A 0, B 0 |
+| `synthetic` | 478 | key = 64: 220 447 380; key = 940: 81 294; **64 < key < 940: 90 511 326** (of 311 040 000) | A 0, B 0 |
 
-The output is committed (both compositors committed ~950 fields in their window) and the key has intermediate values, so
-the alpha passes through the library and the compositor. One field is saved as `ograf-key.png` and `ograf-fill-y.png`
-(grayscale, 1920×540, in the output directory only; not committed). Both compositors report exit code 4
-(capacity event: 38–45 missing fields of ~1000, ~4 %); `verify` does not apply (the content is not deterministic) and
-this example makes no capacity claim. Not investigated further.
+The output is committed and the key has intermediate values, so the alpha passes through the library and the compositor.
+One field is saved as `ograf-key.png` and `ograf-fill-y.png` (grayscale, 1920×540, in the output directory only; not
+committed). `verify` does not apply (the content is not deterministic) and this example makes no capacity claim.
+
+An earlier version of the script exited with code 4 (about 4 % missing fields): that was a timing bug of the script, not of
+the library. The graphics source ran for a fixed time from the start while the compositors started 3 s later and ran for
+longer than the source, and with Edge the first frame needed several seconds. Starting the compositors after the first
+commit and stopping the source after them removed it (exit 0 in every one of the 5 Edge runs and the 1 synthetic run made after the fix).
+
+Assumptions and limits of this check:
+
+- `Page.captureScreenshot` is assumed to return straight (non-premultiplied) alpha, as PNG does; the code does not verify it.
+  The demo graphic has a black shadow, so a premultiplication error would not show in the result (black stays black); use a
+  coloured, semi-transparent graphic to test a new renderer, or pass `--alpha premultiplied` when the renderer is premultiplied.
+- `ograf_feed` reads stdin with a 500 ms poll: if the renderer stalls, the last frame keeps being committed every field.
+  SIGINT/SIGTERM end it cleanly (pacing stopped, writer and instance destroyed).
+- `render_edge.mjs` kills the Edge processes of its own profile and removes the temporary profile on normal end, error,
+  SIGINT/SIGTERM, stdout closed (EPIPE) and stdin EOF (`--stop-on-stdin-eof`, used by `run-demo.sh` because the
+  WSL to Windows pipe does not reliably report EPIPE). A hard kill (`taskkill /F` on node) cannot be handled and leaves the
+  profile in the Windows temp directory (`vf-edge-*`).
 
 ## Other renderers (not run)
 

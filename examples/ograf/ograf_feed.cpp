@@ -10,10 +10,17 @@
 //                Pasibaigus stdin paskutinis kadras toliau commit'inamas kiekvieną lauką iki --seconds.
 //   synthetic  — įmontuotas animuotas šaltinis su minkšta (gradientine, antialiasuota) alfa; renderio nereikia.
 //
-// Naudojimas: ograf_feed --domain D --flow-id UUID [--source stdin|synthetic] [--format rgba|bgra] [--alpha straight|premultiplied] [--seconds 20]
+// SIGINT/SIGTERM: ciklai baigiami, vykdomi vfgfx_stop_pacing / vfgfx_writer_destroy / mxlDestroyInstance, exit 0.
+// stdin: skaitoma su poll(500 ms) laiko riba — jei renderis užstringa, paskutinis kadras toliau commit'inamas kiekvieną lauką.
+// --ready-file F: failas sukuriamas, kai pirmas grain'as commit'intas (paleidimo skriptas laukia jo prieš startuodamas composite).
+// Naudojimas: ograf_feed --domain D --flow-id UUID [--source stdin|synthetic] [--format rgba|bgra] [--alpha straight|premultiplied] [--ready-file F] [--seconds 20]
 #include <vramflow/gfx.h>
 
 #include <mxl/mxl.h>
+
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +33,8 @@
 #include <vector>
 
 namespace {
+volatile sig_atomic_t g_stop = 0;
+void on_signal(int) { g_stop = 1; }
 constexpr int W = 1920, H = 1080;
 
 std::string flow_def(const std::string& id) {
@@ -65,18 +74,23 @@ void synth(std::vector<std::uint8_t>& px, int t) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string domain, id, source = "synthetic", format = "rgba", alpha = "straight";
+    std::string domain, id, source = "synthetic", format = "rgba", alpha = "straight", ready;
     double seconds = 20;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string k = argv[i], v = argv[i + 1];
         if (k == "--domain") domain = v; else if (k == "--flow-id") id = v; else if (k == "--source") source = v;
-        else if (k == "--format") format = v; else if (k == "--alpha") alpha = v; else if (k == "--seconds") seconds = std::atof(v.c_str());
+        else if (k == "--format") format = v; else if (k == "--alpha") alpha = v; else if (k == "--ready-file") ready = v; else if (k == "--seconds") seconds = std::atof(v.c_str());
         else { std::fprintf(stderr, "nežinomas parametras %s\n", k.c_str()); return 2; }
     }
     if (domain.empty() || id.empty() || (source != "stdin" && source != "synthetic") || (format != "rgba" && format != "bgra") || (alpha != "straight" && alpha != "premultiplied")) {
         std::fprintf(stderr, "naudojimas: ograf_feed --domain D --flow-id UUID [--source stdin|synthetic] [--format rgba|bgra] [--alpha straight|premultiplied] [--seconds N]\n");
         return 2;
     }
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;  // be SA_RESTART: blokuojantis read grįžta EINTR
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
     mxlInstance inst = mxlCreateInstance(domain.c_str(), "");
     vfgfx_writer g = nullptr;
     int rc = inst ? vfgfx_writer_create(inst, flow_def(id).c_str(), nullptr, &g) : 1;
@@ -93,23 +107,29 @@ int main(int argc, char** argv) {
         vfgfx_frame f{px.data(), W, H, W * 4, alpha == "straight" ? VFGFX_ALPHA_STRAIGHT : VFGFX_ALPHA_PREMULTIPLIED, VFGFX_MEM_HOST};
         if ((rc = vfgfx_submit(g, &f))) { std::fprintf(stderr, "submit=%d: %s\n", rc, vfgfx_last_error(g)); return false; }
         ++frames;
+        if (!ready.empty() && frames == 1) {  // laukiam pirmo commit'o (ritmo gija), tada pranešam paleidimo skriptui
+            for (int i = 0; i < 500 && vfgfx_committed(g) == 0 && !g_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (FILE* rf = std::fopen(ready.c_str(), "w")) std::fclose(rf);
+        }
         return true;
     };
     bool ok = true;
     if (source == "stdin") {
-        while (ok && elapsed() < seconds) {
-            size_t got = 0;
-            while (got < px.size()) {
-                const size_t n = std::fread(px.data() + got, 1, px.size() - got, stdin);
-                if (n == 0) break;
-                got += n;
-            }
-            if (got < px.size()) break;  // EOF: laikom paskutinį kadrą
-            ok = submit();
+        size_t got = 0;
+        bool eof = false;
+        while (ok && !g_stop && elapsed() < seconds && !eof) {
+            pollfd pfd{0, POLLIN, 0};
+            const int pr = poll(&pfd, 1, 500);
+            if (pr <= 0) continue;  // laiko riba / signalas: patikrinam sąlygas, paskutinis kadras toliau commit'inamas
+            const ssize_t n = read(0, px.data() + got, px.size() - got);
+            if (n < 0) continue;
+            if (n == 0) { eof = true; break; }  // EOF: laikom paskutinį kadrą
+            got += static_cast<size_t>(n);
+            if (got == px.size()) { ok = submit(); got = 0; }
         }
-        while (ok && elapsed() < seconds) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        while (ok && !g_stop && elapsed() < seconds) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     } else {
-        for (int t = 0; ok && elapsed() < seconds; ++t) {
+        for (int t = 0; ok && !g_stop && elapsed() < seconds; ++t) {
             synth(px, t);
             ok = submit();
             const double next = (t + 1) / 25.0;  // 25 kadrų/s
