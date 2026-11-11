@@ -22,7 +22,7 @@ struct Batch {
     int n;
 };
 // Kernel'io argumentų riba didesnė, bet laikomės ≤ 4 KiB (senas limitas, mažiau konstantų atminties per paleidimą).
-static_assert(sizeof(Batch<GenJob>) + sizeof(Geom) <= 4096);
+static_assert(sizeof(Batch<GenJob>) + sizeof(GenParams) + sizeof(Geom) <= 4096);
 static_assert(sizeof(Batch<LogoJob>) + sizeof(LogoDesc) + sizeof(Geom) <= 4096);
 static_assert(sizeof(Batch<WeaveJob>) + sizeof(Geom) <= 4096);
 static_assert(sizeof(Batch<SplitJob>) + sizeof(Geom) <= 4096);
@@ -70,16 +70,14 @@ __device__ __forceinline__ bool cell(const Geom& G, int rows, int& j, int& g) {
 
 // --- Generatorius ------------------------------------------------------------------------------------------------------
 template <bool V>
-__global__ void k_gen_field_batch(const __grid_constant__ Batch<GenJob> b, std::uint64_t run_seed, std::uint32_t complexity,
-                                  std::uint64_t index, const __grid_constant__ Geom G, std::uint32_t rate_num, std::uint32_t rate_den) {
+// base — paruošti host'e (set_raster + prepare_index): gijoje jokių 64 bitų dalybų, tik srauto numeris.
+__global__ void k_gen_field_batch(const __grid_constant__ Batch<GenJob> b, const __grid_constant__ GenParams base, std::uint64_t index,
+                                  const __grid_constant__ Geom G) {
     const int s = blockIdx.y;
     int j, g;
     if (s >= b.n || !cell(G, G.lines, j, g)) return;
-    GenParams gp{run_seed, b.job[s].flow, complexity};
-    set_raster(gp, G.w, G.lines * G.step);  // kadro rastras; dalikliai — kartą gijai
-    gp.rate_num = rate_num;
-    gp.rate_den = rate_den;
-    prepare_index(gp, index);
+    GenParams gp = base;
+    gp.flow = b.job[s].flow;
     const int fy = G.row(j);
     const int x0 = 6 * g;
     Group grp;
@@ -307,14 +305,19 @@ cudaError_t gen_fields(const GenJob* jobs, int n, std::uint64_t run_seed, std::u
                        bool interlaced, std::uint32_t rate_num, std::uint32_t rate_den, cudaStream_t s) {
     if (!dim_ok(d, interlaced) || rate_num == 0 || rate_den == 0) return cudaErrorInvalidValue;
     const Geom G = geom_of(d, interlaced ? static_cast<int>(index & 1u) : -1);
+    GenParams base{run_seed, 0, complexity};
+    base.rate_num = rate_num;
+    base.rate_den = rate_den;
+    set_raster(base, d.w, d.h);
+    prepare_index(base, index);
     return run_batches(
         jobs, n, [](const GenJob& j) { return j.dst != nullptr; }, [](const GenJob& j) { return aligned16(j.dst); },
         [&](const Batch<GenJob>& b, bool vec) {
             const dim3 grid = grid_for(G, G.lines, b.n);
             if (vec)
-                k_gen_field_batch<true><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G, rate_num, rate_den);
+                k_gen_field_batch<true><<<grid, kThreads, 0, s>>>(b, base, index, G);
             else
-                k_gen_field_batch<false><<<grid, kThreads, 0, s>>>(b, run_seed, complexity, index, G, rate_num, rate_den);
+                k_gen_field_batch<false><<<grid, kThreads, 0, s>>>(b, base, index, G);
         });
 }
 
