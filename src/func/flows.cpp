@@ -110,6 +110,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
     mxlFlowConfigInfo cfg{};
     bool created = false;
     mxlStatus st = mxlCreateFlowWriter(inst, def.c_str(), options.empty() ? nullptr : options.c_str(), &w, &cfg, &created);
+    create_status = st;
     if (st != MXL_STATUS_OK) {
         w = nullptr;
         err = "mxlCreateFlowWriter status " + std::to_string(st) + (st == MXL_ERR_CONFLICT ? " (CONFLICT)" : "");

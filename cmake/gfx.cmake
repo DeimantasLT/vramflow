@@ -54,3 +54,47 @@ if(MXLV_BUILD_MEDIA)
     catch_discover_tests(vramflow-gfx-gpu-tests)
   endif()
 endif()
+
+# libvramflow-gfx: viešas C ABI (include/vramflow/gfx.h) — RGBA -> standartinis MXL v210a flow, rankinis ir ritmo režimai.
+# Reikia MXL srauto pagalbininkų (mxlv_flows, R4: statinė PIC biblioteka iš flows.cpp) ir abiejų konvertavimo variantų.
+# Tas pats gfx_writer.cpp kompiliuojamas du kartus: į .so ir į statinę biblioteką testams (testai naudoja vidinius kabliukus; .so eksportuoja tik vfgfx_*, žr. vramflow-gfx.map).
+if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
+  add_library(mxlv_gfx_writer STATIC src/gfx/gfx_writer.cpp)
+  target_include_directories(mxlv_gfx_writer PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+                             ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
+  target_link_libraries(mxlv_gfx_writer PUBLIC mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
+  set_target_properties(mxlv_gfx_writer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+  add_library(vramflow-gfx SHARED src/gfx/gfx_writer.cpp)
+  target_include_directories(vramflow-gfx PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src
+                             ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
+  target_link_libraries(vramflow-gfx PRIVATE mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
+  target_include_directories(vramflow-gfx INTERFACE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
+  target_link_options(vramflow-gfx PRIVATE -Wl,--version-script=${CMAKE_SOURCE_DIR}/cmake/vramflow-gfx.map)
+  set_target_properties(vramflow-gfx PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib" VERSION 0.1.0 SOVERSION 0)
+  install(TARGETS vramflow-gfx LIBRARY DESTINATION lib)
+  install(FILES include/vramflow/gfx.h DESTINATION include/vramflow)
+
+  if(MXLV_BUILD_TESTS)
+    # Antraštė turi kompiliuotis kaip C (-std=c11 -pedantic -Werror) ir ją naudojanti programa — susilinkuoti su .so.
+    enable_language(C)
+    add_executable(vramflow-gfx-c-check tests/gpu/gfx_c_check.c)
+    target_link_libraries(vramflow-gfx-c-check PRIVATE vramflow-gfx mxl::mxl)
+    set_target_properties(vramflow-gfx-c-check PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
+                          BUILD_RPATH "${MXL_ROOT}/lib")
+    target_compile_options(vramflow-gfx-c-check PRIVATE -Wall -Wextra -pedantic -Werror)
+    add_test(NAME gfx_writer_c_header COMMAND vramflow-gfx-c-check)
+
+    add_executable(vramflow-gfx-writer-tests tests/gpu/test_gfx_writer.cpp)
+    target_link_libraries(vramflow-gfx-writer-tests PRIVATE mxlv_gfx_writer mxlv_gfx_ref Catch2::Catch2WithMain)
+    set_target_properties(vramflow-gfx-writer-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
+    catch_discover_tests(vramflow-gfx-writer-tests)
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+      add_test(NAME gfx_writer_ctypes_smoke
+               COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/gfx_ctypes_smoke.py $<TARGET_FILE:vramflow-gfx>
+                       ${MXL_ROOT}/lib/libmxl.so)
+    endif()
+  endif()
+endif()

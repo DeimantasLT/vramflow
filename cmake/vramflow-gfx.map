@@ -1,0 +1,5 @@
+# Eksportuojamas tik viešas C ABI (include/vramflow/gfx.h); kita (cudart_static, mxlv_*) paslėpta.
+{
+  global: vfgfx_*;
+  local: *;
+};
