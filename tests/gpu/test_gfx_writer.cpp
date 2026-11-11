@@ -277,6 +277,45 @@ TEST_CASE("gfx_writer: progresyvus 382x40 (plotis nesidalija iš 3/6/48), stride
     vfgfx_writer_destroy(w, d.inst);
 }
 
+// R20 / L18: kviečiantysis įrašo CUDA kadrą asinchroniškai savo stream'e ir NEsinchronizuoja prieš vfgfx_write.
+// Biblioteka privalo pati palaukti, kol kadras įrašytas (kitaip konvertuoja pusiau įkeltą kadrą — būtent taip krito
+// 382x40 testas apkrautoje GPU). Deterministiška: kviečiančiojo stream'as 200 ms miega host funkcijoje, tik tada kopijuoja
+// teisingą kadrą. Su vfgfx_set_caller_synced(w, 1) biblioteka nelaukia — tada grain'as PRIVALO skirtis (įrodo, kad
+// testas atskiria abu atvejus).
+TEST_CASE("gfx_writer: CUDA kadras be kviečiančiojo sinchronizavimo (R20)", "[gfx_writer][mxl]") {
+    const bool cuda_store = GENERATE(false, true);
+    const bool caller_synced = GENERATE(false, true);
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio");
+    const gfx::Raster r{382, 40, false, true};
+    Domain d(20);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 382, 40, false).c_str(), storage_opts(cuda_store).c_str(), &w) == 0);
+    REQUIRE(vfgfx_set_caller_synced(w, caller_synced ? 1 : 0) == 0);
+    Checker chk(d.inst, fid.id, r);
+    Frame fr(382, 40, 9, VFGFX_ALPHA_STRAIGHT, true, 20);  // fr.dev — teisingas kadras (jau įkeltas)
+    void* late = nullptr;
+    REQUIRE(cudaMalloc(&late, fr.host.size()) == cudaSuccess);
+    REQUIRE(cudaMemset(late, 0, fr.host.size()) == cudaSuccess);
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+    cudaStream_t s = nullptr;
+    REQUIRE(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess);
+    REQUIRE(cudaLaunchHostFunc(s, [](void*) { std::this_thread::sleep_for(200ms); }, nullptr) == cudaSuccess);
+    REQUIRE(cudaMemcpyAsync(late, fr.dev, fr.host.size(), cudaMemcpyDeviceToDevice, s) == cudaSuccess);
+    vfgfx_frame f = fr.f;
+    f.rgba = late;
+    const std::uint64_t base = mxlGetCurrentIndex(&kRate);
+    INFO("cuda_store=" << cuda_store << " caller_synced=" << caller_synced << " " << vfgfx_last_error(w));
+    REQUIRE(vfgfx_write(w, base, &f) == 0);  // be cudaStreamSynchronize(s) — tyčia
+    REQUIRE(cudaStreamSynchronize(s) == cudaSuccess);
+    const bool ok = chk.matches(base, fr.ref(r, 0));
+    if (caller_synced) CHECK_FALSE(ok);  // biblioteka nelaukė → nuliai, ne kadras
+    else CHECK(ok);
+    vfgfx_writer_destroy(w, d.inst);
+    cudaStreamDestroy(s);
+    cudaFree(late);
+}
+
 TEST_CASE("gfx_writer: klaidų kodai (INVALID_ARG, GEOMETRY, flow aprašas)", "[gfx_writer][mxl]") {
     Domain d(3);
     FlowId fid;

@@ -21,9 +21,11 @@
  * runtime, todėl kviečiančiojo cudaSetDevice jai nematomas; be deviceUuid naudojamas įrenginys 0. UUID — "GPU-xxxxxxxx-…",
  * raidžių dydis nesvarbus, rodyklė ir stride — kartotiniai 4 B.
  *
- * CUDA kadro tvarka: prieš vfgfx_write / vfgfx_submit kviečiantysis privalo būti BAIGĘS rašyti į f->rgba (pvz. cudaStreamSynchronize
- * arba cudaDeviceSynchronize); šaltinio kernel'ų biblioteka nelaukia. Tai galioja ir „sinchroniniam“ cudaMemcpy H2D iš
- * pageable atminties: jis gali grįžti prieš DMA pabaigą, todėl po jo — cudaStreamSynchronize(0). Iškvietimas sinchroninis:
+ * CUDA kadro tvarka: numatytai biblioteka pati palaukia, kol baigsis visi GPU darbai tame kontekste, ir tik tada skaito
+ * f->rgba — pusiau įrašytas kadras (pvz. po „sinchroninio“ cudaMemcpy H2D iš pageable atminties, kuris gali grįžti prieš DMA
+ * pabaigą) neįmanomas. Kviečiantysis, kuris pats sinchronizuoja (cudaStreamSynchronize prieš kvietimą), gali tą laukimą
+ * išjungti: vfgfx_set_caller_synced(w, 1). Kitas CUDA kontekstas nei pirminis (cuCtxCreate) — kviečiančiojo atsakomybė.
+ * Iškvietimas sinchroninis:
  * grįžus, f->rgba buferį (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
  *
  * Ritmo laikas: vfgfx_start_pacing(offset_ns) — grain indeksas i commit'inamas laiku T(i) + offset_ns, kur T(i) — indekso
@@ -70,6 +72,11 @@ int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns);                 /* ri
 int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f);                    /* ritmo režimas: naujas kadras */
 int vfgfx_stop_pacing(vfgfx_writer w);
 uint64_t vfgfx_committed(vfgfx_writer w);                                  /* commit'intų grain'ų skaičius */
+/* CUDA kadrų sinchronizavimas (R20). Numatyta (0): prieš skaitydama CUDA kadrą biblioteka palaukia, kol baigsis VISI
+ * GPU darbai tame CUDA kontekste (cudaDeviceSynchronize pirminiame kontekste), todėl pusiau įrašytas kadras neįmanomas,
+ * net jei kviečiantysis pamiršo sinchronizuoti. Kaina — laukimas ir kitų stream'ų darbų. synced = 1: kviečiantysis
+ * garantuoja, kad kadras jau įrašytas (cudaStreamSynchronize prieš kvietimą), ir biblioteka nelaukia. */
+int vfgfx_set_caller_synced(vfgfx_writer w, int synced);
 const char* vfgfx_last_error(vfgfx_writer w);
 void vfgfx_writer_destroy(vfgfx_writer w, mxlInstance inst);
 

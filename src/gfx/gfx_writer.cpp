@@ -90,6 +90,7 @@ struct vfgfx_writer_s {
     std::uint8_t* prep[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};  // [aibė][paritetas]; device arba host
 
     std::atomic<std::uint64_t> committed{0};
+    std::atomic<bool> caller_synced{false};  // R20: true — kviečiantysis garantuoja, kad CUDA kadras jau įrašytas
     std::mutex op_m;   // write / start_pacing / stop_pacing serializacija
     std::mutex sub_m;  // submit serializacija
     std::mutex conv_m;  // convert(): bendri staging buferiai ir s_conv (write ir submit gali veikti lygiagrečiai)
@@ -141,6 +142,16 @@ struct vfgfx_writer_s {
         return 0;
     }
 
+    // R20: prieš skaitant CUDA kadrą — palaukti visų konteksto darbų (ir kviečiančiojo stream'ų: pirminis kontekstas
+    // bendras visiems proceso CUDA runtime'ams), nebent kviečiantysis pasakė, kad jau sinchronizavo. Mūsų s_conv yra
+    // cudaStreamNonBlocking, todėl be šio laukimo jis nesilaiko jokios tvarkos su kviečiančiojo darbais.
+    int wait_caller_frame() {
+        if (caller_synced.load()) return 0;
+        const cudaError_t e = cudaDeviceSynchronize();
+        if (e != cudaSuccess) return fail(VFGFX_ERR_CUDA, std::string("laukimas CUDA kadro (R20): ") + cudaGetErrorString(e));
+        return 0;
+    }
+
     // Konvertuoja kadro `n` laukų (paritetai par[k]) į dst[k] (paskirties saugyklos atmintis: device jei cuda_store, kitaip
     // host). Naudoja s_conv. 0 arba klaidos kodas. Kviečiama po op_m arba sub_m.
     int convert(const vfgfx_frame* f, int n, const int* par, std::uint8_t* const* dst) {
@@ -151,6 +162,10 @@ struct vfgfx_writer_s {
         const std::size_t span = static_cast<std::size_t>(h - 1) * stride + static_cast<std::size_t>(w) * 4;
         DeviceScope dev(device);
         if (cuda_store) {
+            if (f->mem == VFGFX_MEM_CUDA) {
+                const int e = wait_caller_frame();
+                if (e) return e;
+            }
             const std::uint8_t* src = static_cast<const std::uint8_t*>(f->rgba);
             if (f->mem == VFGFX_MEM_HOST) {
                 if ((stride & 3u)) return fail(VFGFX_ERR_GEOMETRY, "stride turi būti kartotinis 4 B (cuda-linear saugykla)");
@@ -187,6 +202,7 @@ struct vfgfx_writer_s {
                 s_conv = nullptr;
                 return fail(VFGFX_ERR_CUDA, "cudaStreamCreate (CUDA kadro atsisiuntimui)");
             }
+            if (const int we = wait_caller_frame()) return we;
             if (h_stage.size() < span) h_stage.resize(span);
             cudaError_t e = cudaMemcpyAsync(h_stage.data(), f->rgba, span, cudaMemcpyDeviceToHost, s_conv);
             if (e == cudaSuccess) e = cudaStreamSynchronize(s_conv);
@@ -519,6 +535,11 @@ int vfgfx_stop_pacing(vfgfx_writer w) {
     return guarded(w, [&] { return stop_pacing_impl(w); });
 }
 uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
+int vfgfx_set_caller_synced(vfgfx_writer w, int synced) {
+    if (!w) return VFGFX_ERR_INVALID_ARG;
+    w->caller_synced.store(synced != 0);
+    return 0;
+}
 
 const char* vfgfx_last_error(vfgfx_writer w) {
     // Rodyklė — thread_local kopija: galioja iki kito vfgfx_last_error iškvietimo TOJE PAČIOJE gijoje.
