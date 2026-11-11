@@ -22,8 +22,9 @@
  * raidžių dydis nesvarbus, rodyklė ir stride — kartotiniai 4 B.
  *
  * CUDA kadro tvarka: prieš vfgfx_write / vfgfx_submit kviečiantysis privalo būti BAIGĘS rašyti į f->rgba (pvz. cudaStreamSynchronize
- * arba cudaDeviceSynchronize); šaltinio kernel'ų biblioteka nelaukia. Iškvietimas sinchroninis: grįžus, f->rgba buferį
- * (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
+ * arba cudaDeviceSynchronize); šaltinio kernel'ų biblioteka nelaukia. Tai galioja ir „sinchroniniam“ cudaMemcpy H2D iš
+ * pageable atminties: jis gali grįžti prieš DMA pabaigą, todėl po jo — cudaStreamSynchronize(0). Iškvietimas sinchroninis:
+ * grįžus, f->rgba buferį (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
  *
  * Ritmo laikas: vfgfx_start_pacing(offset_ns) — grain indeksas i commit'inamas laiku T(i) + offset_ns, kur T(i) — indekso
  * pradžios TAI laikas (50/1). offset_ns > 0 = vėliau, < 0 = anksčiau (iš anksto). Pirmas indeksas — pirmas, kurio laikas

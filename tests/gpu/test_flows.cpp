@@ -3,15 +3,18 @@
 // flows.cpp testai ant tikro MXL: v210a plokštumų išdėstymas (host ir cuda-linear), check_layout atmetimai, grainRate 50/1
 // visada (R9) VideoOut ir VideoIn. Host dalis nereikalauja GPU; cuda-linear dalis be GPU praleidžiama (SKIP).
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <cuda_runtime_api.h>
 #include <mxl/flow.h>
 #include <mxl/mxl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -199,4 +202,38 @@ TEST_CASE("flows: VideoIn grainRate 50/1 visada, v210a rastras iš aprašo (R9)"
         in.release(d.inst);
         mxlReleaseFlowWriter(d.inst, w);
     }
+}
+
+// Regresija (capacity G, N >= 2): cudaMemcpy H2D iš pageable atminties gali grįžti prieš DMA pabaigą (CUDA „API
+// synchronization behavior“), o libvramflow-gfx kadrą skaito savo non-blocking srautu (kitas cudart, jokios tvarkos su
+// legacy default stream) — gfxgen pirmas (lyginis) laukas buvo konvertuojamas iš dalinai įkelto kadro. upload_h2d turi
+// grąžinti tik baigus: iškart po jo kitas non-blocking srautas privalo matyti VISUS naujus baitus.
+#include <vector>
+
+#include "func/cuda_upload.hpp"
+
+TEST_CASE("upload_h2d: grįžus duomenys matomi kitam non-blocking srautui (pageable šaltinis)", "[flows][upload]") {
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio");
+    // logo RGBA kadras (384x216x4, kaip gfxgen) ir 4 MiB: be sinchronizavimo išmatuota ~50 % / ~90 % iteracijų neatitinka
+    const std::size_t kBytes = GENERATE(std::size_t{384 * 216 * 4}, std::size_t{4} << 20);
+    std::vector<std::uint8_t> host(kBytes), back(kBytes);
+    void *dev = nullptr, *dev2 = nullptr;
+    REQUIRE(cudaMalloc(&dev, kBytes) == cudaSuccess);
+    REQUIRE(cudaMalloc(&dev2, kBytes) == cudaSuccess);
+    cudaStream_t s{};
+    REQUIRE(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess);
+    int bad = 0;
+    for (int it = 1; it <= 200; ++it) {
+        std::fill(host.begin(), host.end(), static_cast<std::uint8_t>(it));
+        REQUIRE(mxlv::func::upload_h2d(dev, host.data(), kBytes) == cudaSuccess);
+        REQUIRE(cudaMemcpyAsync(dev2, dev, kBytes, cudaMemcpyDeviceToDevice, s) == cudaSuccess);
+        REQUIRE(cudaMemcpyAsync(back.data(), dev2, kBytes, cudaMemcpyDeviceToHost, s) == cudaSuccess);
+        REQUIRE(cudaStreamSynchronize(s) == cudaSuccess);
+        if (std::memcmp(back.data(), host.data(), kBytes) != 0) ++bad;
+    }
+    INFO("baitų " << kBytes << ", neatitikusių iteracijų " << bad << " iš 200");
+    CHECK(bad == 0);
+    cudaStreamDestroy(s);
+    cudaFree(dev);
+    cudaFree(dev2);
 }

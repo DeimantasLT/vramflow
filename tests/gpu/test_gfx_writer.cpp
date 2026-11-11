@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -136,6 +137,7 @@ struct Frame {
         if (cuda_mem) {
             REQUIRE(cudaMalloc(&dev, host.size()) == cudaSuccess);
             REQUIRE(cudaMemcpy(dev, host.data(), host.size(), cudaMemcpyHostToDevice) == cudaSuccess);
+            REQUIRE(cudaStreamSynchronize(nullptr) == cudaSuccess);  // pageable H2D gali grįžti prieš DMA pabaigą (gfx.h)
             f.rgba = dev;
         } else {
             f.rgba = host.data();
@@ -624,4 +626,57 @@ TEST_CASE("gfx_writer: ritmo gijos commit klaida eina į ritmo klaidos lauką, n
     CHECK(std::string(vfgfx_last_error(w)) == caller);  // ritmo klaida kviečiančiosios nepakeitė
     CHECK(gi::pacing_error(w).find("CommitGrain") != std::string::npos);
     vfgfx_writer_destroy(w, d.inst);
+}
+
+// Apsauga (capacity G, N >= 2 tyrimas): keli cuda-linear rašytojai viename procese, ritmo režimas, kaip gfxgen — visi sukuriami,
+// kiekvienam submit'inamas CUDA kadras (iškart atlaisvinamas), tada paleidžiamos visos ritmo gijos. Kiekvieno rašytojo ABU
+// paritetai turi būti == ref (bibliotekos būsena per rašytoją; capacity G N >= 2 klaidos šaltinis buvo gfxgen įkėlimas).
+TEST_CASE("gfx_writer: keli cuda-linear rašytojai viename procese, ritmas — visų paritetai == ref", "[gfx_writer][mxl][multi]") {
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio");
+    constexpr int kW = 3;
+    const gfx::Raster r{384, 216, true, true};
+    Domain d(14);
+    std::vector<FlowId> fid(kW);
+    std::vector<vfgfx_writer> w(kW, nullptr);
+    for (int k = 0; k < kW; ++k)
+        REQUIRE(vfgfx_writer_create(d.inst, def(fid[k].id, r.w, r.h, true).c_str(), storage_opts(true).c_str(), &w[k]) == 0);
+    std::vector<std::vector<std::uint8_t>> want[2];
+    std::vector<std::unique_ptr<Recorder>> rec;
+    for (int k = 0; k < kW; ++k) {
+        rec.push_back(std::make_unique<Recorder>());
+        gi::PacingHooks hk;
+        Recorder* rp = rec.back().get();
+        hk.on_commit = [rp](std::uint64_t i) { rp->add(i); };
+        REQUIRE(gi::set_pacing_hooks(w[k], hk) == 0);
+        auto f = std::make_unique<Frame>(r.w, r.h, 100 + k, (k & 1) ? VFGFX_ALPHA_PREMULTIPLIED : VFGFX_ALPHA_STRAIGHT, true, 0);
+        want[0].push_back(f->ref(r, 0));
+        want[1].push_back(f->ref(r, 1));
+        REQUIRE(vfgfx_submit(w[k], &f->f) == 0);
+    }  // kadrai atlaisvinti (biblioteka jų neišsaugo)
+    for (int k = 0; k < kW; ++k) REQUIRE(vfgfx_start_pacing(w[k], 0) == 0);
+    std::vector<std::unique_ptr<Checker>> chk;
+    for (int k = 0; k < kW; ++k) chk.push_back(std::make_unique<Checker>(d.inst, fid[k].id, r));
+    std::vector<std::size_t> verified(kW, 0), ok(kW, 0), bad_even(kW, 0), bad_odd(kW, 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < 500ms) {
+        for (int k = 0; k < kW; ++k) {
+            const auto snap = rec[k]->snapshot();
+            for (; verified[k] < snap.size(); ++verified[k]) {
+                const std::uint64_t i = snap[verified[k]];
+                bool present = false;
+                if (chk[k]->matches(i, want[i & 1][k], &present)) ++ok[k];
+                else if (present) ++((i & 1) ? bad_odd : bad_even)[k];
+            }
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    for (int k = 0; k < kW; ++k) vfgfx_stop_pacing(w[k]);
+    for (int k = 0; k < kW; ++k) {
+        INFO("rašytojas " << k);
+        CHECK(ok[k] >= 15);
+        CHECK(bad_even[k] == 0);
+        CHECK(bad_odd[k] == 0);
+    }
+    chk.clear();
+    for (int k = 0; k < kW; ++k) vfgfx_writer_destroy(w[k], d.inst);
 }

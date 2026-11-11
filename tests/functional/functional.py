@@ -263,7 +263,7 @@ def fgfx1(out):
                           + (f" nerasti={bad}" if bad else "")))
     return res
 
-# --- composite (alfa kompozitorius, užduotis 8): fcomp1 / fcomp2 [PF-3] / fcomp3 / fcomp4 (verify) / fcomp5 -----------------------------------
+# --- composite (alfa kompozitorius, užduotis 8): fcomp1 / fcomp2 [PF-3] / fcomp3 / fcomp4 (verify) / fcomp5 / fcomp6 -------------------------------
 # Variantai C (cpu+host), H (gpu+host), G (gpu+cuda-linear); aplinka FCOMP_VARIANTS=C,G apriboja.
 COMP_VARIANTS = [("C", "cpu", "host"), ("H", "gpu", "host"), ("G", "gpu", "cuda-linear")]
 
@@ -604,6 +604,51 @@ def fcli1(out):
     return res
 
 
+def fcomp6(out):
+    """verify --mode composite su N = 8 išėjimų (vienas gfxgen procesas, logo sluoksnis), C / H / G, pace / manual. Regresija:
+    capacity G N >= 2 — gfxgen cudaMemcpy H2D (pageable) grįždavo prieš DMA pabaigą, biblioteka konvertuodavo dalinai įkeltą
+    kadrą → n >= 1 lyginiai laukai logo srityje neteisingi. Kiekvienas flow: patikrinta >= MIN ir mismatch_fields == 0."""
+    res = []
+    N, K, DUR = 8, 1, 6  # be pataisos išmatuota: N = 4 klaida pagaunama ~1 iš 4 paleidimų, N = 8 — dažniau (ctest [upload] — deterministiškai)
+    MIN_SAMPLES = 10  # vienam flow: 6 s, --every 5 → ~60
+    xy = ["--layer-xy", "1488,64"]
+    for tag, impl, storage in comp_variants():
+        for gm in ("pace", "manual"):
+            tid = f"fcomp6[{tag}/{gm}]"
+            sub = f"fcomp6-{tag}-{gm}"
+            d = fresh_domain(sub)
+            v = vcommon(impl, storage)
+            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", 80, *v)
+            x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo", "--mode", gm, "--duration", 80, *v)
+            ids = [role_flow_id(1, n) for n in range(N)] + [role_flow_id(5, n * 8) for n in range(N)]
+            c = va = None
+            try:
+                if not wait_flows(d, ids):
+                    res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                    continue
+                c = FProc(out, sub, "composite", d, "--flows", N, "--layers", K, *xy, "--opacity", "1.0", "--base", "gen",
+                          "--out-format", "v210", "--deadline-ms", COMP_DEADLINE_MS, "--duration", DUR + 14, "--warmup", 2, *v)
+                if not wait_flows(d, [role_flow_id(6, n) for n in range(N)], 20):
+                    res.append(result(tid, "FAIL", why="composite išėjimo flow'ai neatsirado"))
+                    continue
+                va = FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", K, "--layer-geom", "logo",
+                           "--gfx-mode", gm, "--base", "gen", "--out-format", "v210", "--every", 5, "--duration", DUR, "--warmup", 1,
+                           *xy, "--opacity", "1.0", *v)
+                ra = va.wait(timeout=DUR + 60)
+            finally:
+                for pr in (va, c, x, g):
+                    if pr is not None:
+                        pr.term()
+            f = va.out / "summary-verify-composite.json" if va is not None else None
+            sa = json.loads(f.read_text()) if f is not None and f.exists() else None
+            flows = (sa or {}).get("flows") or []
+            per = [(fl.get("samples", 0), fl.get("mismatch_fields", 0)) for fl in flows]
+            ok = (sa is not None and len(per) == N and all(sm >= MIN_SAMPLES and mm == 0 for sm, mm in per)
+                  and (sa.get("proc") or {}).get("verification_errors", 1) == 0)
+            res.append(result(tid, "PASS" if ok else "FAIL", why=f"exit {ra} (samples, mismatch_fields) per flow={per}", summary=sa))
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
@@ -614,7 +659,8 @@ def main():
     out.mkdir(parents=True)
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
-             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out), "fcli1": lambda: fcli1(out)}
+             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
+             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):

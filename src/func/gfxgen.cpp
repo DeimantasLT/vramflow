@@ -15,7 +15,8 @@
 //
 // Kadro atmintis (efektyvumas, žr. gfx.h): cuda-linear saugyklai (impl gpu) kadras kartą įkeliamas į GPU (H2D) ir į biblioteką
 // perduodamas kaip VFGFX_MEM_CUDA — manual režime tas pats įkeltas kadras naudojamas abiem laukams, todėl H2D mokama kartą
-// per kadrą, ne per lauką. host saugyklai (cpu arba gpu+host) kadras perduodamas kaip VFGFX_MEM_HOST (konvertuoja CPU).
+// per kadrą, ne per lauką. Įkėlimas — upload_h2d (grįžta tik baigus DMA: biblioteka kadrą skaito savo srautu, cuda_upload.hpp).
+// host saugyklai (cpu arba gpu+host) kadras perduodamas kaip VFGFX_MEM_HOST (konvertuoja CPU).
 // Sluoksnio geometrija (--layer-geom): logo = 384×216, full = 1920×1080 arba WxH; neišvardintiems k: k = 0 logo, kiti full.
 // Nelyginis k siunčiamas kaip premultiplied, lyginis — straight (kaip gfx_content).
 #include <cuda_runtime_api.h>
@@ -30,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "func/cuda_upload.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "gfx/gfx_content.hpp"
@@ -156,7 +158,7 @@ int run_gfxgen(const Opts& o) {
         });
         if (upload)
             for (auto& s : src)
-                if (cudaMemcpy(s.d[slot], s.h[slot].data(), s.bytes(), cudaMemcpyHostToDevice) != cudaSuccess) return false;
+                if (upload_h2d(s.d[slot], s.h[slot].data(), s.bytes()) != cudaSuccess) return false;
         return true;
     };
     auto count_err = [&](std::size_t i, int c) {
@@ -172,7 +174,7 @@ int run_gfxgen(const Opts& o) {
         for (std::size_t i = 0; i < src.size() && !rc; ++i) {
             Src& s = src[i];
             vramflow::gfx::gfx_content(o.run_seed, s.n, s.k, 0, s.r.w, s.r.h, s.h[0].data());
-            if (upload && cudaMemcpy(s.d[0], s.h[0].data(), s.bytes(), cudaMemcpyHostToDevice) != cudaSuccess) { st.fatal = "cudaMemcpy"; rc = 2; break; }
+            if (upload && upload_h2d(s.d[0], s.h[0].data(), s.bytes()) != cudaSuccess) { st.fatal = "cudaMemcpy"; rc = 2; break; }
             const vfgfx_frame f = s.view(0, upload);
             const int c = vfgfx_submit(s.w, &f);
             if (c) { st.fatal = "submit: " + std::to_string(c) + " " + vfgfx_last_error(s.w); rc = 2; break; }
