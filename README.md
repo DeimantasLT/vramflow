@@ -297,24 +297,50 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--device-uuid GPU-…` | GPU to use (default: device 0) |
 | `--duration S`, `--warmup S` | Run time; warm-up seconds are left out of the statistics |
 | `--out DIR` | Where `summary-<command>.json` is written |
+| `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 
 ### Commands
 
 | Command | Input → output | Main options |
 |---|---|---|
-| `gen` | — → N video (+ audio) flows, 1080i50 v210, moving test pattern | `--complexity 0–3`, `--audio` |
+| `gen` | — → N video (+ audio) flows, v210 in `--format` (default 1080i50), moving test pattern | `--complexity 0–3`, `--audio` |
 | `logo` | N video flows → N video flows with a logo | `--logo builtin\|file.png`, `--logo-x`, `--logo-y`, `--deadline-ms` |
 | `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software) | `--port-base`, `--playout-frames` |
 | `enc` | N video (+ audio) flows → H.264 + AAC MPEG-TS over UDP (NVENC or x264) | `--encoder nvenc\|x264`, `--vbitrate`, `--abitrate`, `--port-base` |
 | `gfxgen` | — → N × K synthetic graphics flows (`v210a`) | `--layers K`, `--layer-geom logo,full,…\|WxH`, `--mode pace\|manual` |
 | `composite` | base video + K graphics flows → `v210` or `v210a` | `--layers`, `--layer-xy X,Y` (×K), `--opacity 0–1` (×K), `--base gen\|none`, `--out-format`, `--layer-flow K:UUID` |
 | `verify` | checks the output of `gen`, `logo`, `dec` or `composite` against the CPU reference | `--mode`, `--every N` (check every N-th field) |
-| `clip`, `ref-crc` | helpers for the decode test clip | — |
+| `clip`, `ref-crc` | helpers for the decode test clip | `--format` |
+| `split-raw` | raw NV12 frames → v210 frames with the reference (chroma PSNR tool) | `--format`, `--chroma frame\|field` |
 
 `composite --base none --out-format v210a` builds a graphics-only layer; `--layer-flow K:UUID` takes another flow
 (for example another compositor's output) as layer K, so compositors can be chained. The base flow is `flow_id(--in-role, n)`; a
 `v210a` (or other) base flow produced by another tool can be selected with `--in-role` / `--flow-base`. Interlaced inputs must be
 `interlaced_tff`; `interlaced_bff` is rejected.
+
+### Formats
+
+Every flow has an explicit format: raster, scan and frame rate (`--format`, the same value for every function in a chain).
+
+| Format | Grain | Grain rate | Grain size (v210) |
+|---|---|---|---|
+| `1080i50` (default), `1080i59.94` | field (top field first; even index = top field) | 50/1, 60000/1001 | 2 764 800 B |
+| `1080p25`, `1080p50`, `1080p29.97`, `1080p59.94` | frame | 25/1, 50/1, 30000/1001, 60000/1001 | 5 529 600 B |
+| `720p25`, `720p50`, `720p29.97`, `720p59.94` | frame | as above | 2 488 320 B |
+| `2160p25`, `2160p50`, `2160p29.97`, `2160p59.94` | frame | as above | 22 118 400 B |
+
+- In the MXL flow definition `grain_rate` is the *frame* rate (25/1 for 1080i50); MXL runs interlaced flows at twice that.
+  A reader checks that the flow's grain rate matches the expected format and names both rates if not.
+- Progressive 4:2:0 → 4:2:2 uses frame chroma (type-0 siting, `split_nv12_progressive`); interlaced uses field chroma.
+  `dec` picks the path per decoded frame from its interlaced flag, so a progressive frame in an interlaced flow is still
+  converted with frame chroma. Measured against FFmpeg (`tests/perf/chroma_psnr.py`): U/V ≥ 60 dB, luma identical.
+- Audio samples per grain are exact integers: `[sample_begin(i), sample_begin(i + 1))` — 960 per 1080i50 field,
+  1920 per 1080p25 frame, 800 / 801 at 59.94.
+- Tested end to end: 1080i50, 1080p25 and 1080p50 for `gen`, `logo`, `verify`, `enc`, `dec`; `gfxgen` / `composite` at
+  50/1 grain rate only (1080i50, 1080p50) — `libvramflow-gfx` still accepts only 50/1 (R9). Other listed formats pass the unit
+  and kernel tests (720p, 2160p, 59.94) but have no end-to-end test yet. BFF and other rates are rejected with a message.
+- The MXL ring keeps 200 ms by default (10 fields of 1080i50, only 5 frames of 1080p25); set
+  `urn:x-mxl:option:history_duration/v1.0` in the domain's `options.json` for a deeper ring.
 
 ### Flow IDs
 
