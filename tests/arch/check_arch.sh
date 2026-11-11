@@ -5,8 +5,8 @@
 # Naudojimas: check_arch.sh <binaras> <cuobjdump>. Išėjimo kodas 77 = praleista (nėra GPU ar įrankių).
 set -euo pipefail
 bin="$1"; cuobjdump="$2"
-smi="$(command -v nvidia-smi || true)"
-[[ -z "$smi" && -x /usr/lib/wsl/lib/nvidia-smi ]] && smi=/usr/lib/wsl/lib/nvidia-smi
+source "$(dirname "${BASH_SOURCE[0]}")/../../scripts/linux/lib/tools.sh"
+smi="$(find_nvidia_smi || true)"
 [[ -n "$smi" && -x "$cuobjdump" ]] || { echo "SKIP: nėra nvidia-smi arba cuobjdump"; exit 77; }
 cc="$("$smi" --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' .')"
 [[ -n "$cc" ]] || { echo "SKIP: GPU nerasta"; exit 77; }

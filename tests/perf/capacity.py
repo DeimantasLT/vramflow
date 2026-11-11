@@ -25,6 +25,7 @@ import sys
 import time
 
 import domain  # tests/perf/domain.py
+import gpuinfo  # tests/perf/gpuinfo.py
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
@@ -43,7 +44,7 @@ def cpu_s(pid):
 
 def vram_mb():
     try:
-        out = subprocess.run(["/usr/lib/wsl/lib/nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+        out = subprocess.run([gpuinfo.nvidia_smi(), "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
                              capture_output=True, text=True, timeout=10).stdout
         return int(out.strip().splitlines()[0])
     except Exception:
@@ -66,7 +67,7 @@ def start_gpu_probe(path):
     """GPU apkrova matavimo lange, 1 Hz: vienas ilgai veikiantis nvidia-smi (pats zondas beveik nekrauna CPU).
     util_gpu — SM užimtumo laiko dalis (NVML), util_enc/util_dec — NVENC/NVDEC variklių užimtumas."""
     try:
-        return subprocess.Popen(["/usr/lib/wsl/lib/nvidia-smi" if os.path.exists("/usr/lib/wsl/lib/nvidia-smi") else "nvidia-smi",
+        return subprocess.Popen([gpuinfo.nvidia_smi(),
                                  "--query-gpu=utilization.gpu,utilization.memory,utilization.encoder,utilization.decoder,"
                                  "power.draw,clocks.sm,memory.used", "--format=csv,noheader,nounits", "-lms", "1000"],
                                 stdout=open(path, "w"), stderr=subprocess.DEVNULL)

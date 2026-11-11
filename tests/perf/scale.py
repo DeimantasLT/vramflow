@@ -20,6 +20,7 @@ import subprocess
 import time
 
 import domain  # tests/perf/domain.py
+import gpuinfo  # tests/perf/gpuinfo.py
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
@@ -76,7 +77,7 @@ def run_level(out, storage, n, seconds, warm, history_ms, rate_num=50):
     common = ["--domain", str(dom), "--storage", storage, "--flows", str(n), "--warmup", str(warm),
               "--rate-num", str(rate_num), "--rate-den", "1"]
     with open(d / "writer.err", "w") as we, open(d / "reader.err", "w") as re_, open(d / "nvidia-smi.csv", "w") as sm:
-        smi = subprocess.Popen(["/usr/lib/wsl/lib/nvidia-smi", "--query-gpu=timestamp,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm",
+        smi = subprocess.Popen([gpuinfo.nvidia_smi(), "--query-gpu=timestamp,memory.used,memory.total,temperature.gpu,power.draw,clocks.sm",
                                 "--format=csv", "-l", "5"], stdout=sm, stderr=subprocess.DEVNULL)
         w = subprocess.Popen([BIN, "writer", *common, "--duration", str(seconds + 8), "--gc-before-create", "--out", str(d)],
                              stderr=we, env=ENV)

@@ -74,6 +74,8 @@ if(MXLV_BUILD_TESTS)
     add_test(NAME build_arch COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/check_arch.sh $<TARGET_FILE:mxlv-gpu-tests> ${MXLV_CUOBJDUMP})
     set_tests_properties(build_arch PROPERTIES SKIP_RETURN_CODE 77)
   endif()
+  # scripts/linux/lib/tools.sh ir scripts/wsl/ nukreipimai (GPU nereikia)
+  add_test(NAME scripts_tools COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/test_tools.sh ${CMAKE_SOURCE_DIR})
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
   add_executable(vramflow-v210a-gpu-tests tests/gpu/test_v210a_cuda_linear.cpp)

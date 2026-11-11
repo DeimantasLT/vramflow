@@ -10,37 +10,38 @@ fail=0
 check() { # aprašas, tikėtina, gauta
   if [[ "$2" == "$3" ]]; then echo "OK   $1"; else echo "FAIL $1: tikėtasi „$2“, gauta „$3“"; fail=1; fi
 }
+ENVB="$(command -v env)"; BASH_BIN="$(command -v bash)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 BIN="$TMP/bin"; mkdir -p "$BIN"
 for t in cc c++ gcc g++; do printf '#!/bin/sh\nexit 0\n' > "$BIN/$t"; chmod +x "$BIN/$t"; done
 
 # 1) nustatyti kintamieji gerbiami
-r="$(env -i PATH="$BIN" CC_BIN=gcc CXX_BIN=g++ bash -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN $CUDA_HOST_CXX"' _ "$TOOLS")"
+r="$("$ENVB" -i PATH="$BIN" CC_BIN=gcc CXX_BIN=g++ "$BASH_BIN" -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN $CUDA_HOST_CXX"' _ "$TOOLS")"
 check "pick_compiler gerbia CC_BIN/CXX_BIN" "gcc g++ g++" "$r"
 # 2) be kintamųjų ir be clang-19 — cc / c++
-r="$(env -i PATH="$BIN" bash -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN $CUDA_HOST_CXX"' _ "$TOOLS")"
+r="$("$ENVB" -i PATH="$BIN" "$BASH_BIN" -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN $CUDA_HOST_CXX"' _ "$TOOLS")"
 check "pick_compiler be clang-19 -> cc/c++" "cc c++ g++" "$r"
 # 3) yra clang-19 — jis pasirenkamas
 for t in clang-19 clang++-19; do cp "$BIN/cc" "$BIN/$t"; done
-r="$(env -i PATH="$BIN" bash -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN"' _ "$TOOLS")"
+r="$("$ENVB" -i PATH="$BIN" "$BASH_BIN" -c 'source "$1"; pick_compiler; echo "$CC_BIN $CXX_BIN"' _ "$TOOLS")"
 check "pick_compiler su clang-19" "clang-19 clang++-19" "$r"
 rm -f "$BIN/clang-19" "$BIN/clang++-19"
 # 4) nėra jokio kompiliatoriaus — kodas != 0 ir pranešimas
 rm -f "$BIN/cc" "$BIN/c++"
-msg="$(env -i PATH="$BIN" bash -c 'source "$1"; pick_compiler' _ "$TOOLS" 2>&1)"; rc=$?
+msg="$("$ENVB" -i PATH="$BIN" "$BASH_BIN" -c 'source "$1"; pick_compiler' _ "$TOOLS" 2>&1)"; rc=$?
 check "pick_compiler be kompiliatoriaus -> kodas 1" "1" "$rc"
 [[ "$msg" == *pick_compiler* ]] && echo "OK   pranešimas aiškus" || { echo "FAIL nėra pranešimo"; fail=1; }
 
 # 5) find_nvidia_smi: tuščias PATH ir nėra atsarginio kelio -> 1
-out="$(env -i PATH= VRAMFLOW_WSL_NVIDIA_SMI="$TMP/nera" bash -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"; rc=$?
+out="$("$ENVB" -i PATH= VRAMFLOW_WSL_NVIDIA_SMI="$TMP/nera" "$BASH_BIN" -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"; rc=$?
 check "find_nvidia_smi nieko nerasta -> kodas 1" "1" "$rc"; check "find_nvidia_smi nieko neišveda" "" "$out"
 # 6) atsarginis kelias
 printf '#!/bin/sh\nexit 0\n' > "$TMP/smi"; chmod +x "$TMP/smi"
-out="$(env -i PATH= VRAMFLOW_WSL_NVIDIA_SMI="$TMP/smi" bash -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"; rc=$?
+out="$("$ENVB" -i PATH= VRAMFLOW_WSL_NVIDIA_SMI="$TMP/smi" "$BASH_BIN" -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"; rc=$?
 check "find_nvidia_smi atsarginis kelias" "0 $TMP/smi" "$rc $out"
 # 7) PATH turi pirmumą prieš atsarginį
 cp "$TMP/smi" "$BIN/nvidia-smi"
-out="$(env -i PATH="$BIN" VRAMFLOW_WSL_NVIDIA_SMI="$TMP/smi" bash -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"
+out="$("$ENVB" -i PATH="$BIN" VRAMFLOW_WSL_NVIDIA_SMI="$TMP/smi" "$BASH_BIN" -c 'source "$1"; find_nvidia_smi' _ "$TOOLS")"
 check "find_nvidia_smi pirma PATH" "$BIN/nvidia-smi" "$out"
 
 # 8) scripts/wsl/*.sh nukreipimai
