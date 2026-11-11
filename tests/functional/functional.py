@@ -263,7 +263,7 @@ def fgfx1(out):
                           + (f" nerasti={bad}" if bad else "")))
     return res
 
-# --- composite (alfa kompozitorius, užduotis 8): fcomp1 / fcomp2 [PF-3] / fcomp3 / fcomp5 -----------------------------------
+# --- composite (alfa kompozitorius, užduotis 8): fcomp1 / fcomp2 [PF-3] / fcomp3 / fcomp4 (verify) / fcomp5 -----------------------------------
 # Variantai C (cpu+host), H (gpu+host), G (gpu+cuda-linear); aplinka FCOMP_VARIANTS=C,G apriboja.
 COMP_VARIANTS = [("C", "cpu", "host"), ("H", "gpu", "host"), ("G", "gpu", "cuda-linear")]
 
@@ -487,6 +487,59 @@ def fcomp3(out):
     return res
 
 
+def fcomp4(out):
+    """verify --mode composite (CPU etalonas): pilna grandinė gen + gfxgen(manual / pace) + composite + verify --every 5, 10 s,
+    C / H / G. Tikrasis verify: verification_errors == 0 ir patikrintų > 0; tyčinis neatitikimas (kita --opacity) —
+    verification_errors > 0 (įrodo, kad patikra veikia). Abu verify procesai skaito tą patį composite išėjimą."""
+    res = []
+    N, K, DUR = 1, 2, 10
+    xy = ["--layer-xy", "1488,64", "--layer-xy", "0,0"]
+    for tag, impl, storage in comp_variants():
+        for gm, ofmt in (("manual", "v210a"), ("pace", "v210")):
+            tid = f"fcomp4[{tag}/{gm}/{ofmt}]"
+            sub = f"fcomp4-{tag}-{gm}"
+            d = fresh_domain(sub)
+            v = vcommon(impl, storage)
+            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", 80, *v)
+            x = FProc(out, sub, "gfxgen", d, "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--mode", gm,
+                      "--duration", 80, *v)
+            ids = [role_flow_id(1, n) for n in range(N)] + [role_flow_id(5, n * 8 + k) for n in range(N) for k in range(K)]
+            c = va = vb = None
+            try:
+                if not wait_flows(d, ids):
+                    res.append(result(tid, "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                    continue
+                c = FProc(out, sub, "composite", d, "--flows", N, "--layers", K, *xy, "--opacity", "0.7", "--opacity", "0.5",
+                          "--base", "gen", "--out-format", ofmt, "--deadline-ms", COMP_DEADLINE_MS, "--duration", DUR + 14,
+                          "--warmup", 2, *v)
+                if not wait_flows(d, [role_flow_id(6, n) for n in range(N)], 20):
+                    res.append(result(tid, "FAIL", why="composite išėjimo flow'ai neatsirado"))
+                    continue
+                vargs = ["--mode", "composite", "--flows", N, "--layers", K, "--layer-geom", "logo,full", "--gfx-mode", gm,
+                         "--base", "gen", "--out-format", ofmt, "--every", 5, "--duration", DUR, "--warmup", 1, *xy, *v]
+                va = FProc(out, f"{sub}/ok", "verify", d, *vargs, "--opacity", "0.7", "--opacity", "0.5")
+                vb = FProc(out, f"{sub}/bad", "verify", d, *vargs, "--opacity", "0.7", "--opacity", "0.3")
+                ra, rb = va.wait(timeout=DUR + 60), vb.wait(timeout=DUR + 60)
+            finally:
+                for pr in (va, vb, c, x, g):
+                    if pr is not None:
+                        pr.term()
+
+            def vsum(pr):
+                f = pr.out / "summary-verify-composite.json"
+                return json.loads(f.read_text()) if f.exists() else None
+
+            sa, sb = vsum(va), vsum(vb)
+            pa, pb = (sa or {}).get("proc", {}), (sb or {}).get("proc", {})
+            ok = (sa is not None and sb is not None and pa.get("verification_errors", 1) == 0 and pa.get("samples_total", 0) > 0
+                  and pb.get("verification_errors", 0) > 0 and pb.get("samples_total", 0) > 0)
+            res.append(result(tid, "PASS" if ok else "FAIL",
+                              why=f"exit ok={ra} bad={rb} ok.verification_errors={pa.get('verification_errors')} ok.samples={pa.get('samples_total')} "
+                                  f"ok.capacity_errors={pa.get('capacity_errors')} bad.verification_errors={pb.get('verification_errors')} "
+                                  f"expect_ms={((sa or {}).get('hist') or {}).get('expect_ms')}", ok=sa, bad=sb))
+    return res
+
+
 def fcomp5(out):
     """Grandinė: composite(--base none, v210a) išėjimas = sluoksnis antram composite su gen baze (--layer-flow)."""
     res = []
@@ -559,7 +612,7 @@ def main():
     out.mkdir(parents=True)
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
-             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp5": lambda: fcomp5(out), "fcli1": lambda: fcli1(out)}
+             "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out), "fcli1": lambda: fcli1(out)}
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):

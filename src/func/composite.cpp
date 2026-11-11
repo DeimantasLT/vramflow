@@ -42,10 +42,15 @@ using gfx::CompositeJob;
 using gfx::Layer;
 using gfx::Raster;
 
+}  // namespace
+
+// Bendra su verify (--mode composite).
 bool parse_xy(const std::string& s, int& x, int& y) {
     int n = 0;
     return std::sscanf(s.c_str(), "%d,%d%n", &x, &y, &n) == 2 && static_cast<std::size_t>(n) == s.size();
 }
+
+namespace {
 
 // "k:UUID" → ids[k]
 bool parse_layer_flows(const Opts& o, std::vector<std::string>& ids, std::string& err) {

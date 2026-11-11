@@ -12,7 +12,7 @@ add_executable(vramflow-func
   src/func/main_func.cpp src/func/func_common.cpp
   src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/dec.cpp
   src/mxlio/common_io.cpp)
-target_link_libraries(vramflow-func PRIVATE mxlv_flows mxlv_threadpool mxlv_media mxlv_media_cpu mxlv_common mxl::mxl vramflow-gfx mxlv_gfx_cpu mxlv_gfx_cuda CLI11::CLI11 Threads::Threads PkgConfig::LIBAV CUDA::cudart_static)
+target_link_libraries(vramflow-func PRIVATE mxlv_flows mxlv_threadpool mxlv_media mxlv_media_cpu mxlv_common mxl::mxl vramflow-gfx mxlv_gfx_cpu mxlv_gfx_cuda mxlv_gfx_ref CLI11::CLI11 Threads::Threads PkgConfig::LIBAV CUDA::cudart_static)
 target_include_directories(vramflow-func PRIVATE ${CMAKE_SOURCE_DIR}/src ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
 set_target_properties(vramflow-func PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
 

@@ -73,7 +73,15 @@ int main(int argc, char** argv) {
     cp->add_option("--read-offset-us", o.read_offset_us);
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
-    v->add_option("--mode", o.mode, "logo | gen | dec");
+    v->add_option("--mode", o.mode, "logo | gen | dec | composite");
+    // --mode composite: tie patys parametrai kaip gfxgen / composite (verify atkuria laukiamą išėjimą CPU etalonu)
+    v->add_option("--layers", o.layers, "composite: sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
+    v->add_option("--layer-geom", o.layer_geom, "composite: kaip gfxgen (logo,full,… arba WxH); turi sutapti su gfxgen");
+    v->add_option("--gfx-mode", o.gfx_mode, "composite: gfxgen režimas pace | manual")->check(CLI::IsMember({"pace", "manual"}));
+    v->add_option("--layer-xy", o.layer_xy, "composite: kaip composite (K kartų)");
+    v->add_option("--opacity", o.opacity, "composite: kaip composite (K kartų)");
+    v->add_option("--base", o.base, "composite: gen | none")->check(CLI::IsMember({"gen", "none"}));
+    v->add_option("--out-format", o.out_format, "composite: v210 | v210a")->check(CLI::IsMember({"v210", "v210a"}));
     v->add_option("--every", o.every);
     v->add_option("--lag-fields", o.lag_fields);
     v->add_option("--ref", o.ref_crc);

@@ -5,17 +5,28 @@
 //  * kas K-tą lauką (išdėstyta per flow'us): D2H ir palyginimas su NEPRIKLAUSOMU CPU etalonu, 0 tolerancija:
 //      mode=logo — ref::logo_field(įėjimas) == išėjimas; už logotipo stačiakampio išėjimas == įėjimas bitas į bitą;
 //      mode=gen  — ref::gen_field == laukas;
+//      mode=composite — išėjimo laukas i == ref::composite(gen_field bazė, gfx_content → rgba_to_v210a sluoksniai), CRC32C;
+//                       prielaida: sluoksniai iš gfxgen (--layer-geom, --gfx-mode, --layer-xy, --opacity, --base, --out-format
+//                       kaip composite / gfxgen); grandinės (--layer-flow) nepalaikomos;
 //    abiem — barkodas (indeksas, paritetas, flow) == laukiamas.
 // Lap patikra po D2H: jei writer'is galėjo perrašyti slot'ą kopijavimo metu, imtis atmetama (sample_lapped).
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "common/crc32c.hpp"
 #include "common/index_math.hpp"
+#include "gfx/gfx_content.hpp"
+#include "gfx/gfx_ref.hpp"
 
 #include <map>
 #include "func/flows.hpp"
@@ -25,6 +36,8 @@
 namespace mxlv::func {
 
 bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err);
+bool parse_layer_geoms(const Opts& o, std::vector<vramflow::gfx::Raster>& out, std::string& err);  // gfxgen.cpp
+bool parse_xy(const std::string& s, int& x, int& y);                                                // composite.cpp
 
 namespace {
 bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint32_t>& host) {
@@ -32,6 +45,222 @@ bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint3
     if (v.cuda) return cudaMemcpy(host.data(), p, media::kFieldBytes, cudaMemcpyDeviceToHost) == cudaSuccess;
     std::memcpy(host.data(), p, media::kFieldBytes);
     return true;
+}
+}  // namespace
+
+namespace {
+// Skaitikliai -> exit kodas ir proc santrauka (bendra visiems režimams).
+int summarize(Stats& st) {
+    std::uint64_t verify_err = 0, capacity = 0, samples = 0;
+    for (auto& f : st.flows) {
+        verify_err += f.c["mismatch_fields"] + f.c["outside_diff_fields"] + f.c["marker_bad"] + f.c["cuda_errors"] +
+                      f.c["parity_mismatch"] + f.c["dec_mismatch"] + f.c["dec_mismatch_near_loop"] + f.c["ref_marker_unknown"] +
+                      f.c["expect_failed"];
+        capacity += f.c["missing"] + f.c["too_late"] + f.c["invalid"] + f.c["read_errors"] + f.c["verify_skipped"];
+        samples += f.c["samples"];
+    }
+    st.proc["verification_errors"] = verify_err;
+    st.proc["capacity_errors"] = capacity;
+    st.proc["samples_total"] = samples;
+    if (samples == 0) st.proc["no_samples"] = 1;
+    return verify_err ? 3 : (capacity || samples == 0) ? 4 : 0;
+}
+
+// --mode composite. Laukiamas išėjimas perskaičiuojamas CPU etalonu: bazė ref::gen_field (flow_base + n), sluoksnis k =
+// gfx_content(run_seed, flow_base + n, k, kadras) -> ref::rgba_to_v210a (nelyginis k - premultiplied, kaip gfxgen) ->
+// ref::composite. gfxgen kadras: pace - 0; manual - i / 2. Konvertuoti sluoksnių laukai kešuojami pagal (n, k, paritetas,
+// kadras), RGBA kadras - pagal (n, k, kadras), todėl pace režimu po pirmo patikrinimo likusieji kainuoja tik gen_field +
+// ref::composite. Etalono skaičiavimas (dešimtys ms) vyksta darbinėse gijose (flow n -> gija n % W), kad skaitymo gija nenukristų
+// už ring'o: ji tik nukopijuoja faktinį lauką (D2H / memcpy), patikrina lap ir įdeda į eilę. Pilna eilė -> "check_dropped"
+// (informacinis: tikrinta mažiau, bet klaidos nėra). Grąžina nenulinį kodą, jei paleisti nepavyko (st.fatal užpildytas).
+int verify_composite(const Opts& o, Stats& st) {
+    namespace gfx = vramflow::gfx;
+    const std::uint32_t N = o.flows, K = o.layers;
+    const bool has_base = o.base == "gen", manual = o.gfx_mode == "manual", out_alpha = o.out_format == "v210a";
+    if (!has_base && !out_alpha) { st.fatal = "--base none leidžiamas tik su --out-format v210a (R12)"; return 1; }
+    if (o.layer_xy.size() != K) { st.fatal = "--layer-xy turi būti nurodytas lygiai --layers kartų"; return 1; }
+    if (!o.opacity.empty() && o.opacity.size() != K) { st.fatal = "--opacity: arba nė vieno, arba --layers kartų"; return 1; }
+    std::vector<int> lx(K), ly(K);
+    std::vector<float> lop(K, 1.0f);
+    for (std::uint32_t k = 0; k < K; ++k) {
+        if (!parse_xy(o.layer_xy[k], lx[k], ly[k])) { st.fatal = "--layer-xy '" + o.layer_xy[k] + "': tikimasi X,Y"; return 1; }
+        if (!o.opacity.empty()) lop[k] = o.opacity[k];
+    }
+    std::vector<gfx::Raster> geom;
+    std::string err;
+    if (!parse_layer_geoms(o, geom, err)) { st.fatal = err; return 1; }
+    const gfx::Raster base_r = gfx::kHd1080i;
+    const gfx::Raster out_r{base_r.w, base_r.h, base_r.interlaced, out_alpha};
+    const std::size_t out_bytes = gfx::grain_bytes(out_r);
+    auto& stop = stop_flag();
+
+    mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
+    if (!inst) { st.fatal = "mxlCreateInstance"; return 2; }
+    std::vector<VideoIn> out(N);
+    int rc = 0;
+    for (std::uint32_t n = 0; n < N && !rc; ++n)
+        if (!out[n].open(inst, flow_id(kRoleComp, o.flow_base + n), 20000, stop, err, &out_r)) { st.fatal = err; rc = 4; }
+    if (rc) { mxlDestroyInstance(inst); return rc; }
+
+    struct LayerCache {
+        std::uint64_t rgba_frame = ~0ull, grain_frame[2] = {~0ull, ~0ull};
+        std::vector<std::uint8_t> rgba, grain[2];
+    };
+    struct Job {
+        std::uint32_t n;
+        std::uint64_t i;
+        std::vector<std::uint8_t> act;
+    };
+    // Darbinė gija: savo flow'ų (n % W == w) kešas, eilė ir lokalūs skaitikliai (sujungiami po join).
+    struct Worker {
+        std::mutex m;
+        std::condition_variable cv;
+        std::deque<Job> q;
+        bool done = false;
+        std::thread t;
+        std::vector<FlowStats> fs;  // pagal n
+        Histogram expect;
+    };
+    const std::uint32_t W = std::max<std::uint32_t>(1, std::min<std::uint32_t>(N, o.threads > 0 ? static_cast<std::uint32_t>(o.threads) : 4));
+    constexpr std::size_t kMaxQueue = 6;
+    std::vector<std::unique_ptr<Worker>> wk;
+    std::vector<LayerCache> cache(static_cast<std::size_t>(N) * K);
+    std::atomic<int> dumped{0};
+
+    auto check = [&](Worker& w, Job& job, std::vector<std::uint32_t>& base, std::vector<std::uint8_t>& exp, std::vector<gfx::Layer>& lay) {
+        FlowStats& f = w.fs[job.n];
+        const int parity = static_cast<int>(job.i & 1);
+        const std::uint64_t t0 = now_tai();
+        const std::uint64_t fr = manual ? job.i / 2 : 0;
+        if (has_base) media::ref::gen_field({o.run_seed, o.flow_base + job.n, o.complexity}, job.i, base.data());
+        bool ok = true;
+        for (std::uint32_t k = 0; k < K && ok; ++k) {
+            LayerCache& c = cache[static_cast<std::size_t>(job.n) * K + k];
+            const gfx::Raster& g = geom[k];
+            if (c.grain_frame[parity] != fr) {
+                if (c.rgba_frame != fr) {
+                    c.rgba.resize(static_cast<std::size_t>(g.w) * static_cast<std::size_t>(g.h) * 4);
+                    gfx::gfx_content(o.run_seed, o.flow_base + job.n, k, fr, g.w, g.h, c.rgba.data());
+                    c.rgba_frame = fr;
+                }
+                c.grain[parity].resize(gfx::grain_bytes(g));
+                ok = gfx::ref::rgba_to_v210a(c.rgba.data(), g.w, g.h, static_cast<std::size_t>(g.w) * 4,
+                                             (k & 1u) ? gfx::AlphaIn::Premultiplied : gfx::AlphaIn::Straight, g, parity,
+                                             c.grain[parity].data());
+                c.grain_frame[parity] = ok ? fr : ~0ull;
+            }
+            lay[k] = gfx::Layer{c.grain[parity].data(), g, lx[k], ly[k], lop[k]};
+        }
+        ok = ok && gfx::ref::composite(has_base ? reinterpret_cast<const std::uint8_t*>(base.data()) : nullptr, base_r, lay.data(),
+                                       static_cast<int>(K), out_r, parity, exp.data());
+        if (!ok) {  // parametrai nesutampa su etalono sutartimi - patikra neįmanoma; tai klaida, ne tylus praleidimas
+            f.inc("expect_failed");
+            return;
+        }
+        w.expect.add(now_tai() - t0);
+        f.inc("samples");
+        if (crc32c(exp.data(), out_bytes) == crc32c(job.act.data(), out_bytes)) return;
+        std::uint64_t bad = 0;
+        for (std::size_t b = 0; b + 4 <= out_bytes; b += 4)
+            if (std::memcmp(exp.data() + b, job.act.data() + b, 4) != 0) ++bad;
+        f.inc("mismatch_fields");
+        f.inc("mismatch_words", bad);
+        if (dumped.fetch_add(1) < 8) {  // diagnostika: faktinis ir laukiamas grain'as
+            const std::string stem = o.out + "/mismatch_n" + std::to_string(job.n) + "_i" + std::to_string(job.i);
+            for (int x = 0; x < 2; ++x)
+                if (FILE* df = std::fopen((stem + (x ? ".expected." : ".actual.") + (out_alpha ? "v210a" : "v210")).c_str(), "wb")) {
+                    std::fwrite(x ? exp.data() : job.act.data(), 1, out_bytes, df);
+                    std::fclose(df);
+                }
+        }
+    };
+    for (std::uint32_t w = 0; w < W; ++w) {
+        wk.push_back(std::make_unique<Worker>());
+        wk[w]->fs.resize(N);
+    }
+    for (std::uint32_t w = 0; w < W; ++w)
+        wk[w]->t = std::thread([&, w] {
+            Worker& me = *wk[w];
+            std::vector<std::uint32_t> base(media::kFieldWords);
+            std::vector<std::uint8_t> exp(out_bytes);
+            std::vector<gfx::Layer> lay(K);
+            for (;;) {
+                Job job;
+                {
+                    std::unique_lock lk(me.m);
+                    me.cv.wait(lk, [&] { return me.done || !me.q.empty(); });
+                    if (me.q.empty()) return;  // done ir eilė ištuštinta
+                    job = std::move(me.q.front());
+                    me.q.pop_front();
+                }
+                check(me, job, base, exp, lay);
+            }
+        });
+
+    const std::uint32_t gc = out[0].layout.slotCount;
+    const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
+    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + static_cast<std::uint64_t>(o.warmup_s * 50);
+    std::vector<std::uint8_t> act(out_bytes);
+    while (!stop.load() && now_tai() < end_tai) {
+        wait_until(i + o.lag_fields, 0, stop);  // verify sąmoningai atsilieka lag_fields laukų
+        if (stop.load()) break;
+        for (std::uint32_t n = 0; n < N; ++n) {
+            mxlGrainInfo info{};
+            const std::uint32_t* p = nullptr;
+            const mxlStatus s = out[n].get(i, 0, info, p);
+            auto& f = st.flows[n];
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) { f.inc("missing"); continue; }
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
+            if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
+            if (info.flags & MXL_GRAIN_FLAG_INVALID) { f.inc("invalid"); continue; }
+            f.inc("present");
+            if ((i + n) % o.every != 0) continue;
+            Worker& w = *wk[n % W];
+            {
+                std::lock_guard lk(w.m);
+                if (w.q.size() >= kMaxQueue) { f.inc("check_dropped"); continue; }
+            }
+            if (out[n].cuda) {
+                if (cudaMemcpy(act.data(), p, out_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) { f.inc("cuda_errors"); continue; }
+            } else {
+                std::memcpy(act.data(), p, out_bytes);
+            }
+            const std::uint64_t head = out[n].head();
+            if (lapped(std::max(head == MXL_UNDEFINED_INDEX ? 0 : head, mxlGetCurrentIndex(&kFieldRate)), i, gc)) {
+                f.inc("sample_lapped");
+                continue;
+            }
+            {
+                std::lock_guard lk(w.m);
+                w.q.push_back(Job{n, i, act});
+            }
+            w.cv.notify_one();
+        }
+        if (st.first_index == ~0ull) st.first_index = i;
+        st.last_index = i;
+        ++i;
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        if (now_idx > i + gc - 3) {  // atsilikom per daug - praleidžiam (užskaitoma)
+            for (auto& f : st.flows) f.inc("verify_skipped", now_idx - (i + o.lag_fields));
+            i = now_idx - o.lag_fields;
+        }
+    }
+    for (auto& w : wk) {
+        {
+            std::lock_guard lk(w->m);
+            w->done = true;
+        }
+        w->cv.notify_one();
+    }
+    for (auto& w : wk) {
+        w->t.join();
+        st.hist["expect_ms"].merge(w->expect);
+        for (std::uint32_t n = 0; n < N; ++n)
+            for (const auto& [key, v] : w->fs[n].c) st.flows[n].c[key] += v;
+    }
+    for (auto& v : out) v.release(inst);
+    mxlDestroyInstance(inst);
+    return 0;
 }
 }  // namespace
 
@@ -52,6 +281,10 @@ int run_verify(const Opts& o) {
     }
     const bool logo_mode = o.mode == "logo";
     const bool dec_mode = o.mode == "dec";
+    if (o.mode == "composite") {
+        const int rc = verify_composite(o, st);
+        return finish(rc ? rc : summarize(st));
+    }
     if (!logo_mode && !dec_mode && o.mode != "gen") { st.fatal = "nežinomas --mode " + o.mode; return finish(1); }
     // dec: etalonas barkodas → laukų CRC32C iš programinio dekoderio (ref-crc); be --ref tikrinamas tik barkodas
     std::map<std::uint32_t, std::uint32_t> ref_crc;
@@ -193,18 +426,7 @@ int run_verify(const Opts& o) {
     for (auto& v : out) v.release(inst);
     for (auto& v : in) v.release(inst);
     mxlDestroyInstance(inst);
-    std::uint64_t verify_err = 0, capacity = 0, samples = 0;
-    for (auto& f : st.flows) {
-        verify_err += f.c["mismatch_fields"] + f.c["outside_diff_fields"] + f.c["marker_bad"] + f.c["cuda_errors"] +
-                      f.c["parity_mismatch"] + f.c["dec_mismatch"] + f.c["dec_mismatch_near_loop"] + f.c["ref_marker_unknown"];
-        capacity += f.c["missing"] + f.c["too_late"] + f.c["invalid"] + f.c["read_errors"] + f.c["verify_skipped"];
-        samples += f.c["samples"];
-    }
-    st.proc["verification_errors"] = verify_err;
-    st.proc["capacity_errors"] = capacity;
-    st.proc["samples_total"] = samples;
-    if (samples == 0) st.proc["no_samples"] = 1;
-    return finish(verify_err ? 3 : (capacity || samples == 0) ? 4 : 0);
+    return finish(summarize(st));
 }
 
 }  // namespace mxlv::func

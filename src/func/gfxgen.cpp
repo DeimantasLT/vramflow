@@ -42,7 +42,10 @@ using vramflow::gfx::Raster;
 constexpr Raster kLogoGeom{384, 216, true, true};
 constexpr Raster kFullGeom{1920, 1080, true, true};
 
-bool parse_geoms(const Opts& o, std::vector<Raster>& out, std::string& err) {
+}  // namespace
+
+// Bendra su verify (--mode composite): sluoksnių geometrija turi sutapti su gfxgen.
+bool parse_layer_geoms(const Opts& o, std::vector<Raster>& out, std::string& err) {
     std::vector<std::string> toks;
     std::stringstream ss(o.layer_geom);
     for (std::string t; std::getline(ss, t, ',');) toks.push_back(t);
@@ -60,6 +63,8 @@ bool parse_geoms(const Opts& o, std::vector<Raster>& out, std::string& err) {
     }
     return true;
 }
+
+namespace {
 
 // Vienas flow (n, k): rašytojas ir dvi kadrų vietos [0] = dabartinė, [1] = kita (manual prefetch).
 struct Src {
@@ -99,7 +104,7 @@ int run_gfxgen(const Opts& o) {
     };
     std::vector<Raster> geom;
     std::string err;
-    if (!parse_geoms(o, geom, err)) { st.fatal = err; return finish(2); }
+    if (!parse_layer_geoms(o, geom, err)) { st.fatal = err; return finish(2); }
     const bool manual = o.gfx_mode == "manual";
     const bool upload = o.impl != "cpu" && o.storage == "cuda-linear";  // kadras į GPU kartą, perduodamas kaip MEM_CUDA
     int dev = -1;
