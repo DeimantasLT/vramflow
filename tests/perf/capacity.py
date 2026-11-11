@@ -12,6 +12,7 @@ visi procesai exit 0. N* = didžiausias N, kai PASS ir visi mažesni PASS.
   capacity.py <out> --func enc-x264-veryfast --n 1,2,3,4,5,6,8
   capacity.py <out> --func dec --n 1,2,4,8,12,16,24,32 --clip clip.ts --ref ref_crc.json
   capacity.py <out> --func chain --n 1,2,4,6,8,10,12 --clip clip.ts
+  capacity.py <out> --func composite --layers 2 --n 1,2,4,8,16,32 [--out-format v210|v210a]
 """
 import argparse
 import json
@@ -101,6 +102,78 @@ def gpu_stats(path):
     return out
 
 
+# --- composite (N išėjimų × K grafikos sluoksnių) -------------------------------------------------------------------------
+# Sluoksnių geometrija pagal specifikaciją §4.7: K=1 → logo; K=2 → logo,full; K=4 → logo,full,full,full (K=3 — logo,full,full).
+# (geometrija, X,Y kadro koordinatės, nepermatomumas). Pozicijos fiksuotos, kad kampanijos būtų palyginamos.
+COMP_LAYERS = [("logo", "1488,64", 1.0), ("full", "0,0", 0.8), ("full", "0,0", 0.8), ("full", "0,0", 0.8)]
+# Raster aprašai (plotis, aukštis, interlaced): lauko grain'as = h/2 eilučių
+GEOM_WH = {"logo": (384, 216), "full": (1920, 1080)}
+RING_GRAINS = 10  # MXL ring (laukai) vienam flow (išmatuota: logo G ΔVRAM ≈ 27,6 MB/flow = 10 × 2 764 800 B)
+CTX_OVERHEAD_MB = 128  # CUDA konteksto + darbinių buferių atsarga vienam GPU procesui (logo G N=1: ~380 MB / 3 procesai)
+VRAM_CAP_MB = 7168  # R19: ~7 GiB iš 8 GiB kortos (WDDM ir kiti procesai laiko ~0,3–0,5 GB)
+
+
+def comp_layers(k):
+    return COMP_LAYERS[:k]
+
+
+def v210_field_bytes(w, h):
+    return -(-w // 48) * 128 * (h // 2)
+
+
+def key_field_bytes(w, h):
+    return -(-w // 3) * 4 * (h // 2)
+
+
+def comp_budget_mb(a, n):
+    """R19: ring'ų atmintis (MiB) pakopai N: bazė N + sluoksniai N·K + išėjimai N (visų RING_GRAINS grain'ų).
+    Grąžina (sk. aprašas, bendra MiB, GPU procesų skaičius)."""
+    parts = [("bazė (gen) v210 1920x1080i", v210_field_bytes(1920, 1080), n)]
+    for k, (g, _, _) in enumerate(comp_layers(a.layers)):
+        w, h = GEOM_WH[g]
+        parts.append((f"sluoksnis {k} ({g} {w}x{h} v210a)", v210_field_bytes(w, h) + key_field_bytes(w, h), n))
+    ob = v210_field_bytes(1920, 1080) + (key_field_bytes(1920, 1080) if a.out_format == "v210a" else 0)
+    parts.append((f"išėjimas ({a.out_format})", ob, n))
+    ring = sum(b * c for _, b, c in parts) * RING_GRAINS
+    return parts, ring / 2**20
+
+
+def comp_guard(a, n):
+    """Grąžina None (galima vykdyti) arba skip priežasties tekstą su skaičiavimu (R19). G: VRAM; C/H: /dev/shm."""
+    parts, ring_mb = comp_budget_mb(a, n)
+    desc = " + ".join(f"{b}B×{c}" for _, b, c in parts)
+    if a.impl == "gpu" and a.storage == "cuda-linear":
+        procs = 4  # gen, gfxgen, composite, verify (kiekvienas su CUDA kontekstu)
+        tot = ring_mb + procs * CTX_OVERHEAD_MB
+        if tot > VRAM_CAP_MB:
+            return (f"VRAM riba (apskaičiuota): ({desc}) × {RING_GRAINS} grain'ų = {ring_mb:.0f} MiB + {procs}×{CTX_OVERHEAD_MB} "
+                    f"MiB kontekstų = {tot:.0f} MiB > {VRAM_CAP_MB} MiB")
+        return None
+    try:
+        st = os.statvfs("/dev/shm")
+        shm_mb = st.f_blocks * st.f_frsize / 2**20
+    except OSError:
+        return None
+    # C/H: ring'ai /dev/shm (RAM); gfxgen/gen tame pačiame domene — iš viso ~ring_mb
+    if ring_mb > 0.75 * shm_mb:
+        return (f"/dev/shm riba (apskaičiuota): ({desc}) × {RING_GRAINS} = {ring_mb:.0f} MiB > 75 % × {shm_mb:.0f} MiB")
+    return None
+
+
+def wait_flow_defs(domain, ids, timeout):
+    """Laukia, kol visų flow'ų kataloguose atsiranda flow_def.json (gen / gfxgen / composite startas)."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if all((pathlib.Path(domain) / f"{i}.mxl-flow" / "flow_def.json").exists() for i in ids):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def role_flow_id(role, n):
+    return "4d584c47-%04d-4000-8000-%012x" % (role, n)
+
+
 class Procs:
     def __init__(self, d):
         self.d = d
@@ -121,7 +194,7 @@ class Procs:
         # kitaip dekoderis paskutines sekundes liktų be įėjimo ir tai būtų užskaityta kaip underrun.
         codes = {}
         for name, p, cat in self.items:
-            if cat == "sender":
+            if cat in ("sender", "src"):
                 continue
             try:
                 codes[name] = p.wait(timeout=timeout)
@@ -129,7 +202,7 @@ class Procs:
                 p.kill()
                 codes[name] = "killed"
         for name, p, cat in self.items:
-            if cat != "sender":
+            if cat not in ("sender", "src"):
                 continue
             if p.poll() is None:
                 p.send_signal(signal.SIGTERM)
@@ -161,12 +234,18 @@ LOSS_KEYS = ["late_fields", "lapped", "too_late", "in_invalid", "read_errors", "
              "frame_alloc_errors", "audio_write_errors"]
 
 
+def func_tag(a):
+    """Failų/katalogų žyma: composite — su sluoksnių skaičiumi (kampanijos K ∈ {1,2,4} nesimaišo)."""
+    return f"{a.func}-k{a.layers}" if a.func == "composite" else a.func
+
+
 def run_level(a, n):
     variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
-    d = pathlib.Path(a.out) / f"{a.func}-{variant}-n{n}"
+    tag = func_tag(a)
+    d = pathlib.Path(a.out) / f"{tag}-{variant}-n{n}"
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
-    dom = f"/dev/shm/mxlf-{a.func}-{n}"
+    dom = f"/dev/shm/mxlf-{tag}-{n}"
     shutil.rmtree(dom, ignore_errors=True)
     os.makedirs(dom)
     P = Procs(d)
@@ -193,6 +272,36 @@ def run_level(a, n):
         if a.storage == "host" or a.impl == "cpu":
             vcommon[vcommon.index("--impl") + 1] = "cpu"
         P.start("verify", [BIN, "verify", *vcommon, "--mode", "logo", "--every", str(a.every), "--duration", str(total), "--out", str(d)], "consumer")
+    elif f == "composite":
+        K = a.layers
+        lay = comp_layers(K)
+        geom = ",".join(g for g, _, _ in lay)
+        # Šaltiniai (gen + gfxgen): --source fair — C variantui GPU→host (pigu), kad matuotume FUNKCIJOS talpą; kitaip tas pats variantas
+        gcommon = list(common)
+        if a.source == "fair" and a.impl == "cpu":
+            gcommon[gcommon.index("--impl") + 1] = "gpu"
+            gcommon[gcommon.index("--storage") + 1] = "host"
+        # Gamintojai veikia ilgai ir stabdomi (SIGTERM) PO composite ir verify pabaigos ("src" kategorija)
+        long = total + 120
+        P.start("gen", [BIN, "gen", *gcommon, "--duration", str(long), "--out", str(d)], "src")
+        P.start("gfxgen", [BIN, "gfxgen", *gcommon, "--layers", str(K), "--layer-geom", geom, "--mode", "pace",
+                           "--duration", str(long), "--out", str(d)], "src")
+        src_ids = [role_flow_id(1, i) for i in range(n)] + [role_flow_id(5, i * 8 + k) for i in range(n) for k in range(K)]
+        src_ok = wait_flow_defs(dom, src_ids, 60 + 2 * n * K)
+        xy = [x for _, p, _ in lay for x in ("--layer-xy", p)]
+        op = [x for _, _, o in lay for x in ("--opacity", str(o))]
+        P.start("composite", [BIN, "composite", *common, "--layers", str(K), *xy, *op, "--base", "gen",
+                              "--out-format", a.out_format, "--deadline-ms", str(a.deadline_ms),
+                              "--duration", str(total + 40), "--out", str(d)])
+        out_ok = wait_flow_defs(dom, [role_flow_id(6, i) for i in range(n)], 60 + n)
+        time.sleep(2)
+        # verify: CPU etalonas (be CUDA konteksto host / C variantuose), kaip logo
+        vcommon = list(common)
+        if a.storage == "host" or a.impl == "cpu":
+            vcommon[vcommon.index("--impl") + 1] = "cpu"
+        P.start("verify", [BIN, "verify", *vcommon, "--mode", "composite", "--layers", str(K), "--layer-geom", geom,
+                           *xy, *op, "--base", "gen", "--out-format", a.out_format, "--gfx-mode", "pace",
+                           "--every", str(a.every), "--duration", str(total), "--out", str(d)], "consumer")
     elif f.startswith("enc-"):
         _, enc, prof = f.split("-", 2)
         P.start("gen", [BIN, "gen", *common, "--audio", "1", "--duration", str(total + 14), "--out", str(d)], "producer")
@@ -258,7 +367,7 @@ def run_level(a, n):
 
     sums = {p.stem.replace("summary-", ""): load(p) for p in d.rglob("summary-*.json")}
     sink = load(d / "sink.json")
-    func_name = {"logo": "logo", "dec": "dec", "chain": "enc"}.get(f, "enc")
+    func_name = {"logo": "logo", "dec": "dec", "chain": "enc", "composite": "composite"}.get(f, "enc")
     fs = sums.get(func_name) or {}
     losses = {}
     for name, s in sums.items():
@@ -302,22 +411,27 @@ def run_level(a, n):
             if sink["totals"][k]:
                 losses[f"sink.{k}"] = sink["totals"][k]
     # realaus laiko santykis: funkcijos išvesti laukai/kadrai per visą jos veikimą vs laukta
-    if func_name in ("logo", "dec"):
+    if func_name in ("logo", "dec", "composite"):
         produced = flow_sum(fs, ["fields_ok"])
         span = (fs.get("last_index", 0) - fs.get("first_index", 0) + 1) * n if fs else 0
     else:
         produced = flow_sum(fs, ["frames_encoded"])
         span = ((fs.get("last_index", 0) - fs.get("first_index", 0) + 1) // 2) * n if fs else 0
     rt = produced / span if span else 0
-    func_exit = codes.get({"logo": "logo", "dec": "dec"}.get(f, "enc"))
     hist = fs.get("hist", {})
     res = {
-        "func": f, "variant": variant, "impl": a.impl, "storage": a.storage, "threads": a.threads, "source": a.source,
+        "func": f, "layers": a.layers if f == "composite" else None, "out_format": a.out_format if f == "composite" else None,
+        "deadline_ms": a.deadline_ms if f == "composite" else None, "every": a.every,
+        "variant": variant, "impl": a.impl, "storage": a.storage, "threads": a.threads, "source": a.source,
         "n": n, "seconds": S, "exit_codes": codes, "fatal": fs.get("fatal"),
         "realtime_ratio": rt, "produced": produced, "expected": span,
         "losses": losses, "verification_errors": verr, "verify_capacity_errors": vcap, "verify_capacity_errors_adj": vcap_adj,
         "clock_skip_fields": clock_fields, "verify_lag": verify_lag, "verify": correctness,
         "cpu_cores": cpu,
+        # composite: šaltinių (gen, gfxgen) ir patikros CPU — informacinis, į funkcijos CPU neįskaičiuojamas
+        "cpu_cores_gen_per_stream": (cpu.get("gen", 0) / n) if n and f == "composite" else None,
+        "cpu_cores_gfxgen_per_stream": (cpu.get("gfxgen", 0) / n) if n and f == "composite" else None,
+        "cpu_cores_verify_per_stream": (cpu.get("verify", 0) / n) if n and f == "composite" else None,
         # chain: visa grandinė (dec + logo + enc), kitur — pati funkcija
         "cpu_cores_func_per_stream": (sum(cpu.get(k, 0) for k in (("dec", "logo", "enc") if f == "chain" else (func_name,))) / n)
         if n else 0,
@@ -342,13 +456,19 @@ def run_level(a, n):
         rt = produced / max(1, span - own * n)
         res["realtime_ratio"] = rt
     exit_ok = lambda k, c: c == 0 or (c == 4 and not losses and vcap_adj == 0)  # 4 = tik laikrodžio praradimai
-    procs_ok = all(exit_ok(k, c) for k, c in codes.items() if not k.startswith("send"))
+    # "src" (composite: gen/gfxgen) stabdomi SIGTERM pabaigoje — jų išėjimo kodas informacinis (res["src_exit"])
+    cats = {name: cat for name, _, cat in P.items}
+    procs_ok = all(exit_ok(k, c) for k, c in codes.items() if not k.startswith("send") and cats.get(k) != "src")
+    res["src_exit"] = {k: c for k, c in codes.items() if cats.get(k) == "src"}
+    if f == "composite":
+        res["src_flows_ready"], res["out_flows_ready"] = src_ok, out_ok
+        procs_ok = procs_ok and src_ok and out_ok
     res["pass"] = procs_ok and not losses and verr == 0 and vcap_adj == 0 and rt >= 0.999
     # PASS_tol: teisingumas be išimčių (0 klaidų, procesai be fatalių klaidų), praradimai ≤ 0,1 % lauktų —
     # atskiria platformos drebėjimą (WSL2/WDDM pavieniai praleidimai) nuo tikros talpos ribos. Skelbiami abu.
     lost = sum(losses.values()) + vcap_adj
     res["loss_fraction"] = lost / max(1, span)
-    no_fatal = all(c in (0, 4) for k, c in codes.items() if not k.startswith("send"))
+    no_fatal = all(c in (0, 4) for k, c in codes.items() if not k.startswith("send") and cats.get(k) != "src")
     res["pass_tol"] = no_fatal and verr == 0 and res["loss_fraction"] <= a.tol and rt >= 1 - a.tol
     return res
 
@@ -375,22 +495,37 @@ def main():
                     help="logo šaltinis: same — tas pats variantas (sistema); fair — C variantui GPU→host šaltinis (funkcija)")
     ap.add_argument("--gpu-probe", type=int, default=1, help="1 Hz nvidia-smi GPU/NVENC/NVDEC apkrovos zondas (0 — išjungti)")
     ap.add_argument("--stop-after-fails", type=int, default=2)
+    ap.add_argument("--layers", type=int, default=2, choices=[1, 2, 3, 4], help="composite: grafikos sluoksnių skaičius K")
+    ap.add_argument("--out-format", default="v210", choices=["v210", "v210a"], help="composite: išėjimo formatas")
+    ap.add_argument("--deadline-ms", type=int, default=30, help="composite: įėjimų laukimo riba (R18: kaip logo numatytoji)")
     a = ap.parse_args()
     pathlib.Path(a.out).mkdir(parents=True, exist_ok=True)
     results, fails = [], 0
     for n in [int(x) for x in a.n.split(",")]:
+        variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
+        skip = comp_guard(a, n) if a.func == "composite" else None
+        if skip:
+            r = {"func": a.func, "layers": a.layers, "out_format": a.out_format, "variant": variant, "impl": a.impl,
+                 "storage": a.storage, "source": a.source, "n": n, "skipped": True, "skip_reason": skip, "pass": False,
+                 "pass_tol": False, "seconds": a.seconds, "power_scheme": power_scheme()}
+            results.append(r)
+            print(f"[{func_tag(a)}/{variant} N={n:2d}] PRALEISTA: {skip}", flush=True)
+            (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
+            continue
         r = run_level(a, n)
         results.append(r)
-        variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
-        print(f"[{a.func}/{variant} N={n:2d}] griežtai={'PASS' if r['pass'] else 'FAIL'} tol={'PASS' if r['pass_tol'] else 'FAIL'} "
+        print(f"[{func_tag(a)}/{variant} N={n:2d}] griežtai={'PASS' if r['pass'] else 'FAIL'} tol={'PASS' if r['pass_tol'] else 'FAIL'} "
               f"praradimai {r['loss_fraction'] * 100:.3f}% RT={r['realtime_ratio']:.4f} "
               f"{r['losses'] or ''} verif={r['verification_errors']} CPU/srautui={r['cpu_cores_func_per_stream']:.3f} "
               f"ΔVRAM={r['vram_delta_mb']} MB "
               + (f"GPU={g['util_gpu']['mean']:.0f}% NVENC={g['util_enc']['mean']:.0f}% NVDEC={g['util_dec']['mean']:.0f}% "
                  f"P={g['power_w']['mean']:.0f}W " if (g := r.get("gpu")) else "")
+              + (f"gfxgen/gen CPU={r['cpu_cores_gfxgen_per_stream']:.3f}/{r['cpu_cores_gen_per_stream']:.3f} "
+                 f"proc_ms p50/p99={(r['hist'].get('proc_ms') or {}).get('p50_ms')}/{(r['hist'].get('proc_ms') or {}).get('p99_ms')} "
+                 f"src_exit={r['src_exit']} " if a.func == "composite" else "")
               + f"e2e p99={r['e2e_latency_p99_ms']} exit={r['exit_codes']} {r['fatal'] or ''}",
               flush=True)
-        (pathlib.Path(a.out) / f"capacity-{a.func}-{variant}.json").write_text(json.dumps(results, indent=1))
+        (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
         fails = 0 if r["pass_tol"] else fails + 1  # sustojam, kai viršijama talpa (tol kriterijus)
         if fails >= a.stop_after_fails:
             break

@@ -42,6 +42,72 @@ def nstar(rows, key):
     return best
 
 
+def hq(r, name, q):
+    """Histogramos (hist.<name>.<q>_ms) kvantilis; be duomenų — „–“."""
+    v = ((r.get("hist") or {}).get(name) or {}).get(f"{q}_ms")
+    return "–" if v is None else f"{v:.2f}"
+
+
+def composite_section(rows):
+    """composite N × K × {C,H,G}: lentelės pagal (K, variantas), N* matrica, praleistos pakopos (VRAM) — be nuorodų į kodą,
+    kiekviena eilutė atsekama iki capacity-composite-k<K>-<V>.all.json."""
+    md = ["# composite — talpa N × K (C / H / G)", "",
+          "Funkcijos CPU — tik `composite` procesas (šaltiniai gen, gfxgen ir patikra `verify` atskirai, informacijai). "
+          "Latencija: `proc` — nuo visų įėjimų paruošimo iki išėjimo commit'o; `vėlavimas` — commit'as po lauko laiko "
+          "(`out_lateness`), p50/p99 ms visame composite veikimo laike. GPU % / W — nvidia-smi 1 Hz matavimo lange.", ""]
+    ks = sorted({r["layers"] for r in rows})
+    vs = [v for v in "CHG" if any(r["variant"] == v for r in rows)]
+    nstar = {}
+    for k in ks:
+        for v in vs:
+            rs = [r for r in rows if r["layers"] == k and r["variant"] == v]
+            if not rs:
+                continue
+            md += [f"## K = {k} — {VARIANT_NAME.get(v, v)} (šaltinis: {rs[0].get('source')}, išėjimas {rs[0].get('out_format')}, "
+                   f"deadline {rs[0].get('deadline_ms')} ms)", "",
+                   "| N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | CPU/srautui (composite) | gfxgen CPU | "
+                   "gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |",
+                   "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            for r in sorted(rs, key=lambda r: r["n"]):
+                if r.get("skipped"):
+                    md.append(f"| {r['n']} | praleista | praleista | | | | | | | | | | | | | {r['skip_reason']} |")
+                    continue
+                g = r.get("gpu")
+                samples = sum(c.get("samples_total", 0) for c in (r.get("verify") or {}).values())
+                md.append(f"| {r['n']} | {'PASS' if r['pass'] else 'FAIL'} | {'PASS' if r.get('pass_tol') else 'FAIL'} | "
+                          f"{r.get('loss_fraction', 0) * 100:.3f} | {r['realtime_ratio']:.4f} | {r['verification_errors']} | {samples} | "
+                          f"{r['cpu_cores_func_per_stream']:.3f} | {r['cpu_cores_gfxgen_per_stream']:.3f} | {r['cpu_cores_gen_per_stream']:.3f} | "
+                          f"{hq(r, 'proc_ms', 'p50')} / {hq(r, 'proc_ms', 'p99')} | "
+                          f"{hq(r, 'out_lateness', 'p50')} / {hq(r, 'out_lateness', 'p99')} | {r.get('vram_delta_mb')} | "
+                          f"{'–' if not g else f'{g['util_gpu']['mean']:.0f}'} | {'–' if not g else f'{g['power_w']['mean']:.0f}'} | "
+                          f"`{r['_src']}` |")
+            ran = [r for r in rs if not r.get("skipped")]
+            nstar[(k, v)] = (nstar_of(ran, "pass"), nstar_of(ran, "pass_tol"), max((r["n"] for r in ran), default=0),
+                             sorted({r["n"] for r in rs if r.get("skipped")}))
+            ns, nt, top, sk = nstar[(k, v)]
+            md += ["", f"N* griežtai = **{ns}**, N* tol = **{nt}**" + (" (ribos nepasiekta)" if nt == top and nt else ""), ""]
+    md += ["## Suvestinė — didžiausias N (N*), kai visi mažesni PASS", "",
+           "Reikšmė „griežtai / tol“. „+“ — didžiausia išbandyta pakopa praėjo (riba nepasiekta); kitu atveju pirmas FAIL "
+           "ties kita pakopa. Pakopos, kurių nevykdė (VRAM riba arba 2 FAIL iš eilės), nėra N* dalis.", "",
+           "| K | " + " | ".join(f"{v}" for v in vs) + " |", "|---|" + "---|" * len(vs)]
+    for k in ks:
+        cells = []
+        for v in vs:
+            ns, nt, top, sk = nstar.get((k, v), (0, 0, 0, []))
+            cells.append(f"{ns} / {nt}{'+' if nt == top and nt else ''}")
+        md.append(f"| {k} | " + " | ".join(cells) + " |")
+    return md + [""]
+
+
+def nstar_of(rows, key):
+    best = 0
+    for n, (ok, _) in by_n(rows, key).items():
+        if not ok:
+            break
+        best = n
+    return best
+
+
 def main():
     out = sys.argv[1]
     rows = []
@@ -51,7 +117,11 @@ def main():
                 r["_src"] = os.path.relpath(p)
                 rows.append(r)
     groups = defaultdict(list)
+    comp = []
     for r in rows:
+        if r["func"] == "composite":
+            comp.append(r)  # composite — atskira N × K ataskaita (composite_section)
+            continue
         groups[(r["func"], r.get("variant", "G"), r.get("source", "same"))].append(r)
     md = ["# GPU prieš CPU — talpos palyginimas", "",
           "PASS griežtai = 0 praradimų ir 0 teisingumo klaidų; PASS tol = 0 teisingumo klaidų ir praradimai ≤ 0,2 % "
@@ -92,6 +162,10 @@ def main():
                 gain = f"{nt / c[1]:.1f}×" + ("+" if nt == top else "")
             md.append(f"| {func} | {v} | {src} | {ns} | {nt}{'+' if nt == top else ''} | {passed} | "
                       f"{'' if cpu1 is None else f'{cpu1:.3f}'} | {gain} |")
+    if comp:
+        if not groups:
+            md = []  # tik composite — be tuščios bendros antraštės ir suvestinės
+        md += composite_section(comp)
     open(out, "w").write("\n".join(md) + "\n")
     print(f"parašyta {out}: {len(rows)} pakopų, {len(groups)} grupių")
 

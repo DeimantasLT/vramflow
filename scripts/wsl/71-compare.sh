@@ -5,6 +5,8 @@
 #   C = CPU + host flow, H = GPU + host flow (MXL v1.1 su GPU), G = GPU + cuda-linear (PR #653).
 # Variantai leidžiami pakaitomis kiekvienai N pakopai (C, H, G, C, H, G…), kad laiko efektai pasiskirstytų vienodai.
 # Naudojimas: 71-compare.sh <out> [funkcija=logo] [N sąrašas]
+# composite: LAYERS="1,2,4" (K sąrašas; išorinis ciklas), OUT_FORMAT=v210|v210a, SOURCE=same|fair (C šaltinis),
+#   STOP_FAILS=2 (variantas K sluoksniams praleidžia didesnes N po tiek PASS_tol FAIL iš eilės; 0 — nesustoti).
 source "$(dirname "$0")/env.sh"
 set +e
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -17,26 +19,51 @@ if [[ $FUNC == dec || $FUNC == chain ]]; then
 else
   DEF_V="cpu;gpu-host;gpu-cuda"; EXTRA=""
 fi
+if [[ $FUNC == composite ]]; then
+  EXTRA="--out-format ${OUT_FORMAT:-v210} --source ${SOURCE:-fair}"
+  IFS=',' read -ra KL <<< "${LAYERS:-1,2,4}"
+else
+  KL=("")
+fi
+STOP_FAILS="${STOP_FAILS:-2}"
 IFS=';' read -ra VL <<< "${VARIANTS:-$DEF_V}"
 declare -A VARG=([cpu]="--impl cpu" [gpu-host]="--impl gpu --storage host" [gpu-cuda]="--impl gpu --storage cuda-linear")
+declare -A VLET=([cpu]=C [gpu-host]=H [gpu-cuda]=G)
 mkdir -p "$OUT"
 python3 "$REPO/scripts/wsl/80-clock-probe.py" 30 --json "$OUT/clock-before.json" > /dev/null
 echo "laikrodis prieš: $(python3 -c "import json;d=json.load(open('$OUT/clock-before.json'));print(d['realtime_vs_raw_ppm'],'ppm, žingsnių',len(d['steps']))")" | tee -a "$OUT/compare.log"
 IFS=, read -ra NL <<< "$NS"
-for n in "${NL[@]}"; do
-  for vk in "${VL[@]}"; do
-    v="${VARG[$vk]}"
-    # shellcheck disable=SC2086
-    python3 "$REPO/tests/perf/capacity.py" "$OUT" --func "$FUNC" --n "$n" --seconds "$S" --warmup "$W" --every 25 \
-      --stop-after-fails 9 $v $EXTRA 2>&1 | tee -a "$OUT/compare.log" | grep -E "^\["
-    # kiekvienas variantas rašo savo capacity-<func>-<V>.json; pakopos rezultatai kaupiami atskirai
-    for f in "$OUT"/capacity-"$FUNC"-?.json; do
-      [[ -f $f ]] && python3 -c "
+declare -A FAILRUN   # (K,variantas) → iš eilės PASS_tol FAIL
+for K in "${KL[@]}"; do
+  if [[ -n $K ]]; then TAG="$FUNC-k$K"; KARG="--layers $K"; else TAG="$FUNC"; KARG=""; fi
+  for n in "${NL[@]}"; do
+    for vk in "${VL[@]}"; do
+      v="${VARG[$vk]}"
+      key="$K:$vk"
+      if [[ $STOP_FAILS -gt 0 && ${FAILRUN[$key]:-0} -ge $STOP_FAILS ]]; then
+        echo "[$TAG/${VLET[$vk]} N=$n] praleista: $STOP_FAILS iš eilės PASS_tol FAIL mažesnėse N" | tee -a "$OUT/compare.log"
+        echo "{\"tag\":\"$TAG\",\"variant\":\"${VLET[$vk]}\",\"n\":$n,\"reason\":\"stop-after-fails\"}" >> "$OUT/skipped-after-fails.jsonl"
+        continue
+      fi
+      # shellcheck disable=SC2086
+      python3 "$REPO/tests/perf/capacity.py" "$OUT" --func "$FUNC" --n "$n" --seconds "$S" --warmup "$W" --every 25 \
+        --stop-after-fails 9 $KARG $v $EXTRA 2>&1 | tee -a "$OUT/compare.log" | grep -E "^\["
+      # kiekvienas variantas rašo savo capacity-<tag>-<V>.json; pakopos rezultatai kaupiami atskirai
+      for f in "$OUT"/capacity-"$TAG"-?.json; do
+        [[ -f $f ]] || continue
+        python3 -c "
 import json,sys
 p=sys.argv[1]; acc=p.replace('.json','.all.json')
 try: allr=json.load(open(acc))
 except Exception: allr=[]
-allr+= json.load(open(p)); json.dump(allr, open(acc,'w'), indent=1)" "$f" && rm -f "$f"
+new=json.load(open(p)); allr+=new; json.dump(allr, open(acc,'w'), indent=1)
+r=new[-1]
+# 0 — praleista pagal VRAM (nelaikoma FAIL), 1 — PASS_tol, 2 — FAIL
+print(0 if r.get('skipped') else (1 if r.get('pass_tol') else 2))" "$f" > "$OUT/.last"
+        rc=$(cat "$OUT/.last")
+        if [[ $rc == 2 ]]; then FAILRUN[$key]=$(( ${FAILRUN[$key]:-0} + 1 )); elif [[ $rc == 1 ]]; then FAILRUN[$key]=0; fi
+        rm -f "$f"
+      done
     done
   done
 done
