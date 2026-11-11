@@ -10,7 +10,7 @@ target_link_libraries(mxlv_engine PUBLIC mxlv_timing Threads::Threads)
 set_target_properties(mxlv_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(MXLV_BUILD_TESTS)
-  add_executable(mxlv-engine-unit tests/engine/test_cuts.cpp)
+  add_executable(mxlv-engine-unit tests/engine/test_cuts.cpp tests/engine/test_input_state.cpp)
   vramflow_warnings(mxlv-engine-unit)
   target_link_libraries(mxlv-engine-unit PRIVATE mxlv_engine mxl::mxl Catch2::Catch2WithMain)
   set_target_properties(mxlv-engine-unit PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
