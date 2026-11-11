@@ -431,3 +431,82 @@ TEST_CASE("gfx ref: nelyginis y progresyviame rastre leidžiamas (R1)", "[gfx]")
             CHECK(fill_y(o, 8, r, x) == (in ? fill_y(lay, 4, r - 3, x - 2) : 64));
         }
 }
+
+TEST_CASE("gfx ref: opacity_to_o8 vienas tikslumas [R10]", "[gfx]") {
+    CHECK(opacity_to_o8(0.7f) == 179);  // 0.7f·255.0f = 178.5f (float) -> 179
+    CHECK(opacity_to_o8(0.0f) == 0);
+    CHECK(opacity_to_o8(1.0f) == 255);
+    CHECK(opacity_to_o8(-3.0f) == 0);
+    CHECK(opacity_to_o8(7.0f) == 255);
+    // per composite: a = A (a8 = 255), opacity 0.7f -> o8 = 179, ae = (876·179 + 127)/255 = 156 931/255 = 615 (615·255 = 156 825).
+    // base none: n = 615·876, ao = 615 -> key = 679; spalva = sluoksnio (n/2 < n).
+    const Raster lr{2, 1, false, true};
+    Buf rgba = {255, 0, 0, 255, 255, 0, 0, 255};
+    Buf lay(grain_bytes(lr));
+    REQUIRE(ref::rgba_to_v210a(rgba.data(), 2, 1, 8, AlphaIn::Straight, lr, 0, lay.data()));
+    const Buf o = run_composite(nullptr, lr, {{lay.data(), lr, 0, 0, 0.7f}}, lr);
+    CHECK(key_at(o, lr, 0, 0) == 679);
+    CHECK(key_at(o, lr, 0, 1) == 679);
+    CHECK(fill_y(o, 2, 0, 0) == fill_y(lay, 2, 0, 0));
+    // sutartis: opacity 5.0 apkerpiama = 1.0
+    CHECK(run_composite(nullptr, lr, {{lay.data(), lr, 0, 0, 5.0f}}, lr) == lay);
+}
+
+TEST_CASE("gfx ref: chroma kelias su ac != abc ranka (R8)", "[gfx]") {
+    // Spalvos (BT.709, rgb_to_ycbcr10): raudona Y250 Cb409 Cr960; žalia Y691 Cb167 Cr105.
+    // Bazė 2×1 v210a: abu pikseliai žali, a8 = 128 -> key 504 -> ab = 440 (abc = (440+440+1)>>1 = 440).
+    // Sluoksnis 2×1: p0 raudonas a8 = 255 (ae0 = 876), p1 mėlynas a8 = 0 (ae1 = 0); chroma pora: cb/cr = raudono (a0 = 255, a1 = 0).
+    //   ac = (876 + 0 + 1)>>1 = 438.  (Jei naudotų ae[2i] = 876 arba ab po atnaujinimo (876+440+1)>>1 = 658 — rezultatas kitas.)
+    // v210a išėjimas, chroma: n = ac·A + abc·(A−ac) = 438·876 + 440·438 = 383 688 + 192 720 = 576 408.
+    //   Cb = (409·383 688 + 167·192 720 + 288 204)/576 408 = 189 400 836/576 408 = 328 (328,59)
+    //   Cr = (960·383 688 + 105·192 720 + 288 204)/576 408 = 388 864 284/576 408 = 674 (674,63)
+    // Y: p0 ae = 876, ab = 440: n = 767 376, ao = 876, Y = f = 250 (num = 250·767 376 + 383 688 -> 250,5 -> 250); key 940.
+    //    p1 ae = 0: n = 440·876, ao = 440, Y = b = 691; key 504.
+    // v210 išėjimas: Cb = (167·438 + 409·438 + 438)/876 = 252 726/876 = 288 (288,5); Cr = (105·438 + 960·438 + 438)/876 = 466 908/876 = 533 (tiksliai).
+    //    Y p0 = 250, p1 = 691.
+    const Raster mr{2, 1, false, true}, vr{2, 1, false, false};
+    Buf gr = {0, 255, 0, 128, 0, 255, 0, 128}, ly = {255, 0, 0, 255, 0, 0, 255, 0};
+    Buf base(grain_bytes(mr)), lay(grain_bytes(mr));
+    REQUIRE(ref::rgba_to_v210a(gr.data(), 2, 1, 8, AlphaIn::Straight, mr, 0, base.data()));
+    REQUIRE(ref::rgba_to_v210a(ly.data(), 2, 1, 8, AlphaIn::Straight, mr, 0, lay.data()));
+    REQUIRE(key_at(base, mr, 0, 0) == 504);
+    REQUIRE(fill_cb(lay, 2, 0, 0) == 409);  // pasirinktos išvestinės prielaidos
+    REQUIRE(fill_cr(lay, 2, 0, 0) == 960);
+    REQUIRE(fill_cb(base, 2, 0, 0) == 167);
+    REQUIRE(fill_cr(base, 2, 0, 0) == 105);
+    const std::vector<Layer> L = {{lay.data(), mr, 0, 0, 1.0f}};
+    const Buf o = run_composite(&base, mr, L, mr);
+    CHECK(fill_cb(o, 2, 0, 0) == 328);
+    CHECK(fill_cr(o, 2, 0, 0) == 674);
+    CHECK(fill_y(o, 2, 0, 0) == 250);
+    CHECK(fill_y(o, 2, 0, 1) == 691);
+    CHECK(key_at(o, mr, 0, 0) == 940);
+    CHECK(key_at(o, mr, 0, 1) == 504);
+    const Buf ov = run_composite(&base, mr, L, vr);
+    CHECK(fill_cb(ov, 2, 0, 0) == 288);
+    CHECK(fill_cr(ov, 2, 0, 0) == 533);
+    CHECK(fill_y(ov, 2, 0, 0) == 250);
+    CHECK(fill_y(ov, 2, 0, 1) == 691);
+}
+
+TEST_CASE("gfx ref: dengiamas ae = 0 virš ab = 0 -> 64/512, nedengiami išlaiko bazę", "[gfx]") {
+    // Bazė 4×1 v210a: žali (Y691 Cb167 Cr105), a8 = 0 -> key 64, ab = 0. Sluoksnis 2×1 ties x = 0, a8 = 0 (ae = 0).
+    // Dengiami p0,p1: n = 0 -> Y 64, C 512, key 64. Nedengiami p2,p3: bazės fill (žalia), key 64.
+    const Raster br{4, 1, false, true}, lr{2, 1, false, true};
+    Buf gr(16), ly = {255, 255, 255, 0, 255, 255, 255, 0};
+    for (int i = 0; i < 4; ++i) { gr[i * 4] = 0; gr[i * 4 + 1] = 255; gr[i * 4 + 2] = 0; gr[i * 4 + 3] = 0; }
+    Buf base(grain_bytes(br)), lay(grain_bytes(lr));
+    REQUIRE(ref::rgba_to_v210a(gr.data(), 4, 1, 16, AlphaIn::Straight, br, 0, base.data()));
+    REQUIRE(ref::rgba_to_v210a(ly.data(), 2, 1, 8, AlphaIn::Straight, lr, 0, lay.data()));
+    const Buf o = run_composite(&base, br, {{lay.data(), lr, 0, 0, 1.0f}}, br);
+    CHECK(fill_y(o, 4, 0, 0) == 64);
+    CHECK(fill_y(o, 4, 0, 1) == 64);
+    CHECK(fill_cb(o, 4, 0, 0) == 512);
+    CHECK(fill_cr(o, 4, 0, 0) == 512);
+    CHECK(fill_y(o, 4, 0, 2) == 691);
+    CHECK(fill_y(o, 4, 0, 3) == 691);
+    // chroma: a0 + a1 == 0 bazės konversijoje -> 512 (todėl čia tikrinam tik, kad lygu bazės)
+    CHECK(fill_cb(o, 4, 0, 1) == fill_cb(base, 4, 0, 1));
+    CHECK(fill_cr(o, 4, 0, 1) == fill_cr(base, 4, 0, 1));
+    for (int x = 0; x < 4; ++x) CHECK(key_at(o, br, 0, x) == 64);
+}

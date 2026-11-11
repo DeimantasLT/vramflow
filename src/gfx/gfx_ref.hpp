@@ -5,6 +5,9 @@
 // (planas §„Matematika“ + kontrolieriaus R1/R7/R8), mėginių lygmeniu: išpakuoti -> skaičiuoti -> supakuoti, be
 // optimizacijų. CPU ir CUDA įgyvendinimai testuojami baitas į baitą prieš šį etaloną; kodo iš jų čia nekopijuojama.
 //
+// Semantika: sluoksnio opacity -> o8 per gfx::opacity_to_o8 (float, lround, apkirpta į 0…255; t. y. opacity apkerpama į [0,1]).
+// Sluoksnio DENGIAMAS taškas su ae = 0 virš ab = 0 tampa Y 64 / C 512 (taisyklė n == 0), o NEdengiami taškai pasilieka bazės
+// fill (net kai jų ab = 0). Tai tyčia (R8) ir CPU / CUDA turi atkartoti.
 // Sutartis (abi funkcijos): grąžina false ir NIEKO nerašo, jei geometrija netinkama: nelyginis plotis (R7), nelyginis x,
 // neigiami x / y, nelyginis y interlaced rastre (R1), neatitinkantys rastrai, nullptr, paritetas ne 0/1 interlaced
 // rastre, NaN opacity. Sėkmės atveju išėjimo grain'as (grain_bytes(out_r) B) perrašomas VISAS: key užpildymas

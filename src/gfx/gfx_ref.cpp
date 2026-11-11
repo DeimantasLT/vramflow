@@ -197,7 +197,7 @@ bool composite(const std::uint8_t* base, const Raster& base_r, const Layer* laye
             unpack_fill_line(L.grain + static_cast<std::size_t>(ly) * fill_line_bytes(L.r.w), L.r.w, lr);
             if (L.r.alpha)
                 unpack_key_line(L.grain + fill_bytes(L.r) + static_cast<std::size_t>(ly) * key_line_bytes(L.r.w), L.r.w, lr);
-            const int o8 = std::clamp(static_cast<int>(std::lround(L.opacity * 255.0f)), 0, 255);
+            const int o8 = opacity_to_o8(L.opacity);
             std::vector<int> ae(L.r.w);
             for (int x = 0; x < L.r.w; ++x) {
                 const int a = L.r.alpha ? std::clamp(lr.key[x] - 64, 0, A) : A;

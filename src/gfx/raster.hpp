@@ -4,6 +4,7 @@
 // Bendras rastro aprašas alfa grafikai ir kompozitoriui (header-only): v210 / v210a grain'o dydžiai, key pakavimas
 // (MXL docs/Architecture.md: 32 bitų LE blokai po 3 10 bitų mėginius, bitai 30–31 = 0) ir rastro skaitymas iš flow aprašo.
 // Grain'as: fill (v210) iš karto, po jo key (jei alpha). Interlaced: grain = laukas (h/2 eilučių).
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -49,6 +50,15 @@ struct Layer {
     int x, y;
     float opacity;
 };
+// Sluoksnio opacity -> o8 (0…255). VIENINTELIS apibrėžimas visiems variantams (etalonas, CPU, CUDA host pusė):
+// daugyba VIENO tikslumo (float) aritmetika, tada lround, tada apkirpimas į 0…255. Todėl opacity už [0,1] apkerpama
+// (<0 -> 0, >1 -> 255). 0.7f·255.0f = 178.5f -> 179 (double duotų 178.49999… -> 178; tai NEleidžiama).
+inline int opacity_to_o8(float op) {
+    const float p = op * 255.0f;  // laikinas float kintamasis: jokio išplėsto tikslumo
+    const long v = std::lround(p);
+    return v < 0 ? 0 : (v > 255 ? 255 : static_cast<int>(v));
+}
+
 struct CompositeJob {
     const std::uint8_t* base;
     Raster base_r;
