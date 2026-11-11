@@ -546,3 +546,138 @@ TEST_CASE("netinkami argumentai → cudaErrorInvalidValue", "[gpu][media][args]"
     CHECK(gen_fields(nullptr, -1, 0, 0, 0, st.s) == cudaErrorInvalidValue);
     CHECK(cudaGetLastError() == cudaSuccess);
 }
+
+// --- P2: formatui neutralūs kernel'iai (CUDA == nepriklausomas etalonas, 0 skirtingų baitų) ----------------------------
+namespace {
+struct Case {
+    Dim d;
+    int field;  // −1 kadras, 0 / 1 laukas
+};
+// 1080 (laukai ir kadras), 720p ir 2160p (tik kadras): ir pilnos, ir dalinės v210 grupės (1280 = 213 · 6 + 2).
+const Case kCases[] = {{{1920, 1080}, 0}, {{1920, 1080}, 1}, {{1920, 1080}, -1}, {{1280, 720}, -1}, {{3840, 2160}, -1}};
+std::size_t gwords(const Case& c) { return geom_of(c.d, c.field).grain_words(); }
+}  // namespace
+
+TEST_CASE("media cuda: gen == ref (visi matmenys, laukas ir kadras)", "[gpu][media][format][gen]") {
+    Stream st;
+    for (const Case& c : kCases)
+        for (std::uint64_t index : {0ull, 1ull, 50ull, 777ull}) {
+            if (c.field >= 0 && static_cast<int>(index & 1) != c.field) continue;
+            Dev<std::uint32_t> f(gwords(c));
+            f.fill(0xAB);
+            const GenJob job{f.p, 3};
+            CUDA_OK(gen_fields(&job, 1, 0x1234, 3, index, c.d, c.field >= 0, st.s));
+            st.sync();
+            std::vector<std::uint32_t> want(gwords(c));
+            ref::gen_field({0x1234, 3, 3}, index, c.d, c.field >= 0, want.data());
+            INFO("w " << c.d.w << " field " << c.field << " index " << index);
+            CHECK(diff_count(f.down(), want) == 0);
+        }
+}
+
+TEST_CASE("media cuda: logo == ref (visi matmenys, kraštai)", "[gpu][media][format][logo]") {
+    Stream st;
+    std::mt19937 rng(91);
+    const ref::Logo L = logo_all_alpha(rng);
+    const DevLogo dl(L);
+    for (const Case& c : kCases) {
+        const auto bg = random_words(rng, gwords(c));
+        Dev<std::uint32_t> src(bg), dst(gwords(c));
+        for (const int x : {0, c.d.w - L.w, c.d.w - 100, 700})
+            for (const int y : {0, c.d.h - L.h, c.d.h - 50}) {
+                dst.fill(0);
+                const LogoJob job{src.p, dst.p};
+                CUDA_OK(logo_fields(&job, 1, dl.desc(L, x, y), c.d, c.field, st.s));
+                st.sync();
+                std::vector<std::uint32_t> want(gwords(c));
+                ref::logo_field(bg.data(), want.data(), L, x, y, c.d, c.field);
+                INFO("w " << c.d.w << " field " << c.field << " X " << x << " Y " << y);
+                CHECK(diff_count(dst.down(), want) == 0);
+            }
+    }
+}
+
+TEST_CASE("media cuda: weave == ref (interlaced ir progresyvus, visi matmenys)", "[gpu][media][format][weave]") {
+    Stream st;
+    std::mt19937 rng(5);
+    for (const Case& c : kCases) {
+        if (c.field == 1) continue;
+        const bool inter = c.field >= 0;
+        for (const int pitch : {c.d.w, c.d.w + 128}) {
+            const auto t = random_words(rng, gwords(c)), b = random_words(rng, gwords(c));
+            Dev<std::uint32_t> dt(t), db(b);
+            Dev<std::uint8_t> y(static_cast<std::size_t>(pitch) * c.d.h), uv(static_cast<std::size_t>(pitch) * c.d.h / 2);
+            y.fill(7);
+            uv.fill(7);
+            const WeaveJob job{dt.p, inter ? db.p : dt.p, y.p, uv.p};
+            CUDA_OK(weave_nv12(&job, 1, c.d, inter, pitch, pitch, st.s));
+            st.sync();
+            std::vector<std::uint8_t> wy(y.n, 7), wuv(uv.n, 7);
+            ref::weave_nv12(t.data(), inter ? b.data() : nullptr, wy.data(), wuv.data(), pitch, pitch, c.d, inter);
+            INFO("w " << c.d.w << " interlaced " << inter << " pitch " << pitch);
+            CHECK(diff_count(y.down(), wy) == 0);
+            CHECK(diff_count(uv.down(), wuv) == 0);
+        }
+    }
+}
+
+TEST_CASE("media cuda: split_nv12_progressive == ref (1920×1080, 1280×720, 3840×2160; pitch w ir w+128)", "[gpu][media][format][split]") {
+    Stream st;
+    std::mt19937 rng(29);
+    for (const Dim d : {Dim{1920, 1080}, Dim{1280, 720}, Dim{3840, 2160}})
+        for (const int pitch : {d.w, d.w + 128}) {
+            const auto hy = random_bytes(rng, static_cast<std::size_t>(pitch) * d.h);
+            const auto huv = random_bytes(rng, static_cast<std::size_t>(pitch) * d.h / 2);
+            Dev<std::uint8_t> y(hy), uv(huv);
+            const std::size_t n = geom_of(d, -1).grain_words();
+            Dev<std::uint32_t> f(n);
+            f.fill(0xCD);
+            const SplitJob job{y.p, uv.p, f.p};
+            CUDA_OK(split_nv12_progressive(&job, 1, d, pitch, pitch, st.s));
+            st.sync();
+            std::vector<std::uint32_t> want(n);
+            ref::split_nv12_progressive(hy.data(), huv.data(), pitch, pitch, d, want.data());
+            INFO("w " << d.w << " pitch " << pitch);
+            CHECK(diff_count(f.down(), want) == 0);
+        }
+}
+
+TEST_CASE("media cuda: split FrameSited laukui == ref (abu paritetai), FieldSited su kDim1080 == senas", "[gpu][media][format][split]") {
+    Stream st;
+    std::mt19937 rng(31);
+    for (const int pitch : {1920, 2048}) {
+        const auto hy = random_bytes(rng, static_cast<std::size_t>(pitch) * kY), huv = random_bytes(rng, static_cast<std::size_t>(pitch) * kUV);
+        Dev<std::uint8_t> y(hy), uv(huv);
+        for (int p = 0; p < 2; ++p)
+            for (const ChromaMode m : {ChromaMode::FrameSited, ChromaMode::FieldSited}) {
+                Dev<std::uint32_t> f(kFieldWords);
+                const SplitJob job{y.p, uv.p, f.p};
+                CUDA_OK(split_nv12(&job, 1, kDim1080, p, m, pitch, pitch, st.s));
+                st.sync();
+                std::vector<std::uint32_t> want(kFieldWords);
+                ref::split_nv12(hy.data(), huv.data(), pitch, pitch, kDim1080, p, m, want.data());
+                INFO("pitch " << pitch << " p " << p << " frame " << (m == ChromaMode::FrameSited));
+                CHECK(diff_count(f.down(), want) == 0);
+                if (m == ChromaMode::FieldSited) {
+                    std::vector<std::uint32_t> old(kFieldWords);
+                    ref::split_nv12(hy.data(), huv.data(), pitch, pitch, p, old.data());
+                    CHECK(diff_count(want, old) == 0);
+                }
+            }
+    }
+}
+
+TEST_CASE("media cuda: formatui neutralūs argumentai → cudaErrorInvalidValue", "[gpu][media][format][args]") {
+    Stream st;
+    Dev<std::uint32_t> f(kFieldWords);
+    Dev<std::uint8_t> y(1920 * 1080), uv(1920 * 540);
+    const SplitJob sj{y.p, uv.p, f.p};
+    CHECK(split_nv12(&sj, 1, kDim1080, -1, ChromaMode::FieldSited, 1920, 1920, st.s) == cudaErrorInvalidValue);
+    CHECK(split_nv12_progressive(&sj, 1, Dim{1921, 1080}, 1920, 1920, st.s) == cudaErrorInvalidValue);
+    CHECK(split_nv12_progressive(&sj, 1, Dim{1920, 1080}, 1900, 1920, st.s) == cudaErrorInvalidValue);
+    CHECK(split_nv12(&sj, 1, Dim{1920, 1082}, 0, ChromaMode::FieldSited, 1920, 1920, st.s) == cudaErrorInvalidValue);
+    const GenJob gj{f.p, 0};
+    CHECK(gen_fields(&gj, 1, 0, 0, 0, Dim{0, 1080}, false, st.s) == cudaErrorInvalidValue);
+    const WeaveJob wj{f.p, f.p, y.p, uv.p};
+    CHECK(weave_nv12(&wj, 1, Dim{1280, 722}, true, 1280, 1280, st.s) == cudaErrorInvalidValue);  // interlaced — h % 4 != 0
+}
