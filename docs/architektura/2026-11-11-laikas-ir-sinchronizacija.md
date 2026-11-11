@@ -244,20 +244,24 @@ Pastabos:
 Ingest funkcijos (P3) įėjimo laiką verčia į MXL laiką viena biblioteka `src/timing/` (be MXL, libav ir GPU; testai
 `tests/unit/test_source_clock.cpp`, `test_timing_index.cpp`):
 
-- **Vienas poslinkis šaltiniui** (`SourceClock`): `TAI = ns(PTS išvyniotas) + off`, bendras visiems šaltinio flow'ams —
-  video ir garsas su tuo pačiu PTS gauna tą patį TAI (lūpų sinchronas pagal konstrukciją). Žymima demux metu
-  (`observe()` kiekvienam paketui), todėl vėlesnis poslinkio pokytis neliečia jau kelyje esančių kadrų.
-- **Fiksavimas** ties pirmu video paketu: `off = a + L − ns(DTS)`, po to kvantuojama į kadrų tinklelį (`align_rate`) —
+- **Bendras šaltinio laikas** (`SourceClock`): `TAI = ns(PTS išvyniotas) + off`, vienas laiko modelis visiems
+  šaltinio flow'ams. Žymima demux metu (`observe()` kiekvienam paketui), todėl vėlesnis poslinkio pokytis neliečia jau
+  kelyje esančių kadrų.
+- **Du poslinkiai (K6):** garsas (`audio_offset_ns`) — tolydus, be laiptų, seka šaltinio laikrodį rampa pagal
+  `drift_ppm` (ribota ±1000 ppm = swr biudžetas); video (`offset_ns`) — kadrų tinklelyje ir slysta sveiku kadru
+  (`Event::Slipped`; interlaced lieka laukų poromis), kai `|off_v − off_a|` viršytų Tf/2. Taigi A/V ≤ Tf/2 (≤ 1 laukas
+  50i), garse trūkių nėra: P3 garso mėginių skaičių pritaiko `swr_set_compensation` pagal tą patį `drift_ppm`
+  (200 ppm per 1 val. → ~18 video slydimų, garso žymų žingsnis nuo nominalo ≤ 1 ms).
+- **Fiksavimas** ties pirmu video paketu: `off = a + L − ns(DTS)`, kvantuojamas į kadrų tinklelį (`align_rate`) —
   kiekvienas kadras krinta tiksliai ant grain'o laiko, 90 kHz apvalinimas (±1 tikas) indeksų nekeičia.
-- **33 bitų wrap** išvyniojamas kiekvienam srautui; PTS — DTS atžvilgiu (PTS ir DTS gali būti skirtingose wrap pusėse).
-  Naujo srauto (ar srauto po nutrūkimo) pirmas paketas pririšamas prie paskutinio šaltinio paketo — visi srautai
-  išvynioti vienodai.
-- **Nutrūkimas** (DTS šuolis > 1 s pirmyn arba bet koks atgal): perfiksuojama ties kitu video paketu; jei atvykimas
-  tolydus (`|tęsinys − naujas| ≤ relock_slack`), išėjimo laikas tęsiasi be šuolio, kitaip — naujas fiksavimas.
-- **Dreifas (K6):** atsarga `m = dts_tai − a`, 10 s langų minimumai; 3 langai iš eilės už `L ± 200 ms` → poslinkis ±1
-  kadras (`Event::Slipped`, interlaced lieka laukų poromis, nes tinklelis kadrų). Įvertis `ClockStats::drift_ppm`
-  (mažiausių kvadratų nuolydis per 30 langų) — juo P3 nustato `swr_set_compensation` garsui. Pirmi ~200 ms dreifo
-  sugeriami be slydimo (200 ppm per 1 val. → 13 slydimų, ne 18).
+- **33 bitų wrap** išvyniojamas kiekvienam srautui; PTS — DTS atžvilgiu. Naujo srauto (ar srauto po nutrūkimo)
+  pirmas paketas pririšamas prie paskutinio šaltinio paketo. `wraps` skaičiuojamas šaltiniui, ne srautui.
+- **Nutrūkimas** (DTS šuolis > 1 s pirmyn arba bet koks atgal) pradeda naują epochą; poslinkį nustato pirmas jos
+  paketas (bet kurio srauto): tęsinys iš to srauto pabaigos, jei `|tęsinys − naujas| ≤ relock_slack`, kitaip naujas.
+  Senoji epocha lieka gyva (≤ `epoch_grace_ns` = 2 s arba kol visi srautai pereis) — TS sujungime atsiliekantis ar
+  lenkiantis garsas žymimas savo epochos poslinkiu, nemetamas, nutrūkimas skaičiuojamas vieną kartą.
+- **Latencijos pokytis:** garso atsarga `m_min` 3 langus (po 10 s) iš eilės už `L ± drift_limit` (200 ms) → naujas
+  fiksavimas (`relock_fresh`).
 - **Laikrodžio šuolis** (`ClockWatch` → `on_clock_step(Δ)`): `off += round(Δ / Tf) · Tf`.
 - **Garsas** (`AudioCursor`): mėginio indeksas `round(TAI · 48000 / 10⁹)`; ≤ 1 ms nuokrypis tęsiamas be plyšio,
   didesnis — spraga arba persidengimas (mėginiais).

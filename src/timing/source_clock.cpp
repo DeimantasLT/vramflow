@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// Šaltinio laikrodis — plano §P1 algoritmas (žingsnių numeriai komentaruose sutampa su planu).
+// Šaltinio laikrodis — plano §P1 algoritmas (žingsnių numeriai komentaruose sutampa su planu) su K6 dviem poslinkiais
+// ir epochomis nutrūkimams (žr. source_clock.hpp).
 #include "timing/source_clock.hpp"
 
 #include <algorithm>
@@ -41,6 +42,7 @@ SourceClock::SourceClock(const SourceClockConfig& cfg) : cfg_(cfg) {
     if (cfg_.drift_window_ns <= 0 || cfg_.drift_windows < 1) throw std::invalid_argument("SourceClock: blogas dreifo langas");
     wrap_mod_ = cfg_.wrap_bits == 0 ? 0 : std::uint64_t{1} << cfg_.wrap_bits;
     if (cfg_.align_rate.num > 0) tf_ = time_of(1, cfg_.align_rate);
+    cur_.id = next_epoch_++;
 }
 
 void SourceClock::add_stream(int stream, Rational time_base, bool is_video) {
@@ -63,23 +65,50 @@ std::int64_t SourceClock::wrap_delta(std::int64_t a, std::int64_t b) const {
     return r >= wrap_mod_ / 2 ? static_cast<std::int64_t>(r) - static_cast<std::int64_t>(wrap_mod_) : static_cast<std::int64_t>(r);
 }
 
+bool SourceClock::is_jump(std::int64_t d, Rational tb) const {
+    // 2. Nutrūkimas: DTS šuolis pirmyn > disc_fwd arba atgal > disc_back
+    const std::int64_t dn = to_ns(d, tb);
+    return dn > cfg_.disc_fwd_ns || dn < -cfg_.disc_back_ns;
+}
+
 std::int64_t SourceClock::quantise(std::int64_t off, std::int64_t pts_ns) const {
-    // 5. Kvantavimas: fiksavimo paketo PTS ant artimiausio kadrų tinklelio taško (poslinkis pakinta ≤ Tf/2)
-    if (cfg_.align_rate.num <= 0) return off;
+    // 5. Kvantavimas: video paketo PTS ant artimiausio kadrų tinklelio taško (poslinkis pakinta ≤ Tf/2)
+    if (tf_ == 0) return off;
     const std::int64_t t = pts_ns + off;
     return off + (time_of(index_of(t, cfg_.align_rate), cfg_.align_rate) - t);
+}
+
+void SourceClock::start_epoch(std::int64_t arrival_ns) {
+    if (cur_.ready) {  // užfiksuota epocha lieka gyva vėluojantiems kitų srautų paketams
+        old_ = cur_;
+        old_alive_ = true;
+        old_deadline_ = arrival_ns + cfg_.epoch_grace_ns;
+        discontinuities_.fetch_add(1, std::memory_order_relaxed);
+    }
+    cur_ = Epoch{};
+    cur_.id = next_epoch_++;
 }
 
 void SourceClock::reset_drift() {
     win_open_ = false;
     low_ = high_ = 0;
-    slip_accum_ = 0;
     pts_n_ = pts_head_ = 0;
+    have_last_media_ = false;
+    ramp_acc_ = 0;
+    ppm_ = 0;
+    drift_ppm_.store(0.0, std::memory_order_relaxed);
 }
 
-void SourceClock::close_window(std::int64_t arrival_ns, Event& ev) {
-    // Dreifo įvertis: mažiausių kvadratų nuolydis m_min(a), slydimai išlyginti (slip_accum_), paskutiniai kDriftPoints langų.
-    pts_[pts_head_] = {arrival_ns, win_min_ - slip_accum_};
+void SourceClock::publish() {
+    constexpr auto r = std::memory_order_relaxed;
+    locked_pub_.store(cur_.ready, r);
+    off_v_pub_.store(cur_.v_ready ? cur_.off_v : cur_.off_a, r);
+    off_a_pub_.store(cur_.off_a, r);
+}
+
+bool SourceClock::close_window(std::int64_t arrival_ns) {
+    // 9. Dreifo įvertis: mažiausių kvadratų nuolydis žalios atsargos m_min(a) per paskutinius kDriftPoints langų.
+    pts_[pts_head_] = {arrival_ns, win_min_};
     pts_head_ = (pts_head_ + 1) % kDriftPoints;
     pts_n_ = std::min(pts_n_ + 1, kDriftPoints);
     if (pts_n_ >= 3) {
@@ -92,28 +121,24 @@ void SourceClock::close_window(std::int64_t arrival_ns, Event& ev) {
             sx += x, sy += y, sxx += x * x, sxy += x * y;
         }
         const double n = static_cast<double>(pts_n_), den = n * sxx - sx * sx;
-        if (den > 0) drift_ppm_.store((n * sxy - sx * sy) / den * 1e6, std::memory_order_relaxed);
+        if (den > 0) {
+            ppm_ = std::clamp((n * sxy - sx * sy) / den * 1e6, -kMaxCompPpm, kMaxCompPpm);
+            drift_ppm_.store(ppm_, std::memory_order_relaxed);
+        }
     }
-
-    // 9. Slydimas: drift_windows langų iš eilės už L ± drift_limit → ±1 kadras (po vieną per langą)
-    if (tf_ == 0) return;
-    if (win_min_ < cfg_.latency_ns - cfg_.drift_limit_ns) {
+    // Apsauga: garso atsarga (su off_a) drift_windows langų iš eilės už L ± drift_limit — latencija pasikeitė
+    // daugiau, nei sugeria rampa → naujas fiksavimas.
+    const std::int64_t m_min = win_min_ + cur_.off_a;
+    if (m_min < cfg_.latency_ns - cfg_.drift_limit_ns) {
         ++low_;
         high_ = 0;
-    } else if (win_min_ > cfg_.latency_ns + cfg_.drift_limit_ns) {
+    } else if (m_min > cfg_.latency_ns + cfg_.drift_limit_ns) {
         ++high_;
         low_ = 0;
     } else {
         low_ = high_ = 0;
     }
-    std::int64_t step = 0;
-    if (low_ >= cfg_.drift_windows) step = tf_;          // per maža atsarga: kadras pakartojamas
-    else if (high_ >= cfg_.drift_windows) step = -tf_;   // per didelė: kadras išmetamas
-    if (step == 0) return;
-    off_.store(off_.load(std::memory_order_relaxed) + step, std::memory_order_relaxed);
-    slip_accum_ += step;
-    drift_slips_.fetch_add(1, std::memory_order_relaxed);
-    ev = Event::Slipped;
+    return low_ >= cfg_.drift_windows || high_ >= cfg_.drift_windows;
 }
 
 Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_raw, std::int64_t dur_raw, std::int64_t arrival_tai_ns) {
@@ -125,21 +150,23 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
 
     Stream& s = streams_[static_cast<std::size_t>(stream)];
     const bool lock_kind = s.is_video || !has_video_;  // fiksavimo / dreifo srautas: video, o be video — bet kuris
+    if (old_alive_ && arrival_tai_ns > old_deadline_) old_alive_ = false;
 
-    // 1. Išvyniojimas. Srautas, kurio paskutinis paketas iš senos epochos (ar pirmas jo paketas), pririšamas prie
-    // paskutinio šaltinio paketo — taip visi srautai išvynioti vienodai (ir per wrap, ir po nutrūkimo).
+    // 1. Išvyniojimas ir epochos parinkimas. Srautas dabartinėje epochoje — savo ankstesnio paketo atžvilgiu (šuolis =
+    // nutrūkimas). Srautas, kurio paskutinis paketas senoje (dar gyvoje) epochoje: jei arti savo ankstesnio — tai
+    // senos epochos paketas; kitaip jis jau naujoje ir pririšamas prie paskutinio dabartinės epochos paketo (taip pat
+    // pirmas srauto paketas) — visi srautai išvynioti vienodai ir per wrap, ir po nutrūkimo.
     std::int64_t dts_ext;
-    bool jump = false;
-    if (s.have_last && s.epoch == epoch_) {
+    bool in_old = false, jump = false;
+    if (s.have_last && s.epoch == cur_.id) {
         const std::int64_t d = wrap_delta(dts_raw, s.last_raw);
-        if (wrap_mod_ != 0 && d != static_cast<std::int64_t>(static_cast<std::uint64_t>(dts_raw) - static_cast<std::uint64_t>(s.last_raw)))
-            wraps_.fetch_add(1, std::memory_order_relaxed);
         dts_ext = s.last_ext + d;
-        // 2. Nutrūkimas
-        const std::int64_t dn = to_ns(d, s.tb);
-        jump = dn > cfg_.disc_fwd_ns || dn < -cfg_.disc_back_ns;
-    } else if (have_ref_ && same_tb(ref_tb_, s.tb)) {
-        dts_ext = ref_ext_ + wrap_delta(dts_raw, ref_raw_);
+        jump = is_jump(d, s.tb);
+    } else if (s.have_last && old_alive_ && s.epoch == old_.id && !is_jump(wrap_delta(dts_raw, s.last_raw), s.tb)) {
+        in_old = true;
+        dts_ext = s.last_ext + wrap_delta(dts_raw, s.last_raw);
+    } else if (cur_.have_ref && same_tb(cur_.ref_tb, s.tb)) {
+        dts_ext = cur_.ref_ext + wrap_delta(dts_raw, cur_.ref_raw);
     } else if (s.have_last) {
         dts_ext = s.last_ext + wrap_delta(dts_raw, s.last_raw);
     } else {
@@ -147,87 +174,154 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
     }
     // PTS — DTS atžvilgiu (PTS ir DTS gali būti skirtingose wrap pusėse)
     const std::int64_t pts_ext = dts_ext + wrap_delta(pts_raw, dts_raw);
-
     s.have_last = true;
     s.last_raw = dts_raw;
     s.last_ext = dts_ext;
-    if (jump) {
-        ++epoch_;  // kiti srautai savo kitą paketą pririš prie šio
-        if (state_.load(std::memory_order_relaxed) == State::Locked) {
-            state_.store(State::AwaitRelock, std::memory_order_relaxed);
-            discontinuities_.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-    s.epoch = epoch_;
-    have_ref_ = true;
-    ref_tb_ = s.tb;
-    ref_raw_ = dts_raw;
-    ref_ext_ = dts_ext;
+    if (jump) start_epoch(arrival_tai_ns);
 
     const std::int64_t dts_ns = to_ns(dts_ext, s.tb), pts_ns = to_ns(pts_ext, s.tb);
-    Event ev = Event::None;
-    const State st = state_.load(std::memory_order_relaxed);
-    if (st != State::Locked) {
-        if (!lock_kind) {
-            prelock_dropped_.fetch_add(1, std::memory_order_relaxed);
-            return kDrop;
+    const std::int64_t dur_ns = dur_raw > 0 ? to_ns(dur_raw, s.tb) : (s.is_video ? tf_ : 0);
+
+    if (in_old) {  // senos epochos paketas — jos poslinkiais (sustingusiais nutrūkimo metu)
+        const std::int64_t off = s.is_video && old_.v_ready ? old_.off_v : old_.off_a;
+        const Stamp out{pts_ns + off, dts_ns + off, Event::None};
+        s.end_tai = out.dts_tai_ns + dur_ns;
+        s.have_end = true;
+        return out;
+    }
+
+    s.epoch = cur_.id;
+    cur_.have_ref = true;
+    cur_.ref_tb = s.tb;
+    cur_.ref_raw = dts_raw;
+    cur_.ref_ext = dts_ext;
+    if (wrap_mod_ != 0) {  // wrap — šaltinio laiko juostos perėjimas per M kartotinį (ne kiekvieno srauto)
+        const auto hi = static_cast<std::int64_t>(floor_div(dts_ext, static_cast<i128>(wrap_mod_)));
+        if (!have_wrap_hi_) {
+            have_wrap_hi_ = true;
+            wrap_hi_ = hi;
+        } else if (hi > wrap_hi_) {
+            wraps_.fetch_add(static_cast<std::uint64_t>(hi - wrap_hi_), std::memory_order_relaxed);
+            wrap_hi_ = hi;
         }
-        // 3. Fiksavimas / 4. perfiksavimas po nutrūkimo
-        const std::int64_t fresh = arrival_tai_ns + cfg_.latency_ns - dts_ns;
-        std::int64_t off = fresh;
-        if (st == State::AwaitRelock) {
-            const std::int64_t cont = end_tai_ - dts_ns;
-            if (have_end_ && abs64(cont - fresh) <= cfg_.relock_slack_ns) {
-                off = cont;
-                relock_cont_.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (old_alive_)
+        old_alive_ = std::any_of(streams_.begin(), streams_.end(), [&](const Stream& t) { return t.have_last && t.epoch == old_.id; });
+
+    Event ev = Event::None;
+    const bool grid_video = s.is_video && tf_ > 0;
+    if (!cur_.ready) {
+        if (!ever_locked_) {
+            // 3. Pirmas fiksavimas — ties pirmu video paketu (be video — pirmu paketu); ankstesni metami
+            if (!lock_kind) {
+                prelock_dropped_.fetch_add(1, std::memory_order_relaxed);
+                return kDrop;
+            }
+            cur_.off_a = arrival_tai_ns + cfg_.latency_ns - dts_ns;
+            if (grid_video) {
+                cur_.off_v = quantise(cur_.off_a, pts_ns);
+                cur_.off_a = cur_.off_v;  // pradžioje A ir V sutampa
+                cur_.v_ready = true;
+            }
+            ever_locked_ = true;
+            ev = Event::Locked;
+        } else {
+            // 4. Perfiksavimas — pirmas naujos epochos paketas (bet kurio srauto): tęsinys iš šio srauto pabaigos E
+            const std::int64_t fresh = arrival_tai_ns + cfg_.latency_ns - dts_ns;
+            const std::int64_t cont = s.end_tai - dts_ns;
+            const bool use_cont = s.have_end && abs64(cont - fresh) <= cfg_.relock_slack_ns;
+            (use_cont ? relock_cont_ : relock_fresh_).fetch_add(1, std::memory_order_relaxed);
+            const std::int64_t off = use_cont ? cont : fresh;
+            if (grid_video) {
+                cur_.off_v = quantise(off, pts_ns);
+                cur_.v_ready = true;
+                // tęsinyje garsas pasislenka tiek pat, kiek video — A/V santykis išlieka
+                cur_.off_a = use_cont && old_.v_ready ? old_.off_a + (cur_.off_v - old_.off_v) : cur_.off_v;
             } else {
-                relock_fresh_.fetch_add(1, std::memory_order_relaxed);
+                cur_.off_a = off;
             }
             ev = Event::Relocked;
-        } else {
-            ev = Event::Locked;
         }
-        off_.store(quantise(off, pts_ns), std::memory_order_relaxed);
-        state_.store(State::Locked, std::memory_order_relaxed);
+        cur_.ready = true;
         reset_drift();
-    } else if (lock_kind && win_open_ && arrival_tai_ns - win_start_ >= cfg_.drift_window_ns) {
-        close_window(arrival_tai_ns, ev);  // gali pakeisti poslinkį — šis paketas jau su nauju
-        win_open_ = false;
+    } else if (grid_video && !cur_.v_ready) {
+        // Epochą pradėjo garsas: video tinklelis — artimiausias tolydžiam garso poslinkiui (≤ Tf/2)
+        cur_.off_v = quantise(cur_.off_a, pts_ns);
+        cur_.v_ready = true;
+        ev = Event::Relocked;
+    }
+
+    if (lock_kind) {
+        if (ev == Event::None && win_open_ && arrival_tai_ns - win_start_ >= cfg_.drift_window_ns) {
+            win_open_ = false;
+            if (close_window(arrival_tai_ns)) {
+                cur_.off_a = arrival_tai_ns + cfg_.latency_ns - dts_ns;
+                if (grid_video) cur_.off_a = cur_.off_v = quantise(cur_.off_a, pts_ns);
+                relock_fresh_.fetch_add(1, std::memory_order_relaxed);
+                ev = Event::Relocked;
+                reset_drift();
+            }
+        }
+        // Garso rampa: off_a seka šaltinio laikrodį (d off_a = −ppm · d medija), be laiptų
+        if (have_last_media_) {
+            ramp_acc_ -= ppm_ * 1e-6 * static_cast<double>(dts_ns - last_media_);
+            const auto whole = static_cast<std::int64_t>(ramp_acc_);
+            cur_.off_a += whole;
+            ramp_acc_ -= static_cast<double>(whole);
+        }
+        have_last_media_ = true;
+        last_media_ = dts_ns;
+        // Video slydimas sveiku kadru, kad |off_v − off_a| ≤ Tf/2 (K6)
+        if (tf_ > 0 && cur_.v_ready) {
+            bool slipped = false;
+            while (cur_.off_v - cur_.off_a > tf_ / 2) cur_.off_v -= tf_, slipped = true;
+            while (cur_.off_a - cur_.off_v > tf_ / 2) cur_.off_v += tf_, slipped = true;
+            if (slipped) {
+                drift_slips_.fetch_add(1, std::memory_order_relaxed);
+                if (ev == Event::None) ev = Event::Slipped;
+            }
+        }
     }
 
     // 6. Žyma
-    const std::int64_t off = off_.load(std::memory_order_relaxed);
+    const std::int64_t off = s.is_video && cur_.v_ready ? cur_.off_v : cur_.off_a;
     const Stamp out{pts_ns + off, dts_ns + off, ev};
-    if (lock_kind) {
-        end_tai_ = out.dts_tai_ns + (dur_raw > 0 ? to_ns(dur_raw, s.tb) : tf_);
-        have_end_ = true;
-        // 9. Atsarga m = dts_tai − a; lango minimumas
-        const std::int64_t m = out.dts_tai_ns - arrival_tai_ns;
+    s.end_tai = out.dts_tai_ns + dur_ns;
+    s.have_end = true;
+    if (lock_kind) {  // žalia atsarga ns(dts) − a; lango minimumas
+        const std::int64_t r = dts_ns - arrival_tai_ns;
         if (!win_open_) {
             win_open_ = true;
             win_start_ = arrival_tai_ns;
-            win_min_ = m;
+            win_min_ = r;
         } else {
-            win_min_ = std::min(win_min_, m);
+            win_min_ = std::min(win_min_, r);
         }
     }
+    publish();
     return out;
 }
 
 void SourceClock::on_clock_step(std::int64_t step_ns) {
-    // 10. Laikrodžio šuolis: poslinkis sveiku kadrų skaičiumi (be tinklelio — tiksliai Δ). Dreifo langai iš naujo, nes
-    // atvykimo laikas pašoko kartu.
+    // 10. Laikrodžio šuolis: abu poslinkiai sveiku kadrų skaičiumi (be tinklelio — tiksliai Δ); dreifo langai iš
+    // naujo, nes atvykimo laikas pašoko kartu.
     clock_steps_.fetch_add(1, std::memory_order_relaxed);
-    if (state_.load(std::memory_order_relaxed) == State::Unlocked) return;
+    if (!cur_.ready) return;
     const std::int64_t k = tf_ > 0 ? round_to_multiple(step_ns, tf_) : step_ns;
-    off_.store(off_.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
-    end_tai_ += k;
+    cur_.off_v += k;
+    cur_.off_a += k;
+    old_.off_v += k;
+    old_.off_a += k;
+    for (Stream& s : streams_) s.end_tai += k;
     reset_drift();
+    publish();
 }
 
-bool SourceClock::locked() const { return state_.load(std::memory_order_relaxed) == State::Locked; }
+bool SourceClock::locked() const { return locked_pub_.load(std::memory_order_relaxed); }
 
-std::int64_t SourceClock::offset_ns() const { return off_.load(std::memory_order_relaxed); }
+std::int64_t SourceClock::offset_ns() const { return off_v_pub_.load(std::memory_order_relaxed); }
+
+std::int64_t SourceClock::audio_offset_ns() const { return off_a_pub_.load(std::memory_order_relaxed); }
 
 ClockStats SourceClock::stats() const {
     constexpr auto r = std::memory_order_relaxed;

@@ -138,6 +138,7 @@ TEST_CASE("source_clock: šaltinis dingo 10 s", "[timing][source_clock]") {
 
 TEST_CASE("source_clock: du flow'ai lieka sulygiuoti", "[timing][source_clock]") {
     // Video (0) ir garsas (1) su tuo pačiu PTS: prieš wrap, per jį ir po nutrūkimo (+10 s ties k = 120).
+    // Garso paketas 40 ms (1920 mėginių) — trukmė atitinka paketų tarpą (tęsinys skaičiuojamas iš garso pabaigos).
     const bool audio_first = GENERATE(false, true);
     INFO("po nutrūkimo pirmas atkeliauja " << (audio_first ? "garsas" : "video"));
     SourceClock sc(cfg25());
@@ -150,11 +151,11 @@ TEST_CASE("source_clock: du flow'ai lieka sulygiuoti", "[timing][source_clock]")
         const std::int64_t a = kA0 + k * kTf;
         Stamp v{}, au{};
         if (audio_first && k >= 120) {
-            au = sc.observe(1, raw, raw, 1920, a);
+            au = sc.observe(1, raw, raw, kFrame, a);
             v = sc.observe(0, raw, raw, kFrame, a + 1000);
         } else {
             v = sc.observe(0, raw, raw, kFrame, a);
-            au = sc.observe(1, raw, raw, 1920, a + 1000);
+            au = sc.observe(1, raw, raw, kFrame, a + 1000);
         }
         if (v.ev == Event::Dropped || au.ev == Event::Dropped) continue;
         ++pairs;
@@ -163,9 +164,9 @@ TEST_CASE("source_clock: du flow'ai lieka sulygiuoti", "[timing][source_clock]")
         if (std::abs(tv - ta) > 10'417) ++bad;
     }
     CHECK(bad == 0);
-    CHECK(pairs >= 199);  // tik garsas ties k = 120 „garsas pirmas“ atveju laukia perfiksavimo
+    CHECK(pairs == 200);  // nė vienas paketas nemetamas
     const ClockStats cs = sc.stats();
-    CHECK(cs.wraps >= 1);
+    CHECK(cs.wraps == 1);  // vienas šaltinio wrap, ne po vieną kiekvienam srautui
     CHECK(cs.discontinuities == 1);
     CHECK(cs.relock_cont == 1);
 }
@@ -200,36 +201,126 @@ TEST_CASE("source_clock: laikrodžio šuolis", "[timing][source_clock]") {
 
 TEST_CASE("source_clock: dreifas +200 ppm", "[timing][source_clock]") {
     // Atvykimas 200 ppm lėtesnis nei DTS (šaltinio laikrodis greitesnis): m = dts_tai − a auga 0,2 ms/s.
-    // Atvirkštinis atvejis (−200 ppm) — simetriškas. 1 val. medijos laiko = 90 000 kadrų.
+    // Atvirkštinis atvejis (−200 ppm) — simetriškas. 1 val. medijos laiko = 90 000 kadrų; video (0) + garsas (1),
+    // garso paketas = 40 ms = 1920 mėginių. K6: video slysta sveikais kadrais, garsas — tolydus (be laiptų), o
+    // dreifą garse sugeria resampleris (P3: swr_set_compensation pagal drift_ppm) — čia jis emuliuojamas mėginių skaičiumi.
     const int sign = GENERATE(+1, -1);
     INFO("dreifas " << sign * 200 << " ppm");
     SourceClock sc(cfg25());
     sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
     const double rate = 1.0 - sign * 200e-6;  // atvykimo ns vienai medijos ns
-    std::uint64_t slipped = 0, relocked = 0;
-    std::int64_t worst = 0;
+    std::uint64_t slipped = 0, relocked = 0, audio_steps = 0, cursor_gaps = 0, av_far = 0;
+    std::int64_t worst_v = 0, worst_a = 0, prev_a = 0;
+    AudioCursor cur;
+    double carry = 0;  // resamplerio emuliacijos trupmena
     const std::int64_t off0 = [&] {
         REQUIRE(video(sc, 0, kA0).ev == Event::Locked);
         return sc.offset_ns();
     }();
-    for (int k = 1; k < 90'000; ++k) {
+    for (int k = 0; k < 90'000; ++k) {
         const std::int64_t a = kA0 + static_cast<std::int64_t>(static_cast<double>(k) * kTf * rate);
-        const Stamp s = video(sc, k * kFrame, a);
-        if (s.ev == Event::Slipped) ++slipped;
-        if (s.ev == Event::Relocked) ++relocked;
-        worst = std::max(worst, std::abs(s.dts_tai_ns - a - kL));
+        if (k > 0) {
+            const Stamp v = video(sc, k * kFrame, a);
+            if (v.ev == Event::Slipped) ++slipped;
+            if (v.ev == Event::Relocked) ++relocked;
+            worst_v = std::max(worst_v, std::abs(v.dts_tai_ns - a - kL));
+        }
+        if (std::abs(sc.offset_ns() - sc.audio_offset_ns()) > kTf / 2 + 1'000'000) ++av_far;
+        const Stamp au = sc.observe(1, k * kFrame, k * kFrame, kFrame, a + 1000);
+        REQUIRE(au.ev != Event::Dropped);
+        worst_a = std::max(worst_a, std::abs(au.dts_tai_ns - a - kL));
+        if (k > 0 && std::abs(au.pts_tai_ns - prev_a - kTf) > 1'000'000) ++audio_steps;
+        prev_a = au.pts_tai_ns;
+        const double want = 1920.0 * (1.0 - sc.stats().drift_ppm * 1e-6) + carry;  // swr kompensacija
+        const auto n = static_cast<std::uint32_t>(want);
+        carry = want - n;
+        std::int64_t gap = 0;
+        cur.place(au.pts_tai_ns, n, 48000, 48, gap);
+        if (gap != 0) ++cursor_gaps;
     }
     const ClockStats cs = sc.stats();
-    // Planas sako 17–19 (= 0,72 s / 40 ms), bet pinned algoritmas (9 žingsnis) slysta tik kai m_min išeina už
-    // L ± drift_limit (200 ms): pirmi ~200 ms dreifo sugeriami be slydimo → (720 − 200 ± 20) / 40 ≈ 12–14.
-    CHECK(cs.drift_slips >= 12);
-    CHECK(cs.drift_slips <= 14);
+    // Slydimas, kai |off_v − off_a| > Tf/2: 0,72 s dreifo − pirmi ~30 s be įverčio → ~18 slydimų (planas: 17–19).
+    CHECK(cs.drift_slips >= 17);
+    CHECK(cs.drift_slips <= 19);
     CHECK(slipped == cs.drift_slips);
     CHECK(relocked == 0);
     CHECK(cs.discontinuities == 0);
-    CHECK(worst <= 240'000'000);
+    CHECK(av_far == 0);
+    CHECK(audio_steps == 0);
+    CHECK(cursor_gaps == 0);
+    CHECK(worst_a <= 30'000'000);  // garso atsarga laikoma ties L (kvantavimas ≤ 20 ms + ~6 ms iki pirmo įverčio)
+    CHECK(worst_v <= 60'000'000);
     CHECK(sc.offset_ns() - off0 == -sign * static_cast<std::int64_t>(cs.drift_slips) * kTf);
     CHECK(std::abs(cs.drift_ppm - sign * 200.0) <= 1.0);
+}
+
+TEST_CASE("source_clock: sujungimas — garsas atsilieka / lenkia video", "[timing][source_clock]") {
+    // TS sujungimas (splice): DTS šuolis ties k = 100, garsas multipleksuotas `lag` kadrų vėliau (> 0) arba
+    // anksčiau (< 0) nei video su tuo pačiu PTS. 8 kadrai = 320 ms (≥ 300 ms).
+    const int lag = GENERATE(1, -1, 8, -8);
+    const std::int64_t jump = GENERATE(std::int64_t{900'000}, std::int64_t{-450'000});
+    INFO("lag " << lag << " kadr., DTS šuolis " << jump);
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    constexpr int kN = 200;
+    auto raw_of = [&](int k) { return 900'000 + k * kFrame + (k >= 100 ? jump : 0); };
+    std::vector<Stamp> v(kN), au(kN);
+    std::vector<bool> seen(kN, false);  // garsui lenkiant pirmi −lag paketai būtų prieš pirmą video — neišsiunčiami
+    int dropped = 0, observed = 0;
+    for (int t = 0; t < kN + 8; ++t) {
+        const std::int64_t a = kA0 + t * kTf;
+        if (t < kN) v[static_cast<std::size_t>(t)] = sc.observe(0, raw_of(t), raw_of(t), kFrame, a);
+        const int k = t - lag;
+        if (k >= 0 && k < kN) {
+            au[static_cast<std::size_t>(k)] = sc.observe(1, raw_of(k), raw_of(k), kFrame, a + 1000);
+            seen[static_cast<std::size_t>(k)] = true;
+        }
+    }
+    int far = 0;
+    for (std::size_t k = 0; k < kN; ++k) {
+        if (!seen[k]) continue;
+        ++observed;
+        if (v[k].ev == Event::Dropped || au[k].ev == Event::Dropped) {
+            ++dropped;
+            continue;
+        }
+        if (std::abs(au[k].pts_tai_ns - v[k].pts_tai_ns) > 1'000'000) ++far;
+        if (k > 0) CHECK(v[k].pts_tai_ns - v[k - 1].pts_tai_ns == kTf);  // tęsinys be šuolio
+    }
+    CHECK(observed == kN - std::max(0, -lag));
+    CHECK(dropped == 0);
+    CHECK(far == 0);
+    const ClockStats cs = sc.stats();
+    CHECK(cs.discontinuities == 1);
+    CHECK(cs.relock_cont == 1);
+    CHECK(cs.relock_fresh == 0);
+}
+
+TEST_CASE("source_clock: latencijos pokytis > drift_limit — perfiksavimas", "[timing][source_clock]") {
+    // Atvykimas nuolat vėluoja +500 ms (tinklo kelias pasikeitė), DTS tolydus: ne nutrūkimas, bet atsarga m_min
+    // drift_windows langus iš eilės už L − drift_limit → naujas fiksavimas (relock_fresh), atsarga vėl ≈ L.
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    int relocked = 0;
+    std::int64_t last_m = 0;
+    for (int k = 0; k < 6000; ++k) {
+        const std::int64_t a = kA0 + k * kTf + (k >= 3000 ? 500'000'000 : 0);
+        const Stamp s = video(sc, 900'000 + k * kFrame, a);
+        REQUIRE(s.ev != Event::Dropped);
+        if (s.ev == Event::Relocked) {
+            ++relocked;
+            CHECK(k > 3000);
+            CHECK(std::abs(s.dts_tai_ns - (a + kL)) <= kTf / 2);
+        }
+        last_m = s.dts_tai_ns - a;
+    }
+    CHECK(relocked == 1);
+    CHECK(std::abs(last_m - kL) <= kTf / 2 + 1'000'000);
+    const ClockStats cs = sc.stats();
+    CHECK(cs.relock_fresh == 1);
+    CHECK(cs.discontinuities == 0);
 }
 
 TEST_CASE("audio_cursor: tolydumas", "[timing][audio_cursor]") {
