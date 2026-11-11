@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/index_math.hpp"
+#include "func/cuda_upload.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "media/media_kernels.hpp"
@@ -27,7 +28,7 @@ struct DeviceLogo {
     bool upload(const media::ref::Logo& l, int x, int y) {
         auto up = [&](const void* src, std::size_t bytes) -> void* {
             void* p = nullptr;
-            if (cudaMalloc(&p, bytes) != cudaSuccess || cudaMemcpy(p, src, bytes, cudaMemcpyHostToDevice) != cudaSuccess) return nullptr;
+            if (cudaMalloc(&p, bytes) != cudaSuccess || upload_h2d(p, src, bytes) != cudaSuccess) return nullptr;
             bufs.push_back(p);
             return p;
         };

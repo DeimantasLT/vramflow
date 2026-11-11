@@ -48,16 +48,40 @@ def hq(r, name, q):
     return "–" if v is None else f"{v:.2f}"
 
 
+def coverage(r):
+    """R21: verify aprėptis {samples, expected, coverage, check_dropped}. Naujuose JSON — r["verify_coverage"]; senuose
+    (be to lauko) perskaičiuojama iš pakopos katalogo summary-verify-composite.json (greta capacity-*.json)."""
+    c = r.get("verify_coverage")
+    if c:
+        return c
+    path = os.path.join(r.get("_dir", "."), f"composite-k{r['layers']}-{r['variant']}-n{r['n']}", "summary-verify-composite.json")
+    try:
+        vs = json.load(open(path))
+    except (OSError, ValueError):
+        return None
+    exp = (vs.get("last_index", 0) - vs.get("first_index", 0) + 1) * r["n"] // (r.get("every") or 25)
+    got = vs.get("proc", {}).get("samples_total", 0)
+    return {"samples": got, "expected": exp, "coverage": round(got / exp, 3) if exp else None,
+            "check_dropped": sum(f.get("check_dropped", 0) for f in vs.get("flows", []))}
+
+
+LOW_COVERAGE = 0.5  # R21: pakopos su mažesne patikros aprėptimi žymimos (PASS apibrėžimas nekeičiamas)
+
+
 def composite_section(rows):
-    """composite N × K × {C,H,G}: lentelės pagal (K, variantas), N* matrica, praleistos pakopos (VRAM) — be nuorodų į kodą,
-    kiekviena eilutė atsekama iki capacity-composite-k<K>-<V>.all.json."""
+    """composite N × K × {C,H,G}: lentelės pagal (K, variantas), N* matrica, praleistos pakopos. Kiekviena eilutė atsekama iki
+    capacity-composite-k<K>-<V>.all.json (praleista rankiniu būdu perklasifikuota eilutė — iki bandymo failo)."""
     md = ["# composite — talpa N × K (C / H / G)", "",
           "Funkcijos CPU — tik `composite` procesas (šaltiniai gen, gfxgen ir patikra `verify` atskirai, informacijai). "
           "Latencija: `proc` — nuo visų įėjimų paruošimo iki išėjimo commit'o; `vėlavimas` — commit'as po lauko laiko "
-          "(`out_lateness`), p50/p99 ms visame composite veikimo laike. GPU % / W — nvidia-smi 1 Hz matavimo lange.", ""]
+          "(`out_lateness`), p50/p99 ms visame composite veikimo laike. GPU % / W — nvidia-smi 1 Hz matavimo lange. "
+          f"`patikra %` — `verify` aprėptis: patikrinta mėginių / laukiama (lauko indeksų intervalas × N / `--every`); "
+          f"`⚠` — aprėptis < {LOW_COVERAGE:.0%} (PASS apibrėžimas nepakeistas, bet pakopa patikrinta tik iš dalies); "
+          "`nuleista` — `check_dropped` (patikros, kurių verify nespėjo).", ""]
     ks = sorted({r["layers"] for r in rows})
     vs = [v for v in "CHG" if any(r["variant"] == v for r in rows)]
-    nstar = {}
+    nmap = {}
+    lowcov = []
     for k in ks:
         for v in vs:
             rs = [r for r in rows if r["layers"] == k and r["variant"] == v]
@@ -65,47 +89,52 @@ def composite_section(rows):
                 continue
             md += [f"## K = {k} — {VARIANT_NAME.get(v, v)} (šaltinis: {rs[0].get('source')}, išėjimas {rs[0].get('out_format')}, "
                    f"deadline {rs[0].get('deadline_ms')} ms)", "",
-                   "| N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | CPU/srautui (composite) | gfxgen CPU | "
-                   "gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |",
-                   "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                   "| N | griežtai | tol | praradimai % | RT | teisingumo klaidos | verify mėginių | patikra % | nuleista | CPU/srautui (composite) | "
+                   "gfxgen CPU | gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |",
+                   "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
             for r in sorted(rs, key=lambda r: r["n"]):
                 if r.get("skipped"):
-                    md.append(f"| {r['n']} | praleista | praleista | | | | | | | | | | | | | {r['skip_reason']} |")
+                    src = r.get("attempt_file") or r["_src"]
+                    note = " (ne harness išvestis: rankinė perklasifikacija)" if r.get("manual_reclassification") else ""
+                    md.append(f"| {r['n']} | praleista | praleista | | | | | | | | | | | | | | | {r['skip_reason']}{note}; `{src}` |")
                     continue
                 g = r.get("gpu")
+                cov = coverage(r)
+                low = bool(cov and cov["coverage"] is not None and cov["coverage"] < LOW_COVERAGE)
+                if low:
+                    lowcov.append((k, v, r["n"], cov["coverage"]))
+                covs = "–" if not cov or cov["coverage"] is None else f"{cov['coverage'] * 100:.0f}{' ⚠' if low else ''}"
                 samples = sum(c.get("samples_total", 0) for c in (r.get("verify") or {}).values())
                 md.append(f"| {r['n']} | {'PASS' if r['pass'] else 'FAIL'} | {'PASS' if r.get('pass_tol') else 'FAIL'} | "
                           f"{r.get('loss_fraction', 0) * 100:.3f} | {r['realtime_ratio']:.4f} | {r['verification_errors']} | {samples} | "
+                          f"{covs} | {'–' if not cov else cov['check_dropped']} | "
                           f"{r['cpu_cores_func_per_stream']:.3f} | {r['cpu_cores_gfxgen_per_stream']:.3f} | {r['cpu_cores_gen_per_stream']:.3f} | "
                           f"{hq(r, 'proc_ms', 'p50')} / {hq(r, 'proc_ms', 'p99')} | "
                           f"{hq(r, 'out_lateness', 'p50')} / {hq(r, 'out_lateness', 'p99')} | {r.get('vram_delta_mb')} | "
                           f"{'–' if not g else f'{g['util_gpu']['mean']:.0f}'} | {'–' if not g else f'{g['power_w']['mean']:.0f}'} | "
                           f"`{r['_src']}` |")
             ran = [r for r in rs if not r.get("skipped")]
-            nstar[(k, v)] = (nstar_of(ran, "pass"), nstar_of(ran, "pass_tol"), max((r["n"] for r in ran), default=0),
-                             sorted({r["n"] for r in rs if r.get("skipped")}))
-            ns, nt, top, sk = nstar[(k, v)]
-            md += ["", f"N* griežtai = **{ns}**, N* tol = **{nt}**" + (" (ribos nepasiekta)" if nt == top and nt else ""), ""]
+            skipped = sorted({r["n"] for r in rs if r.get("skipped")})
+            nmap[(k, v)] = (nstar(ran, "pass"), nstar(ran, "pass_tol"), max((r["n"] for r in ran), default=0), skipped)
+            ns, nt, top, sk = nmap[(k, v)]
+            tail = ""
+            if sk:
+                tail = f" (N={','.join(map(str, sk))} praleista, žr. eilutės priežastį — riba nepasiekta tik todėl, kad pakopos nevykdytos)"
+            md += ["", f"N* griežtai = **{ns}**, N* tol = **{nt}**" + tail, ""]
     md += ["## Suvestinė — didžiausias N (N*), kai visi mažesni PASS", "",
-           "Reikšmė „griežtai / tol“. „+“ — didžiausia išbandyta pakopa praėjo (riba nepasiekta); kitu atveju pirmas FAIL "
-           "ties kita pakopa. Pakopos, kurių nevykdė (VRAM riba arba 2 FAIL iš eilės), nėra N* dalis.", "",
+           "Reikšmė „griežtai / tol“. Skliaustuose — praleistos didesnės pakopos (VRAM / rankinė perklasifikacija); tokiu atveju N* nėra "
+           "talpos riba. Pakopos, kurių nevykdė stop-after-fails taisyklė, nėra N* dalis.", "",
            "| K | " + " | ".join(f"{v}" for v in vs) + " |", "|---|" + "---|" * len(vs)]
     for k in ks:
         cells = []
         for v in vs:
-            ns, nt, top, sk = nstar.get((k, v), (0, 0, 0, []))
-            cells.append(f"{ns} / {nt}{'+' if nt == top and nt else ''}")
+            ns, nt, top, sk = nmap.get((k, v), (0, 0, 0, []))
+            cells.append(f"{ns} / {nt}" + (f" (N={','.join(map(str, sk))} praleista)" if sk else ""))
         md.append(f"| {k} | " + " | ".join(cells) + " |")
+    if lowcov:
+        md += ["", f"Pakopos su patikros aprėptimi < {LOW_COVERAGE:.0%} (R21): " +
+               ", ".join(f"K={k} {v} N={n} ({c * 100:.0f} %)" for k, v, n, c in lowcov) + "."]
     return md + [""]
-
-
-def nstar_of(rows, key):
-    best = 0
-    for n, (ok, _) in by_n(rows, key).items():
-        if not ok:
-            break
-        best = n
-    return best
 
 
 def main():
@@ -115,6 +144,7 @@ def main():
         for p in glob.glob(os.path.join(d, "capacity-*.json")):
             for r in json.load(open(p)):
                 r["_src"] = os.path.relpath(p)
+                r["_dir"] = os.path.dirname(p)
                 rows.append(r)
     groups = defaultdict(list)
     comp = []

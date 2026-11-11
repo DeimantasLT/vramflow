@@ -6,7 +6,8 @@
 # Variantai leidžiami pakaitomis kiekvienai N pakopai (C, H, G, C, H, G…), kad laiko efektai pasiskirstytų vienodai.
 # Naudojimas: 71-compare.sh <out> [funkcija=logo] [N sąrašas]
 # composite: LAYERS="1,2,4" (K sąrašas; išorinis ciklas), OUT_FORMAT=v210|v210a, SOURCE=same|fair (C šaltinis),
-#   STOP_FAILS=2 (variantas K sluoksniams praleidžia didesnes N po tiek PASS_tol FAIL iš eilės; 0 — nesustoti).
+#   STOP_FAILS (numatyta composite: 2 — variantas K sluoksniams praleidžia didesnes N po tiek PASS_tol FAIL iš eilės;
+#   kitoms funkcijoms 0 — nesustoti, kaip anksčiau).
 source "$(dirname "$0")/env.sh"
 set +e
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -25,7 +26,7 @@ if [[ $FUNC == composite ]]; then
 else
   KL=("")
 fi
-STOP_FAILS="${STOP_FAILS:-2}"
+if [[ $FUNC == composite ]]; then STOP_FAILS="${STOP_FAILS:-2}"; else STOP_FAILS="${STOP_FAILS:-0}"; fi
 IFS=';' read -ra VL <<< "${VARIANTS:-$DEF_V}"
 declare -A VARG=([cpu]="--impl cpu" [gpu-host]="--impl gpu --storage host" [gpu-cuda]="--impl gpu --storage cuda-linear")
 declare -A VLET=([cpu]=C [gpu-host]=H [gpu-cuda]=G)
@@ -49,17 +50,28 @@ for K in "${KL[@]}"; do
       python3 "$REPO/tests/perf/capacity.py" "$OUT" --func "$FUNC" --n "$n" --seconds "$S" --warmup "$W" --every 25 \
         --stop-after-fails 9 $KARG $v $EXTRA 2>&1 | tee -a "$OUT/compare.log" | grep -E "^\["
       # kiekvienas variantas rašo savo capacity-<tag>-<V>.json; pakopos rezultatai kaupiami atskirai
+      if ! compgen -G "$OUT/capacity-$TAG-?.json" > /dev/null; then
+        echo "KLAIDA: [$TAG/${VLET[$vk]} N=$n] capacity.py nesukūrė rezultato (žr. žurnalą); laikoma FAIL" | tee -a "$OUT/compare.log"
+        FAILRUN[$key]=$(( ${FAILRUN[$key]:-0} + 1 ))
+      fi
       for f in "$OUT"/capacity-"$TAG"-?.json; do
         [[ -f $f ]] || continue
+        # kaupimas: sugadinto .all.json niekada neperrašome, nesėkmės atveju step JSON lieka (garsiai nutraukiame)
         python3 -c "
 import json,sys
 p=sys.argv[1]; acc=p.replace('.json','.all.json')
 try: allr=json.load(open(acc))
-except Exception: allr=[]
-new=json.load(open(p)); allr+=new; json.dump(allr, open(acc,'w'), indent=1)
+except FileNotFoundError: allr=[]
+new=json.load(open(p))
+if not isinstance(new,list) or not new: raise SystemExit('tuščias/neteisingas pakopos JSON: '+p)
+allr+=new; tmp=acc+'.tmp'; json.dump(allr, open(tmp,'w'), indent=1); import os; os.replace(tmp, acc)
 r=new[-1]
 # 0 — praleista pagal VRAM (nelaikoma FAIL), 1 — PASS_tol, 2 — FAIL
 print(0 if r.get('skipped') else (1 if r.get('pass_tol') else 2))" "$f" > "$OUT/.last"
+        if [[ $? -ne 0 ]]; then
+          echo "KLAIDA: nepavyko sukaupti $f į ${f%.json}.all.json (abu failai palikti); kampanija nutraukta" | tee -a "$OUT/compare.log"
+          exit 1
+        fi
         rc=$(cat "$OUT/.last")
         if [[ $rc == 2 ]]; then FAILRUN[$key]=$(( ${FAILRUN[$key]:-0} + 1 )); elif [[ $rc == 1 ]]; then FAILRUN[$key]=0; fi
         rm -f "$f"

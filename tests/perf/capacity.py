@@ -105,12 +105,19 @@ def gpu_stats(path):
 # --- composite (N išėjimų × K grafikos sluoksnių) -------------------------------------------------------------------------
 # Sluoksnių geometrija pagal specifikaciją §4.7: K=1 → logo; K=2 → logo,full; K=4 → logo,full,full,full (K=3 — logo,full,full).
 # (geometrija, X,Y kadro koordinatės, nepermatomumas). Pozicijos fiksuotos, kad kampanijos būtų palyginamos.
+COMP_TAIL_S = 14  # composite --duration = total + tiek: padengia išėjimo flow'ų paieškos tarpą iki verify starto (+ 2 s), ~6 s uodega
 COMP_LAYERS = [("logo", "1488,64", 1.0), ("full", "0,0", 0.8), ("full", "0,0", 0.8), ("full", "0,0", 0.8)]
 # Raster aprašai (plotis, aukštis, interlaced): lauko grain'as = h/2 eilučių
 GEOM_WH = {"logo": (384, 216), "full": (1920, 1080)}
 RING_GRAINS = 10  # MXL ring (laukai) vienam flow (išmatuota: logo G ΔVRAM ≈ 27,6 MB/flow = 10 × 2 764 800 B)
-CTX_OVERHEAD_MB = 128  # CUDA konteksto + darbinių buferių atsarga vienam GPU procesui (logo G N=1: ~380 MB / 3 procesai)
-RING_FACTOR = 1.25  # ring'ų modelio pataisa pagal išmatuotą ΔVRAM (ΔVRAM: K=2 N=32 4189 vs modelis 3516 MiB; K=4 N=32 7223 vs 6047 MiB)
+# G ΔVRAM modelis = VRAM_OFFSET_MB + N·(VRAM_K_BASE·ring(bazė+logo+išėjimas) + VRAM_K_FULL·ring(full sluoksniai)) · VRAM_MARGIN.
+# Koeficientai — tiesinė regresija pagal išmatuotą G ΔVRAM (compare-composite-g, K ∈ {1,2,4} × N ≤ 16 ir K=1,2 N=32):
+# poslinkis (CUDA kontekstai, 4 procesai) ≈ 507 MiB visiems K; kiekvienas `full` sluoksnis kainuoja 56,2 MiB/N (= 1,42 × jo ring'as
+# 39,6 MiB), likusi dalis (bazė + logo + išėjimas) 58,9 MiB/N (= 1,085 × ring'as). Paklaida išmatuotuose taškuose ≤ 1 %.
+VRAM_OFFSET_MB = 507
+VRAM_K_BASE = 1.085
+VRAM_K_FULL = 1.42
+VRAM_MARGIN = 1.05  # 5 % atsarga ekstrapoliacijai (K=4 N=32 nematuota: pakilo iki 7223 MiB ir pakibo)
 VRAM_CAP_MB = 7168  # R19: ~7 GiB iš 8 GiB kortos (WDDM ir kiti procesai laiko ~0,3–0,5 GB)
 
 
@@ -139,17 +146,23 @@ def comp_budget_mb(a, n):
     return parts, ring / 2**20
 
 
+def comp_vram_mb(a, n):
+    """G: numatomas ΔVRAM (MiB) pagal regresijos modelį (žr. VRAM_* konstantas)."""
+    parts, _ = comp_budget_mb(a, n)
+    base = sum(b * c for nm, b, c in parts if "(full " not in nm) * RING_GRAINS / 2**20
+    full = sum(b * c for nm, b, c in parts if "(full " in nm) * RING_GRAINS / 2**20
+    return (VRAM_OFFSET_MB + VRAM_K_BASE * base + VRAM_K_FULL * full) * VRAM_MARGIN
+
+
 def comp_guard(a, n):
     """Grąžina None (galima vykdyti) arba skip priežasties tekstą su skaičiavimu (R19). G: VRAM; C/H: /dev/shm."""
     parts, ring_mb = comp_budget_mb(a, n)
     desc = " + ".join(f"{b}B×{c}" for _, b, c in parts)
     if a.impl == "gpu" and a.storage == "cuda-linear":
-        procs = 4  # gen, gfxgen, composite, verify (kiekvienas su CUDA kontekstu)
-        # RING_FACTOR: išmatuota (K=4 N=32 pakilo iki ΔVRAM 7223 MiB, kai modelis rodė 6047): gfxgen/composite laiko papildomų buferių
-        tot = ring_mb * RING_FACTOR + procs * CTX_OVERHEAD_MB
+        tot = comp_vram_mb(a, n)
         if tot > VRAM_CAP_MB:
-            return (f"VRAM riba (apskaičiuota): ({desc}) × {RING_GRAINS} grain'ų = {ring_mb:.0f} MiB × {RING_FACTOR} + {procs}×{CTX_OVERHEAD_MB} "
-                    f"MiB kontekstų = {tot:.0f} MiB > {VRAM_CAP_MB} MiB")
+            return (f"VRAM riba (apskaičiuota): ({desc}) × {RING_GRAINS} grain'ų = ring {ring_mb:.0f} MiB; regresijos modelis "
+                    f"({VRAM_OFFSET_MB} + {VRAM_K_BASE}·bazė + {VRAM_K_FULL}·full) × {VRAM_MARGIN} = {tot:.0f} MiB > {VRAM_CAP_MB} MiB")
         return None
     try:
         st = os.statvfs("/dev/shm")
@@ -292,9 +305,11 @@ def run_level(a, n):
         src_ok = wait_flow_defs(dom, src_ids, 60 + 2 * n * K)
         xy = [x for _, p, _ in lay for x in ("--layer-xy", p)]
         op = [x for _, _, o in lay for x in ("--opacity", str(o))]
+        # composite baigiasi kartu su matavimo langu (kaip logo: total + 6, čia + paleidimo tarpas iki verify), kad stop_all neidlintų
+        cstart = time.monotonic()
         P.start("composite", [BIN, "composite", *common, "--layers", str(K), *xy, *op, "--base", "gen",
                               "--out-format", a.out_format, "--deadline-ms", str(a.deadline_ms),
-                              "--duration", str(total + 40), "--out", str(d)])
+                              "--duration", str(total + COMP_TAIL_S), "--out", str(d)])
         out_ok = wait_flow_defs(dom, [role_flow_id(6, i) for i in range(n)], 60 + n)
         time.sleep(2)
         # verify: CPU etalonas (be CUDA konteksto host / C variantuose), kaip logo
@@ -304,6 +319,7 @@ def run_level(a, n):
         P.start("verify", [BIN, "verify", *vcommon, "--mode", "composite", "--layers", str(K), "--layer-geom", geom,
                            *xy, *op, "--base", "gen", "--out-format", a.out_format, "--gfx-mode", "pace",
                            "--every", str(a.every), "--duration", str(total), "--out", str(d)], "consumer")
+        comp_gap_s = time.monotonic() - cstart  # composite starto → verify starto tarpas; turi būti < COMP_TAIL_S - 6
     elif f.startswith("enc-"):
         _, enc, prof = f.split("-", 2)
         P.start("gen", [BIN, "gen", *common, "--audio", "1", "--duration", str(total + 14), "--out", str(d)], "producer")
@@ -464,9 +480,17 @@ def run_level(a, n):
     res["src_exit"] = {k: c for k, c in codes.items() if cats.get(k) == "src"}
     if f == "composite":
         res["src_flows_ready"], res["out_flows_ready"] = src_ok, out_ok
+        res["composite_to_verify_gap_s"] = round(comp_gap_s, 1)
+        # R21: patikros aprėptis — patikrinta mėginių / laukiama (lauko indeksų intervalas × N / --every) ir nuleistos patikros
+        vs = next((sm for nm, sm in sums.items() if nm.startswith("verify") and sm), None)
+        if vs:
+            exp = (vs.get("last_index", 0) - vs.get("first_index", 0) + 1) * n // a.every
+            got = vs.get("proc", {}).get("samples_total", 0)
+            res["verify_coverage"] = {"samples": got, "expected": exp, "coverage": round(got / exp, 3) if exp else None,
+                                      "check_dropped": sum(fl.get("check_dropped", 0) for fl in vs.get("flows", []))}
         procs_ok = procs_ok and src_ok and out_ok
     res["pass"] = procs_ok and not losses and verr == 0 and vcap_adj == 0 and rt >= 0.999
-    # PASS_tol: teisingumas be išimčių (0 klaidų, procesai be fatalių klaidų), praradimai ≤ 0,1 % lauktų —
+    # PASS_tol: teisingumas be išimčių (0 klaidų, procesai be fatalių klaidų), praradimai ≤ --tol (numatyta 0,2 %) lauktų —
     # atskiria platformos drebėjimą (WSL2/WDDM pavieniai praleidimai) nuo tikros talpos ribos. Skelbiami abu.
     lost = sum(losses.values()) + vcap_adj
     res["loss_fraction"] = lost / max(1, span)
