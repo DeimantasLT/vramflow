@@ -1,6 +1,6 @@
 # [P4] Perkrova: operatorius gali būti tikras, kad per didelė apkrova nesugriauna jau veikiančių srautų
 
-> **Būsena: Laukia autoriaus patvirtinimo.** Planas: `docs/planai/2026-11-11-production-grade.md` §P4.
+> **Būsena: Patvirtinta (autorius delegavo sprendimus, 2026-11-11; žr. plano §6).** Planas: `docs/planai/2026-11-11-production-grade.md` §P4.
 > Brief'as: `docs/reikalavimai/2026-11-11-production-grade.md` (L4, L10, L11, P4).
 
 # Kontekstas (Context)

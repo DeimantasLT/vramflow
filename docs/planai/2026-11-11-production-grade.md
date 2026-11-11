@@ -356,7 +356,11 @@ cudaError_t weave_nv12(const WeaveJob*, int n, Dim d, bool interlaced, int pitch
 - **Laikas žymimas demux metu, ne po dekodavimo:** `observe()` kiekvienam paketui grąžina PTS ir DTS jau TAI nanosekundėmis; ingest perrašo `pkt->pts / dts` (laiko bazė 1/10⁹), dekoderis juos perneša į kadrą. Todėl nereikia epochų žymėjimo: vėlesnis poslinkio pakeitimas neliečia jau kelyje esančių kadrų. Atmesta: skaičiuoti iš kadro PTS po dekodavimo (kadrai iš senos epochos po persijungimo gautų naują poslinkį).
 - Poslinkis fiksuojamas ties **pirmu video paketu** (šaltiniui be video — ties pirmu paketu); ankstesni paketai metami (`prelock_dropped`).
 - Poslinkis kvantuojamas į kadrų tinklelį, kad kiekvienas kadras kristų tiksliai ant grain'o laiko (atsparu 90 kHz apvalinimui).
-- Dreifas: slydimas po vieną kadrą abiem flow'ams kartu, skaičiuojamas. Atmesta šiame etape: garso perdiskretizavimas (**K6**).
+- Dreifas (**K6**, sprendimas §6): video — viso kadro pakartojimas / išmetimas (interlaced — laukų poromis), garsas
+  sekamas sample-tiksliai per `libswresample` kompensaciją (≤ ±0,1 %), kad A/V poslinkis visada ≤ 1 laukas ir nebūtų
+  girdimų trūkių. `mxlv_timing` grąžina dreifo įvertį (ppm) ir kadro slydimo įvykius; kompensaciją taiko ingest (P3).
+  Testai: sintetinis šaltinis su +100 ppm ir −100 ppm dreifu 10 min — A/V poslinkis ≤ 1 laukas visą laiką, garse nėra
+  nulinių / pasikartojančių blokų.
 
 **Algoritmas (pinned; etalonas — vienintelis įgyvendinimas, testai tvirtina reikšmes)**
 
@@ -826,27 +830,34 @@ CLI: `vramflow-func mv --domain D --input UUID [--input …] --grid CxR | --layo
 
 ---
 
-## 6. Klausimai autoriui
+## 6. Sprendimai
 
-| # | Klausimas | Variantai | Rekomendacija |
+Autorius 2026-11-11 delegavo sprendimus su kriterijumi: praktiškas, universalus pasirinkimas transliacijai —
+sinchronas ir lūpų sinchronas, signalų priėmimas ir siuntimas, kodavimas / dekodavimas, garsas, profesionalūs
+standartai, nesuspaustas video su garsu ir grafika su alfa kanalu. Žemiau — priimti sprendimai (ne siūlymai).
+
+| # | Klausimas | Sprendimas | Kodėl (transliacijos požiūriu) |
 |---|---|---|---|
-| K1 | Commit trailer'is: brief'as sako `Assisted-by: <įrankis> (<modelis>)`, ankstesnis planas — `Co-Authored-By` | (a) `Assisted-by` (b) `Co-Authored-By` (c) abu | (a) — brief'as naujesnis ir skirtas šiai repo; upstream pataisoms — jokių DI trailer'ių (kaip dabar) |
-| K2 | Skriptų katalogas | (a) `scripts/linux/` + nukreipimai iš `scripts/wsl/` vienam leidimui (b) perkelti be nukreipimų (c) `scripts/` plokščiai | (a) |
-| K3 | Numatytoji spragų politika | (a) `Invalid` visur (b) `Invalid` tik `ingest`, kitur `Leave`, kol P5b išmatuos (c) `Repeat` | (b); galutinai — po P5b lentelės |
-| K4 | Sąveikos testams reikia `mxl-gst-*` (GStreamer paketai WSL'e, MXL build su tools) ir `xvfb` | (a) įdiegti (apt, tikslios versijos) (b) testus žymėti „praleista“, kol nėra | (a) — kitaip L9 lieka neuždaryta |
-| K5 | Formatų aibė pirmam etapui | (a) 720p50, 1080i50, 1080p25 / p50, UHD p50 + 59,94 variantai (b) tik 50 Hz šeima | (a), bet 59,94 ir UHD — atskirais PR pabaigoje; UHD p50 ring'as 211 MiB |
-| K6 | Dreifo taisymas | (a) kadro slydimas video + garsas kartu (girdimas ~40 ms trūkis kas kelias valandas) (b) garso perdiskretizavimas (libswresample kompensacija; sudėtingiau) (c) nieko, tik aliarmas | (a) dabar, (b) — atskiras darbas, jei reikės eteriui |
-| K7 | Numatytoji latencija ingest'e | 500 / 1000 / 3000 ms | 1000 ms TS / SRT; HLS — automatiškai ≥ 3 segmentų trukmės |
-| K8 | Kur laikyti nuomos / knygos failus | (a) `<domenas>.vramflow/` šalia domeno (b) `<domenas>/.vramflow/` viduje (c) `$XDG_RUNTIME_DIR` | (a) — MXL domeno katalogas lieka tik MXL; (b) tik jei patikrinsim, kad `mxl-info` ir GC jo neliečia |
-| K9 | Gyvos statistikos transportas | (a) JSON eilutės (b) + Prometheus tekstas per vidinį HTTP (c) NMOS IS-12 / BCP-008 | (a) dabar; (b) — reikia HTTP bibliotekos sprendimo (pin, ≥ 30 d.); (c) vėliau, kaip sako brief'as |
-| K10 | SRT / HLS / garso konvertavimas | (a) tik per sisteminį FFmpeg (`libavformat` protokolai + `libswresample` — nauja nuoroda build'e, ta pati FFmpeg versija) (b) tiesioginis `libsrt` | (a); reikia leidimo pridėti `libswresample` į `pkg_check_modules` |
-| K11 | Ar viešai transliuotas LRT signalas gali būti naudojamas rankiniam ingest bandymui (ne automatiniuose testuose) | taip / ne | Automatiniai testai — tik sintetika; rankiniam bandymui — autoriaus sprendimas |
-| K12 | Tiesioginis NVIDIA Video Codec SDK dekodavimo palyginimui | (a) taip (antraštės — nauja priklausomybė, licencija) (b) tik `cuvid` prieš `hwaccel` | (b) dabar |
-| K13 | Priėmimo numatytasis režimas | `off` / `warn` / `enforce` | `warn` be talpos failo, `enforce` su failu |
-| K14 | Zero-copy rodytuvas | (a) CUDA–GL (EGL / GLFW) (b) Vulkan (išorinė atmintis) (c) atidėti, užtenka canvas flow | (c) šiame etape (WSL2 čia nepatikrinama); jei reikia — (b), nes veikia ir be X serverio; priklausomybės ir natyvi mašina testams — autoriaus sprendimas |
-| K15 | Aliarmų slenksčiai ir trukmės | siūlomi §P9 / kiti | Siūlomi kaip numatytieji; visi keičiami parinktimis |
-| K16 | Kelios GPU vienoje mašinoje | (a) vienas procesas = viena GPU (`--device-uuid`), knyga atskira kiekvienai GPU (b) automatinis paskirstymas | (a); (b) — ne šios programos apimtis |
-| K17 | Vidury srauto pasikeitęs formatas ingest'e | (a) sustabdyti šaltinį su klaida (b) automatiškai perkurti flow | (a) dabar |
+| K1 | Commit trailer'is | `Assisted-by: Claude Code (<modelis>)`; upstream pataisoms — jokių DI trailer'ių | Brief'as naujausias; DCO upstream'ui lieka autoriaus |
+| K2 | Skriptų katalogas | `scripts/linux/` + `scripts/wsl/` nukreipimai vienam leidimui | Veikia natyviai ir WSL2, esamos instrukcijos nesulūžta |
+| K3 | Spragų politika | Writer'is **commit'ina kiekvieną indeksą**. Kai turinio nėra — grain'as su `MXL_GRAIN_FLAG_INVALID`, turinys neišgalvojamas (kaip autorius nusprendė kompozitoriui). Parinktis `--on-loss invalid\|freeze\|black` (numatytoji `invalid`); `freeze` — pakartoti paskutinį gerą ne ilgiau nei `--hold-ms` (numatyta 1000), po to `black`. P5b išmatuoja, kaip `mxl-gst-sink` / `mxl-gst-cuda-sink` elgiasi su INVALID; jei jie vis tiek stringa, numatytoji tampa `freeze` ir tai įrašoma README | Indeksų tęstinumas = jokių užstrigusių skaitytojų; skaitytojas mato tikrą signalo praradimą (kaip SDI „no signal“ žymė), o eterio operatorius gali pasirinkti frame-sync elgseną |
+| K4 | Sąveikos testai | Įdiegti `xvfb` (vienintelis trūkstamas; GStreamer ir `mxl-gst-*` jau yra). Testai be įrankių žymimi `SKIP` su priežastimi, ne `PASS` | Sąveika su MXL etaloniniais įrankiais — universalumo įrodymas |
+| K5 | Formatai | 720p50, 1080i50, 1080p25, 1080p50, tada 59,94 šeima (1080i59.94, 720p59.94, 1080p29.97/59.94), UHD p50 / p59.94 — atskiri PR pabaigoje | EBU (50 Hz) ir SMPTE (59,94 Hz) šeimos — abi būtinos universaliam įrankiui |
+| K6 | Dreifas ir lūpų sinchronas | Profesionalaus frame synchronizer'io modelis: video — viso **kadro** pakartojimas / išmetimas (interlaced — poromis, kad nesusimaišytų laukų tvarka), garsas sekamas **sample-tiksliai** per `libswresample` kompensaciją (`swr_set_compensation`, ≤ ±0,1 %), kad A/V poslinkis visada ≤ 1 laukas. Be girdimų trūkių | Lūpų sinchronas — privalomas; girdimas 40 ms trūkis eteryje nepriimtinas |
+| K7 | Ingest latencija | 1000 ms TS / SRT / RTP; HLS — automatiškai ≥ 3 segmentai; parinktis `--latency-ms` | Atsparu tinklo drebėjimui, keičiama žemesnei latencijai |
+| K8 | Nuomos / knygos failai | `<domenas>.vramflow/` šalia domeno | MXL domeno turinys lieka tik MXL; `mxl-info` ir GC jo neliečia |
+| K9 | Gyva statistika | Dabar JSON eilutės (`--stats-file`, `--stats-interval`, numatyta 1 s); Prometheus / HTTP ir NMOS IS-12 / BCP-008 — vėlesni etapai, kai bus pasirinkta HTTP biblioteka (pin, ≥ 30 d.) | Jokios naujos priklausomybės dabar; JSON eilutes lengva paversti Prometheus / Grafana |
+| K10 | SRT / HLS / RTP / garso konvertavimas | Per sisteminį FFmpeg (`libavformat` protokolai: `srt`, `udp`, `rtp`, `hls` — patikrinta FFmpeg 6.1.1 WSL'e) + `libswresample` (jau įdiegtas, ta pati FFmpeg versija). Tiesioginio `libsrt` nėra | Viena priklausomybė visiems įėjimams; FFmpeg — de facto standartas |
+| K11 | Viešas LRT srautas rankiniam bandymui | Taip, tik rankiniams bandymams (viešai transliuojamas turinys); automatiniai testai — tik sintetika | Atitinka autoriaus turinio jautrumo taisyklę |
+| K12 | Video Codec SDK palyginimui | Dabar tik `h264_cuvid` prieš `hwaccel cuda`; tiesioginis SDK — atskiras sprendimas vėliau | Be naujos licencijuotos priklausomybės |
+| K13 | Priėmimo kontrolė | `enforce`, kai yra talpos failas (nauji srautai virš ribos atmetami su aiškia klaida; jau priimti niekada nesuprastinami); `warn`, kai talpos failo nėra; `off` — tik rankiniams bandymams | Eteryje esantys srautai saugomi pirmiausia |
+| K14 | Zero-copy rodymas | Šiame etape — multiviewer'io drobė kaip **MXL flow'as VRAM'e** (bet kuris MXL vartotojas ją rodo / siunčia toliau, kaip SDI/IP multiviewer išėjimas). Tiesioginis ekranas vėliau per Vulkan išorinę atmintį (veikia ir be X serverio), natyviame Linux | Profesionalus multiviewer'is išveda signalą, o ne langą; WSL2 čia nepatikrinama |
+| K15 | Aliarmų slenksčiai | Numatytieji iš §P9, visi keičiami parinktimis | — |
+| K16 | Kelios GPU | Vienas procesas = viena GPU (`--device-uuid`), talpos knyga kiekvienai GPU atskira | Paprasta, nuspėjama, tinka orkestratoriams (K8s) |
+| K17 | Formatas pasikeitė vidury srauto | Šaltinis sustabdomas su aiškia klaida ir statistikos įrašu; orkestratorius paleidžia iš naujo | Flow'o formatas MXL'e nekintamas — perkūrimas be žinios suklaidintų skaitytojus |
+| R20 | Pageable įkėlimo apsauga `libvramflow-gfx` | Biblioteka **pati** užtikrina, kad CUDA kadras pilnai įrašytas prieš jį skaitydama (laukia visų konteksto darbų prieš konvertavimą); kaina pamatuojama ir dokumentuojama; ekspertams — vėliava `VFGFX_FLAG_CALLER_SYNCED` | Trečiųjų šalių programos neturi galėti sugadinti grafikos nepastebimai |
+
+User stories P3, P4 ir P9 laikomos patvirtintomis su šiais sprendimais (autorius delegavo, 2026-11-11).
 
 ---
 

@@ -1,6 +1,6 @@
 # [P9] GPU multivieweris: operatorius gali stebėti daug VRAM flow'ų viename vaizde su aliarmais, be kopijų į host atmintį
 
-> **Būsena: Laukia autoriaus patvirtinimo.** Planas: `docs/planai/2026-11-11-production-grade.md` §P9.
+> **Būsena: Patvirtinta (autorius delegavo sprendimus, 2026-11-11; žr. plano §6).** Planas: `docs/planai/2026-11-11-production-grade.md` §P9.
 > Brief'as: `docs/reikalavimai/2026-11-11-production-grade.md` (L15, P9).
 
 # Kontekstas (Context)
