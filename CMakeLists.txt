@@ -66,11 +66,6 @@ if(MXLV_BUILD_TESTS)
   catch_discover_tests(vramflow-v210a-gpu-tests)
 endif()
 
-# Alfa grafika (Raster, v210a) — jos testai
-if(MXLV_BUILD_TESTS)
-  include(${CMAKE_SOURCE_DIR}/cmake/gfx.cmake)
-endif()
-
 # GPU media funkcijos (logotipas, kodavimas, dekodavimas) — architektūra docs/architektura/2026-11-10-gpu-media-funkcijos.md
 option(MXLV_BUILD_MEDIA "GPU media funkcijos (vramflow-func)" ON)
 if(MXLV_BUILD_MEDIA)
@@ -82,3 +77,6 @@ if(MXLV_BUILD_MEDIA)
     include(${CMAKE_SOURCE_DIR}/cmake/func.cmake)       # vramflow-func vykdomasis
   endif()
 endif()
+
+# Alfa grafika (Raster, v210a, etalonas) — po media bloko, nes etalonas naudoja mxlv_media
+include(${CMAKE_SOURCE_DIR}/cmake/gfx.cmake)
