@@ -23,3 +23,18 @@ if(MXLV_BUILD_TESTS)
   set_target_properties(vramflow-flows-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
   catch_discover_tests(vramflow-flows-tests)
 endif()
+
+if(MXLV_BUILD_TESTS)
+  # Chromos PSNR prieš FFmpeg progresyviam turiniui (planas §P2): kadro chroma U/V >= 60 dB, Y identiškas; lauko chroma < 56 dB.
+  # Be ffmpeg (arba be psnr / zoneplate filtro) — SKIP (77).
+  find_program(MXLV_FFMPEG ffmpeg)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(MXLV_FFMPEG AND Python3_Interpreter_FOUND)
+    foreach(fmt 1080p50 1080p25 720p50)
+      add_test(NAME chroma_psnr_${fmt}
+               COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/chroma_psnr.py --bin $<TARGET_FILE:vramflow-func>
+                       --ffmpeg ${MXLV_FFMPEG} --format ${fmt} --work ${CMAKE_BINARY_DIR}/chroma_psnr/${fmt})
+      set_tests_properties(chroma_psnr_${fmt} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endforeach()
+  endif()
+endif()
