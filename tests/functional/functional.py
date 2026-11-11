@@ -4,6 +4,7 @@
 """Funkciniai gedimų testai (architektūra §6.1: F5a, F5b, F6a–d, F7, F8). Kiekvienas procesas — atskiras.
 
 Naudojimas: functional.py <out_dir> [--only F5a,F6,fgfx1,fcomp1,ffmt_logo]  (vardai be didžiųjų/mažųjų skirtumo)
+A/V sinchronizacija: favsync_drop, favsync_restart (tests/functional/avsync.py).
 Formatų testai (P2): ffmt_neg, ffmt_logo, ffmt_comp, ffmt_enc, ffmt_dec; FFMT_FORMATS=1080i50,1080p25,1080p50 (numatyta),
 FFMT_DURATION=20 (s), FCOMP_VARIANTS=C,H,G.
 Aplinka: VERIFY_BIN (senieji testai), FUNC_BIN + MXL_INFO (fgfx1 ir kiti vramflow-func testai).
@@ -966,6 +967,8 @@ def main():
     sys.modules.setdefault("functional", sys.modules[__name__])
     import startstop
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in startstop.TESTS.items()})
+    import avsync  # A/V sinchronizacija po prarastų kadrų (favsync_drop, favsync_restart)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in avsync.TESTS.items()})
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):

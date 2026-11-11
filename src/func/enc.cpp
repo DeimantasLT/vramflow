@@ -414,6 +414,7 @@ int run_enc(const Opts& o) {
     const std::uint32_t gc = o.flows && !rc ? in[0].in().layout.slotCount : 10;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
+    const std::uint64_t test_drop_from = now_tai() + static_cast<std::uint64_t>(o.test_drop_after_s * 1e9);
     std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
     ClockWatch cw;
     cw.stepped();
@@ -568,7 +569,8 @@ int run_enc(const Opts& o) {
             Stream& s = *streams[n];
             {
                 std::lock_guard g(s.m);
-                if (s.q.size() >= kQueueMax) {
+                const bool test_drop = o.test_drop_every && t_ready >= test_drop_from && F % o.test_drop_every == 0;
+                if (s.q.size() >= kQueueMax || test_drop) {
                     av_frame_free(&item.video);
                     st.flows[n].inc("frames_dropped_queue");
                     continue;

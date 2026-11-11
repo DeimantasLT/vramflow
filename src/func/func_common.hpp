@@ -82,6 +82,10 @@ struct Opts {
     std::string tap_dir;
     int tap_flow = -1;
     std::uint32_t tap_every = 25;
+    // Testinė (paslėpta) parinktis: nuo `test_drop_after_s` sekundės po paleidimo kas `test_drop_every`-as kadras
+    // atmetamas tuo pačiu keliu kaip pilnos eilės atveju (frames_dropped_queue). 0 — išjungta. A/V sinchronizacijos testams.
+    std::uint32_t test_drop_every = 0;
+    double test_drop_after_s = 0;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
     // interlaced flow'o 4:2:0 → 4:2:2 chroma: auto — pagal kadro AV_FRAME_FLAG_INTERLACED; field / frame — priverstinai.
