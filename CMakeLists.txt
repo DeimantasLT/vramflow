@@ -54,7 +54,7 @@ if(MXLV_BUILD_TESTS)
   find_package(Catch2 3 CONFIG REQUIRED)
   enable_testing()
   include(Catch)
-  add_executable(mxlv-unit tests/unit/test_common.cpp)
+  add_executable(mxlv-unit tests/unit/test_common.cpp tests/unit/test_format.cpp)
   target_link_libraries(mxlv-unit PRIVATE mxlv_common Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-unit)
 
