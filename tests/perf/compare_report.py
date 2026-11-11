@@ -93,10 +93,11 @@ def composite_section(rows):
                    "gfxgen CPU | gen CPU | proc p50/p99 ms | vėlavimas p50/p99 ms | ΔVRAM MB | GPU % | W | šaltinis |",
                    "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
             for r in sorted(rs, key=lambda r: r["n"]):
-                if r.get("skipped"):
+                if r.get("skipped") or r.get("invalid_reason"):
                     src = r.get("attempt_file") or r["_src"]
                     note = " (ne harness išvestis: rankinė perklasifikacija)" if r.get("manual_reclassification") else ""
-                    md.append(f"| {r['n']} | praleista | praleista | | | | | | | | | | | | | | | {r['skip_reason']}{note}; `{src}` |")
+                    md.append(f"| {r['n']} | {'praleista' if r.get('skipped') else 'NEDERINA'} | {'praleista' if r.get('skipped') else 'NEDERINA'} | | | | | | | | | | | | | | | "
+                          f"{r.get('skip_reason') or r['invalid_reason']}{note}; `{src}` |")
                     continue
                 g = r.get("gpu")
                 cov = coverage(r)
@@ -113,7 +114,7 @@ def composite_section(rows):
                           f"{hq(r, 'out_lateness', 'p50')} / {hq(r, 'out_lateness', 'p99')} | {r.get('vram_delta_mb')} | "
                           f"{'–' if not g else f'{g['util_gpu']['mean']:.0f}'} | {'–' if not g else f'{g['power_w']['mean']:.0f}'} | "
                           f"`{r['_src']}` |")
-            ran = [r for r in rs if not r.get("skipped")]
+            ran = [r for r in rs if not r.get("skipped") and not r.get("invalid_reason")]
             skipped = sorted({r["n"] for r in rs if r.get("skipped")})
             nmap[(k, v)] = (nstar(ran, "pass"), nstar(ran, "pass_tol"), max((r["n"] for r in ran), default=0), skipped)
             ns, nt, top, sk = nmap[(k, v)]

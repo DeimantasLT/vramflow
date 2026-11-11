@@ -105,7 +105,7 @@ def gpu_stats(path):
 # --- composite (N išėjimų × K grafikos sluoksnių) -------------------------------------------------------------------------
 # Sluoksnių geometrija pagal specifikaciją §4.7: K=1 → logo; K=2 → logo,full; K=4 → logo,full,full,full (K=3 — logo,full,full).
 # (geometrija, X,Y kadro koordinatės, nepermatomumas). Pozicijos fiksuotos, kad kampanijos būtų palyginamos.
-COMP_TAIL_S = 14  # composite --duration = total + tiek: padengia išėjimo flow'ų paieškos tarpą iki verify starto (+ 2 s), ~6 s uodega
+COMP_TAIL_S = 20  # composite --duration = total + tiek; leistinas tarpas iki verify starto = COMP_TAIL_S - 6 (= 14 s)
 COMP_LAYERS = [("logo", "1488,64", 1.0), ("full", "0,0", 0.8), ("full", "0,0", 0.8), ("full", "0,0", 0.8)]
 # Raster aprašai (plotis, aukštis, interlaced): lauko grain'as = h/2 eilučių
 GEOM_WH = {"logo": (384, 216), "full": (1920, 1080)}
@@ -305,7 +305,8 @@ def run_level(a, n):
         src_ok = wait_flow_defs(dom, src_ids, 60 + 2 * n * K)
         xy = [x for _, p, _ in lay for x in ("--layer-xy", p)]
         op = [x for _, _, o in lay for x in ("--opacity", str(o))]
-        # composite baigiasi kartu su matavimo langu (kaip logo: total + 6, čia + paleidimo tarpas iki verify), kad stop_all neidlintų
+        # composite baigiasi savo trukme (total + COMP_TAIL_S). SIGTERM netinka: nutraukti laukai iškreiptų RT. Todėl jo uodega
+        # turi viršyti tarpą iki verify starto + 6 s; kitaip pakopa pažymima NEDERINA (žr. invalid_reason), o ne PASS/FAIL
         cstart = time.monotonic()
         P.start("composite", [BIN, "composite", *common, "--layers", str(K), *xy, *op, "--base", "gen",
                               "--out-format", a.out_format, "--deadline-ms", str(a.deadline_ms),
@@ -319,7 +320,7 @@ def run_level(a, n):
         P.start("verify", [BIN, "verify", *vcommon, "--mode", "composite", "--layers", str(K), "--layer-geom", geom,
                            *xy, *op, "--base", "gen", "--out-format", a.out_format, "--gfx-mode", "pace",
                            "--every", str(a.every), "--duration", str(total), "--out", str(d)], "consumer")
-        comp_gap_s = time.monotonic() - cstart  # composite starto → verify starto tarpas; turi būti < COMP_TAIL_S - 6
+        comp_gap_s = time.monotonic() - cstart  # composite starto → verify starto tarpas (informacinis)
     elif f.startswith("enc-"):
         _, enc, prof = f.split("-", 2)
         P.start("gen", [BIN, "gen", *common, "--audio", "1", "--duration", str(total + 14), "--out", str(d)], "producer")
@@ -481,6 +482,10 @@ def run_level(a, n):
     if f == "composite":
         res["src_flows_ready"], res["out_flows_ready"] = src_ok, out_ok
         res["composite_to_verify_gap_s"] = round(comp_gap_s, 1)
+        if comp_gap_s > COMP_TAIL_S - 6:
+            # composite baigtųsi anksčiau už matavimo langą → rezultatas neinterpretuotinas (ne talpos FAIL)
+            res["invalid_reason"] = (f"composite starto → verify starto tarpas {comp_gap_s:.1f} s > {COMP_TAIL_S - 6} s: "
+                                     "composite pasibaigė anksčiau už matavimo langą")
         # R21: patikros aprėptis — patikrinta mėginių / laukiama (lauko indeksų intervalas × N / --every) ir nuleistos patikros
         vs = next((sm for nm, sm in sums.items() if nm.startswith("verify") and sm), None)
         if vs:
@@ -496,6 +501,8 @@ def run_level(a, n):
     res["loss_fraction"] = lost / max(1, span)
     no_fatal = all(c in (0, 4) for k, c in codes.items() if not k.startswith("send") and cats.get(k) != "src")
     res["pass_tol"] = no_fatal and verr == 0 and res["loss_fraction"] <= a.tol and rt >= 1 - a.tol
+    if res.get("invalid_reason"):
+        res["pass"] = res["pass_tol"] = False
     return res
 
 
@@ -540,6 +547,10 @@ def main():
             continue
         r = run_level(a, n)
         results.append(r)
+        if r.get("invalid_reason"):
+            print(f"[{func_tag(a)}/{variant} N={n:2d}] NEDERINA: {r['invalid_reason']}", flush=True)
+            (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
+            continue
         print(f"[{func_tag(a)}/{variant} N={n:2d}] griežtai={'PASS' if r['pass'] else 'FAIL'} tol={'PASS' if r['pass_tol'] else 'FAIL'} "
               f"praradimai {r['loss_fraction'] * 100:.3f}% RT={r['realtime_ratio']:.4f} "
               f"{r['losses'] or ''} verif={r['verification_errors']} CPU/srautui={r['cpu_cores_func_per_stream']:.3f} "

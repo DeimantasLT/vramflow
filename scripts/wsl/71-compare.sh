@@ -66,8 +66,8 @@ new=json.load(open(p))
 if not isinstance(new,list) or not new: raise SystemExit('tuščias/neteisingas pakopos JSON: '+p)
 allr+=new; tmp=acc+'.tmp'; json.dump(allr, open(tmp,'w'), indent=1); import os; os.replace(tmp, acc)
 r=new[-1]
-# 0 — praleista pagal VRAM (nelaikoma FAIL), 1 — PASS_tol, 2 — FAIL
-print(0 if r.get('skipped') else (1 if r.get('pass_tol') else 2))" "$f" > "$OUT/.last"
+# 0 — praleista pagal VRAM arba NEDERINA (nelaikoma FAIL), 1 — PASS_tol, 2 — FAIL
+print(0 if (r.get('skipped') or r.get('invalid_reason')) else (1 if r.get('pass_tol') else 2))" "$f" > "$OUT/.last"
         if [[ $? -ne 0 ]]; then
           echo "KLAIDA: nepavyko sukaupti $f į ${f%.json}.all.json (abu failai palikti); kampanija nutraukta" | tee -a "$OUT/compare.log"
           exit 1
