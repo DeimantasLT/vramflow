@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 // Variantas C: optimizuotas CPU RGBA -> v210a ir composite (be CUDA). Sutartis ta pati kaip gfx::ref (gfx_ref.hpp):
-// funkcijos grąžina false ir NIEKO nerašo, jei geometrija netinkama; sėkmės atveju visas išėjimo grain'as perrašomas
+// funkcijos grąžina false ir NIEKO nerašo, jei užduotis netinkama (composite_job_valid, įskaitant: be bazės — tik v210a išėjimas); sėkmės atveju visas išėjimo grain'as perrašomas
 // (padding = 0, net jei buferis purvinas); rezultatas bitas į bitą lygus etalonui.
 // Įgyvendinimas eilutinis, sveikaisiais skaičiais; darbinės eilutės — thread_local buferiai (po pirmo iškvietimo be allocation).
 #include <cstddef>
@@ -21,7 +21,8 @@ bool composite(const std::uint8_t* base, const Raster& base_r, const Layer* laye
                int parity, std::uint8_t* out, mxlv::func::ThreadPool* pool = nullptr);
 
 // N išėjimų to paties lauko (parity) vienu paleidimu: visų darbų eilučių blokai dalijami tarp pool gijų.
-// Netinkami darbai praleidžiami (nieko nerašoma); grąžina true tik jei VISI darbai tinkami.
+// Patikra bendra visiems variantams (gfx::composite_job_valid, R11/R13): bent vienas netinkamas darbas -> NIEKO nerašoma,
+// false (kaip etalonas ir CUDA). Užduočių sąrašas — thread_local scratch kvietėjo gijoje.
 bool composite_batch(const CompositeJob* jobs, int n, int parity, mxlv::func::ThreadPool* pool);
 
 }  // namespace vramflow::gfx::cpu

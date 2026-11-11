@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -80,4 +81,49 @@ TEST_CASE("gfx: raster_from_flow_def", "[gfx]") {
     CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video/h264","frame_width":1,"frame_height":2})", r, err));
     CHECK_FALSE(err.empty());
     CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video/v210","frame_height":2})", r, err));
+}
+
+TEST_CASE("gfx: composite_job_valid — vienas patikrinimas visiems variantams (R13)", "[gfx]") {
+    std::uint8_t buf[64] = {};
+    const Raster ia{8, 8, true, true}, iv{8, 8, true, false}, pa{8, 8, false, true}, lr{4, 4, true, true};
+    Layer L{buf, lr, 2, 4, 1.0f};
+    std::string why;
+    auto job = [&](const std::uint8_t* base, const Raster& br, const Layer* l, int k, const Raster& o, std::uint8_t* out) {
+        return CompositeJob{base, br, l, k, o, out};
+    };
+    CHECK(composite_job_valid(job(buf, ia, &L, 1, ia, buf), 0));
+    CHECK(composite_job_valid(job(nullptr, ia, &L, 1, ia, buf), 1));  // be bazės + v210a — gerai
+    CHECK(composite_job_valid(job(buf, iv, nullptr, 0, iv, buf), 0));  // v210 su bazė — gerai
+    CHECK(composite_job_valid(job(nullptr, ia, nullptr, 0, ia, buf), 7) == false);  // paritetas interlaced
+    CHECK(composite_job_valid(job(nullptr, pa, nullptr, 0, pa, buf), 7));           // progresyviam ignoruojamas
+
+    // R12: be bazės — v210 išėjimas netinkamas
+    CHECK_FALSE(composite_job_valid(job(nullptr, iv, &L, 1, iv, buf), 0, &why));
+    CHECK_FALSE(why.empty());
+    CHECK_FALSE(composite_job_valid(job(nullptr, iv, nullptr, 0, iv, buf), 0));
+
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &L, 1, ia, nullptr), 0));          // out == nullptr
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &L, -1, ia, buf), 0));             // k < 0
+    CHECK_FALSE(composite_job_valid(job(buf, ia, nullptr, 1, ia, buf), 0));         // layers == nullptr
+    CHECK_FALSE(composite_job_valid(job(buf, Raster{6, 8, true, true}, &L, 1, ia, buf), 0));  // bazės rastras kitoks
+    CHECK_FALSE(composite_job_valid(job(buf, pa, &L, 1, ia, buf), 0));              // bazės interlace kitoks
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &L, 1, Raster{7, 8, true, true}, buf), 0));  // nelyginis plotis
+    Layer b = L;
+    b.grain = nullptr;
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.x = 3;
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.x = -2;
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.y = -2;
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.y = 3;  // nelyginis y interlaced (R1)
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.opacity = std::numeric_limits<float>::quiet_NaN();
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    b = L; b.r = Raster{4, 4, false, true};  // sluoksnio interlace kitoks
+    CHECK_FALSE(composite_job_valid(job(buf, ia, &b, 1, ia, buf), 0));
+    // progresyvus: nelyginis y leidžiamas
+    Layer p{buf, Raster{4, 4, false, true}, 2, 3, 1.0f};
+    CHECK(composite_job_valid(job(buf, pa, &p, 1, pa, buf), 0));
 }

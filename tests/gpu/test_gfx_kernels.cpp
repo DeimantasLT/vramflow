@@ -229,7 +229,8 @@ TEST_CASE("gfx cuda: composite == ref (1080i, K, opacity, pozicijos, išėjimas,
         for (float op : {0.0f, 0.5f, 1.0f})
             for (int p = 0; p < 4; ++p)
                 for (bool oa : {false, true})
-                    for (int bs = 0; bs < 3; ++bs) {  // 0 = v210, 1 = v210a, 2 = none
+                    for (int bs = 0; bs < 3; ++bs) {  // 0 = v210, 1 = v210a, 2 = none (tik v210a išėjimui, R12)
+                        if (bs == 2 && !oa) continue;
                         std::vector<L> Ls;
                         for (int j = 0; j < k; ++j) {
                             const int pi = (p + j) % 4;
@@ -257,6 +258,7 @@ TEST_CASE("gfx cuda: composite == ref, progresyvus rastras, (100,33) leidžiamas
             for (int p = 0; p < 4; ++p)
                 for (bool oa : {false, true})
                     for (int bs = 0; bs < 3; ++bs) {
+                        if (bs == 2 && !oa) continue;  // R12
                         std::vector<L> Ls;
                         for (int j = 0; j < k; ++j) Ls.push_back({&lg[j], lr[j], pos[(p + j) % 4][0], pos[(p + j) % 4][1], op});
                         const G* base = bs == 0 ? &base_v : bs == 1 ? &base_a : nullptr;
@@ -277,6 +279,7 @@ TEST_CASE("gfx cuda: composite == ref, plotai nesidalijantys iš 3/6/48, nukirpi
         for (int x : {0, 2, 6, 48, 100, w - 30, w - 2, w})
             for (bool oa : {false, true})
                 for (int bs = 0; bs < 3; ++bs) {
+                    if (bs == 2 && !oa) continue;  // R12
                     std::vector<L> Ls;
                     for (int j = 0; j < 3; ++j) Ls.push_back({&lg[j], lr[j], (x + 14 * j) & ~1, 2 * j * 4, 0.5f + 0.25f * j});
                     const G* base = bs == 0 ? &base_v : bs == 1 ? &base_a : nullptr;
@@ -311,7 +314,16 @@ TEST_CASE("gfx cuda: k = 0, bazė ir none", "[gfx][gpu]") {
     CHECK(run_both(&base_a, out_a, none, out_a, 0) == 0);
     CHECK(run_both(&base_a, out_a, none, out_v, 1) == 0);
     CHECK(run_both(nullptr, out_a, none, out_a, 0) == 0);
-    CHECK(run_both(nullptr, out_v, none, out_v, 0) == 0);
+    // R12: be bazės — tik v210a išėjimas; v210 išėjimas atmetamas (ir ref, ir cuda), nieko nerašoma.
+    Buf r(grain_bytes(out_v), 0xA5);
+    CHECK_FALSE(ref::composite(nullptr, out_v, nullptr, 0, out_v, 0, r.data()));
+    CHECK(r == Buf(grain_bytes(out_v), 0xA5));
+    DevBuf ov(grain_bytes(out_v));
+    ov.fill(0xA5);
+    CompositeJob nb{nullptr, out_v, nullptr, 0, out_v, ov.p};
+    CHECK(cuda::composite_batch(&nb, 1, 0, nullptr) == cudaErrorInvalidValue);
+    CUDA_OK(cudaDeviceSynchronize());
+    CHECK(ov.down() == Buf(grain_bytes(out_v), 0xA5));
 }
 
 TEST_CASE("gfx cuda: composite_batch n=64, skirtingos pozicijos / bazės / išėjimai == ref", "[gfx][gpu]") {
@@ -330,7 +342,7 @@ TEST_CASE("gfx cuda: composite_batch n=64, skirtingos pozicijos / bazės / išė
     for (int i = 0; i < N; ++i) {
         const int k = 1 + i % 3;
         const int bs = i % 3;  // 0 = v210, 1 = v210a, 2 = none
-        ors[i] = (i / 3) % 2 ? out_a : out_v;
+        ors[i] = (i / 3) % 2 || bs == 2 ? out_a : out_v;  // be bazės (bs == 2) — tik v210a išėjimas (R12)
         const Raster br = bs == 0 ? out_v : out_a;
         for (int j = 0; j < k; ++j) {
             const int lx = ((i * 38 + j * 90) % 700) & ~1;  // iš dalies už dešiniojo krašto -> nukirpimas
@@ -447,6 +459,15 @@ TEST_CASE("gfx cuda: netinkama geometrija -> cudaErrorInvalidValue, nieko neraš
     CHECK(cuda::composite_batch(jobs, 2, 0, nullptr) == cudaErrorInvalidValue);
     CUDA_OK(cudaDeviceSynchronize());
     CHECK(o2.down() == Buf(grain_bytes(out_a), 0xA5));
+    // R12: base == nullptr su v210 išėjimu (kartu su geru kaimynu) -> visas batch'as atmetamas
+    const Raster out_v{64, 32, true, false};
+    DevBuf ov(grain_bytes(out_v));
+    ov.fill(0xA5);
+    CompositeJob nbv[2] = {{nullptr, out_a, &goodl, 1, out_a, o2.p}, {nullptr, out_v, &goodl, 1, out_v, ov.p}};
+    CHECK(cuda::composite_batch(nbv, 2, 0, nullptr) == cudaErrorInvalidValue);
+    CUDA_OK(cudaDeviceSynchronize());
+    CHECK(o2.down() == Buf(grain_bytes(out_a), 0xA5));
+    CHECK(ov.down() == Buf(grain_bytes(out_v), 0xA5));
     // Progresyvus: nelyginis y leidžiamas (R1).
     DevBuf op(grain_bytes(out_p));
     const Layer okp{lgp.d.p, lrp, 4, 3, 1.0f};

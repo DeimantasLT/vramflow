@@ -141,7 +141,8 @@ TEST_CASE("gfx cpu: composite == ref (1080i, K, opacity, pozicijos, išėjimas, 
         for (float op : {0.0f, 0.5f, 1.0f})
             for (int p = 0; p < 4; ++p)
                 for (bool oa : {false, true})
-                    for (int bs = 0; bs < 3; ++bs) {  // 0 = v210, 1 = v210a, 2 = none
+                    for (int bs = 0; bs < 3; ++bs) {  // 0 = v210, 1 = v210a, 2 = none (tik v210a išėjimui, R12)
+                        if (bs == 2 && !oa) continue;
                         std::vector<Layer> L;
                         for (int j = 0; j < k; ++j) {
                             const int pi = (p + j) % 4;
@@ -166,6 +167,7 @@ TEST_CASE("gfx cpu: composite == ref, progresyvus rastras, (100,33) leidžiamas"
             for (int p = 0; p < 4; ++p)
                 for (bool oa : {false, true})
                     for (int bs = 0; bs < 3; ++bs) {
+                        if (bs == 2 && !oa) continue;  // R12
                         std::vector<Layer> L;
                         for (int j = 0; j < k; ++j) L.push_back({lg[j].data(), lr[j], pos[(p + j) % 4][0], pos[(p + j) % 4][1], op});
                         const Buf* base = bs == 0 ? &base_v : bs == 1 ? &base_a : nullptr;
@@ -185,6 +187,7 @@ TEST_CASE("gfx cpu: composite == ref, plotai nesidalijantys iš 3/6/48, nukirpim
         for (int x : {0, 2, 6, 48, 100, w - 30, w - 2, w})
             for (bool oa : {false, true})
                 for (int bs = 0; bs < 3; ++bs) {
+                    if (bs == 2 && !oa) continue;  // R12
                     std::vector<Layer> L;
                     for (int j = 0; j < 3; ++j) L.push_back({lg[j].data(), lr[j], (x + 14 * j) & ~1, 2 * j * 4, 0.5f + 0.25f * j});
                     const Buf* base = bs == 0 ? &base_v : bs == 1 ? &base_a : nullptr;
@@ -217,7 +220,12 @@ TEST_CASE("gfx cpu: k = 0, bazė ir none", "[gfx]") {
     CHECK(run_both(&base_a, out_a, none, out_a, 0) == 0);
     CHECK(run_both(&base_a, out_a, none, out_v, 1) == 0);
     CHECK(run_both(nullptr, out_a, none, out_a, 0) == 0);
-    CHECK(run_both(nullptr, out_v, none, out_v, 0) == 0);
+    // R12: be bazės — tik v210a išėjimas; v210 išėjimas atmetamas (ir ref, ir cpu), nieko nerašoma.
+    Buf r(grain_bytes(out_v), 0xA5), c(grain_bytes(out_v), 0xA5);
+    CHECK_FALSE(ref::composite(nullptr, out_v, nullptr, 0, out_v, 0, r.data()));
+    CHECK_FALSE(cpu::composite(nullptr, out_v, nullptr, 0, out_v, 0, c.data()));
+    CHECK(r == Buf(grain_bytes(out_v), 0xA5));
+    CHECK(c == Buf(grain_bytes(out_v), 0xA5));
 }
 
 TEST_CASE("gfx cpu: composite su ThreadPool == etalonas", "[gfx]") {
@@ -242,7 +250,7 @@ TEST_CASE("gfx cpu: composite_batch (N išėjimų) == ref", "[gfx]") {
     CompositeJob jobs[N];
     const Buf* bases[N] = {&base_v, &base_a, nullptr, &base_a, &base_v};
     const Raster brs[N] = {out_v, out_a, out_a, out_a, out_v};
-    const Raster ors[N] = {out_a, out_a, out_v, out_v, out_v};
+    const Raster ors[N] = {out_a, out_a, out_a, out_v, out_v};  // be bazės (job 2) — tik v210a (R12)
     const int ks[N] = {2, 1, 2, 2, 0};
     for (int i = 0; i < N; ++i) {
         outs[i].assign(grain_bytes(ors[i]), 0xC3);
@@ -297,18 +305,27 @@ TEST_CASE("gfx cpu: netinkama geometrija -> false, nieko nerašoma", "[gfx]") {
     CHECK(!cpu::rgba_to_v210a(rgba.data(), 62, 32, 256, AlphaIn::Straight, out_a, 0, g.data()));  // rastras != w
     CHECK(!cpu::rgba_to_v210a(rgba.data(), 64, 32, 256, AlphaIn::Straight, Raster{64, 32, true, false}, 0, g.data()));  // be alfa
     CHECK(g == Buf(grain_bytes(out_a), 0xA5));
-    // composite_batch: netinkamas darbas praleidžiamas, tinkamas įvykdomas, grąžina false.
+    // composite_batch (R11): bent vienas netinkamas darbas -> atmetamas VISAS batch'as, abu išėjimai nepaliesti.
     Buf o1(grain_bytes(out_a), 0xA5), o2(grain_bytes(out_a), 0xA5), r2(grain_bytes(out_a), 0x11);
     const Layer badl{lg.data(), lr, 3, 0, 1.0f}, goodl{lg.data(), lr, 4, 4, 1.0f};
     CompositeJob jobs[2] = {{nullptr, out_a, &badl, 1, out_a, o1.data()}, {nullptr, out_a, &goodl, 1, out_a, o2.data()}};
     CHECK(!cpu::composite_batch(jobs, 2, 0, nullptr));
-    REQUIRE(ref::composite(nullptr, out_a, &goodl, 1, out_a, 0, r2.data()));
     CHECK(o1 == Buf(grain_bytes(out_a), 0xA5));
+    CHECK(o2 == Buf(grain_bytes(out_a), 0xA5));  // tinkamas darbas taip pat nerašomas
+    jobs[0].layers = &goodl;
+    REQUIRE(cpu::composite_batch(jobs, 2, 0, nullptr));  // pataisius abu — vykdoma
+    REQUIRE(ref::composite(nullptr, out_a, &goodl, 1, out_a, 0, r2.data()));
     CHECK(o2 == r2);
     CHECK(!cpu::composite_batch(jobs, 2, 7, nullptr));  // paritetas
+    // R12: base == nullptr su v210 išėjimu (ir su geru kaimynu) -> viskas atmetama.
+    Buf ov(grain_bytes(Raster{64, 32, true, false}), 0xA5), o3(grain_bytes(out_a), 0xA5);
+    CompositeJob nb[2] = {{nullptr, out_a, &goodl, 1, out_a, o3.data()}, {nullptr, Raster{64, 32, true, false}, &goodl, 1, Raster{64, 32, true, false}, ov.data()}};
+    CHECK(!cpu::composite_batch(nb, 2, 0, nullptr));
+    CHECK(o3 == Buf(grain_bytes(out_a), 0xA5));
+    CHECK(ov == Buf(ov.size(), 0xA5));
 }
 
-TEST_CASE("gfx cpu: laikas 1080i laukui (informacinis)", "[gfx]") {
+TEST_CASE("gfx cpu: laikas 1080i laukui (informacinis)", "[.bench]") {
     using clk = std::chrono::steady_clock;
     const Raster out_a{1920, 1080, true, true};
     const Buf base = make_grain(out_a, 101);

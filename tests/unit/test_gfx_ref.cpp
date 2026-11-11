@@ -328,7 +328,11 @@ TEST_CASE("gfx ref: nukirpimas ties riba, jokio rašymo už buferio [PF-1]", "[g
         Buf mem(guard + n + guard, 0xA5);
         std::memset(mem.data() + guard, 0x5A, n);  // purvinas išėjimas
         Layer L{lay.data(), lr, LX, LY, 1.0f};
-        REQUIRE(ref::composite(nullptr, out_r, &L, 1, out_r, 0, mem.data() + guard));
+        // R12: v210 išėjimui reikia bazės (Y 64 / C 512 — tas pats, ką duotų „none“ v210a išėjime).
+        Raster any_r = kHd1080i;
+        any_r.alpha = true;
+        const Buf base_none = fill_only(run_composite(nullptr, any_r, {}, any_r), any_r);
+        REQUIRE(ref::composite(alpha_out ? nullptr : base_none.data(), out_r, &L, 1, out_r, 0, mem.data() + guard));
         for (std::size_t i = 0; i < guard; ++i) {
             REQUIRE(mem[i] == 0xA5);
             REQUIRE(mem[guard + n + i] == 0xA5);
@@ -350,7 +354,7 @@ TEST_CASE("gfx ref: nukirpimas ties riba, jokio rašymo už buferio [PF-1]", "[g
 
 TEST_CASE("gfx ref: interlaced y/2 eilučių atitiktis", "[gfx]") {
     // Išėjimas 8×8 interlaced (4 lauko eilutės), sluoksnis 4×4 interlaced (2 eilutės) ties y = 2 -> išėjimo lauko eilutės 1 ir 2.
-    const Raster out_r{8, 8, true, false}, lr{4, 4, true, true};
+    const Raster out_r{8, 8, true, true}, lr{4, 4, true, true};
     const Buf lay = make_grain(4, 4, lr, 12, 2);
     for (int parity : {0, 1}) {
         const Buf o = run_composite(nullptr, out_r, {{lay.data(), lr, 2, 2, 1.0f}}, out_r, parity);
@@ -422,7 +426,7 @@ TEST_CASE("gfx ref: netinkama geometrija atmetama, nieko nerašoma", "[gfx]") {
 }
 
 TEST_CASE("gfx ref: nelyginis y progresyviame rastre leidžiamas (R1)", "[gfx]") {
-    const Raster pr{8, 8, false, false}, lr{4, 4, false, true};
+    const Raster pr{8, 8, false, true}, lr{4, 4, false, true};
     const Buf lay = make_grain(4, 4, lr, 16, 2);
     const Buf o = run_composite(nullptr, pr, {{lay.data(), lr, 2, 3, 1.0f}}, pr);
     for (int r = 0; r < 8; ++r)
@@ -509,4 +513,18 @@ TEST_CASE("gfx ref: dengiamas ae = 0 virš ab = 0 -> 64/512, nedengiami išlaiko
     CHECK(fill_cb(o, 4, 0, 1) == fill_cb(base, 4, 0, 1));
     CHECK(fill_cr(o, 4, 0, 1) == fill_cr(base, 4, 0, 1));
     for (int x = 0; x < 4; ++x) CHECK(key_at(o, br, 0, x) == 64);
+}
+
+TEST_CASE("gfx ref: R12 — be bazės tik v210a išėjimas", "[gfx]") {
+    const Raster v{8, 8, false, false}, a{8, 8, false, true}, lr{4, 4, false, true};
+    const Buf lay = make_grain(4, 4, lr, 17, 2);
+    const Layer L{lay.data(), lr, 0, 0, 1.0f};
+    Buf outv(grain_bytes(v), 0xA5), outa(grain_bytes(a), 0xA5);
+    CHECK_FALSE(ref::composite(nullptr, v, &L, 1, v, 0, outv.data()));
+    CHECK_FALSE(ref::composite(nullptr, v, nullptr, 0, v, 0, outv.data()));  // net k = 0
+    CHECK(outv == Buf(outv.size(), 0xA5));
+    CHECK(ref::composite(nullptr, a, &L, 1, a, 0, outa.data()));
+    // su v210 bazė (bet kuri) v210 išėjimas leidžiamas
+    const Buf base = fill_only(make_grain(8, 8, a, 18, 2), a);  // v210 bazė = alfa grain'o fill dalis
+    CHECK(ref::composite(base.data(), v, &L, 1, v, 0, outv.data()));
 }

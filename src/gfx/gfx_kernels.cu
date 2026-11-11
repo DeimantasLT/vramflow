@@ -26,11 +26,6 @@ constexpr int A = 876;  // alfa skalė 0…A (= ref::kAlphaScale)
 constexpr int kThreads = 128;
 
 // --- Host pusė: geometrija ir aprašai ----------------------------------------------------------------------------------
-bool raster_ok(const Raster& r) {
-    if (r.w <= 0 || r.h <= 0 || (r.w & 1)) return false;  // R7
-    if (r.interlaced && (r.h & 1)) return false;
-    return true;
-}
 bool aligned(const void* p, std::uintptr_t a) { return (reinterpret_cast<std::uintptr_t>(p) & (a - 1)) == 0; }
 
 // Device pusės darbo aprašas (kompaktiškas). flags: bit0 out alpha, bit1 yra bazė, bit2 bazė su key, bit3 base/out 16 B lygiuoti.
@@ -59,20 +54,14 @@ using Large = DBatch<kMaxBatch, kMaxBatchLayers>;
 static_assert(sizeof(Small) <= 4096, "maža partija turi tilpti į klasikinę 4 KiB parametrų ribą");
 static_assert(sizeof(Large) <= 32764, "didelė partija viršija CUDA 12.1+ kernel parametrų ribą");
 
-// Pilna užduoties patikra (kaip ref::composite). parity netikrinamas čia.
-bool job_valid(const CompositeJob& j) {
-    if (!j.out || !raster_ok(j.out_r) || j.k < 0 || (j.k > 0 && !j.layers) || j.k > kMaxBatchLayers) return false;
-    if (!aligned(j.out, 4)) return false;
-    if (j.base && (!raster_ok(j.base_r) || j.base_r.w != j.out_r.w || j.base_r.h != j.out_r.h ||
-                   j.base_r.interlaced != j.out_r.interlaced || !aligned(j.base, 4)))
-        return false;
-    for (int l = 0; l < j.k; ++l) {
-        const Layer& L = j.layers[l];
-        if (!L.grain || !aligned(L.grain, 4) || !raster_ok(L.r) || L.r.interlaced != j.out_r.interlaced) return false;
-        if (L.x < 0 || (L.x & 1) || L.y < 0) return false;
-        if (j.out_r.interlaced && (L.y & 1)) return false;  // R1
-        if (std::isnan(L.opacity)) return false;
-    }
+// Pilna užduoties patikra: bendra gfx::composite_job_valid (R13; parity — taip pat) + tik įrenginiui būdingi reikalavimai
+// (k riba, 4 B lygiavimas).
+bool job_valid(const CompositeJob& j, int parity) {
+    if (!composite_job_valid(j, parity)) return false;
+    if (j.k > kMaxBatchLayers || !aligned(j.out, 4)) return false;
+    if (j.base && !aligned(j.base, 4)) return false;
+    for (int l = 0; l < j.k; ++l)
+        if (!aligned(j.layers[l].grain, 4)) return false;
     return true;
 }
 
@@ -342,7 +331,7 @@ DLayer make_layer(const Layer& L, const Raster& out_r) {
 // Vienas paleidimas jobs[off, off+cnt) (sluoksnių suma telpa į B).
 template <class B>
 cudaError_t launch(const CompositeJob* jobs, int cnt, cudaStream_t s) {
-    B b;
+    B b{};
     b.n = cnt;
     int nl = 0;
     std::size_t maxt = 0;
@@ -353,7 +342,7 @@ cudaError_t launch(const CompositeJob* jobs, int cnt, cudaStream_t s) {
         maxt = std::max(maxt, job_threads(b.job[i]));
     }
     k_composite<B><<<dim3(blocks_for(maxt), static_cast<unsigned>(cnt)), kThreads, 0, s>>>(b);
-    return cudaGetLastError();
+    return cudaPeekAtLastError();  // neištrina svetimos (kitos gijos / ankstesnės) klaidos būsenos
 }
 
 }  // namespace
@@ -382,13 +371,13 @@ cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_
     a.rgba_vec = aligned(rgba_dev, 4) && stride % 4 == 0;
     a.grain_vec = aligned(grain_dev, 16);
     k_rgba_to_v210a<<<blocks_for(static_cast<std::size_t>(a.lines) * a.gpr), kThreads, 0, s>>>(a);
-    return cudaGetLastError();
+    return cudaPeekAtLastError();
 }
 
 cudaError_t composite_batch(const CompositeJob* jobs, int n, int parity, cudaStream_t s) {
     if (n < 0 || n > kMaxBatch || (n > 0 && !jobs)) return cudaErrorInvalidValue;
     for (int i = 0; i < n; ++i)
-        if (!job_valid(jobs[i]) || (jobs[i].out_r.interlaced && parity != 0 && parity != 1)) return cudaErrorInvalidValue;
+        if (!job_valid(jobs[i], parity)) return cudaErrorInvalidValue;  // R11: bent vienas netinkamas -> nieko nepaleidžiama
     // Dalijimas: viskas patikrinta -> paleidimai nebeklysta dėl geometrijos. Mažas batch'as -> maža parametrų struktūra.
     for (int off = 0; off < n;) {
         int cnt = 0, layers = 0;

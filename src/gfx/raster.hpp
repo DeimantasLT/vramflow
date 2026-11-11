@@ -27,6 +27,13 @@ constexpr std::size_t fill_bytes(const Raster& r) { return fill_line_bytes(r.w) 
 constexpr std::size_t key_bytes(const Raster& r) { return r.alpha ? key_line_bytes(r.w) * static_cast<std::size_t>(grain_lines(r)) : 0; }
 constexpr std::size_t grain_bytes(const Raster& r) { return fill_bytes(r) + key_bytes(r); }
 
+// Rastro geometrija: plotis ir aukštis > 0, plotis lyginis (4:2:2 chroma poros, R7), interlaced aukštis lyginis.
+constexpr bool raster_ok(const Raster& r) {
+    if (r.w <= 0 || r.h <= 0 || (r.w & 1)) return false;
+    if (r.interlaced && (r.h & 1)) return false;
+    return true;
+}
+
 constexpr bool operator==(const Raster& a, const Raster& b) {
     return a.w == b.w && a.h == b.h && a.interlaced == b.interlaced && a.alpha == b.alpha;
 }
@@ -67,6 +74,45 @@ struct CompositeJob {
     Raster out_r;
     std::uint8_t* out;
 };
+
+// VIENINTELIS composite užduoties patikrinimas visiems variantams (etalonas, CPU, CUDA; R13). Semantika vienoda (R11):
+// bent vienas netinkamas job'as -> visas batch'as atmetamas, nieko nerašoma. Taisyklės:
+//  - out != nullptr, išėjimo rastras tinkamas, k >= 0, k > 0 -> layers != nullptr;
+//  - interlaced išėjimui parity 0 arba 1 (progresyviam ignoruojamas);
+//  - bazė (jei yra): tinkamas rastras, tas pats w / h / interlaced kaip išėjimo; base == nullptr leidžiama TIK v210a
+//    išėjimui (R12: be bazės fill neapibrėžtas v210 išėjime, nes nėra alfa jam parodyti);
+//  - kiekvienas sluoksnis: grain != nullptr, tinkamas rastras, tas pats interlaced, x >= 0 ir lyginis, y >= 0
+//    (interlaced -> y lyginis, R1), opacity ne NaN.
+// Įrenginio specifiniai reikalavimai (lygiavimas, kMaxBatchLayers) tikrinami atskirai paties varianto. why (nebūtinas) —
+// pirmos rastos klaidos aprašas.
+inline bool composite_job_valid(const CompositeJob& j, int parity, std::string* why = nullptr) {
+    auto fail = [&](const char* m) {
+        if (why) *why = m;
+        return false;
+    };
+    if (!j.out) return fail("išėjimas nullptr");
+    if (!raster_ok(j.out_r)) return fail("netinkamas išėjimo rastras");
+    if (j.k < 0) return fail("k < 0");
+    if (j.k > 0 && !j.layers) return fail("sluoksniai nullptr");
+    if (j.out_r.interlaced && parity != 0 && parity != 1) return fail("paritetas ne 0/1");
+    if (j.base) {
+        if (!raster_ok(j.base_r)) return fail("netinkamas bazės rastras");
+        if (j.base_r.w != j.out_r.w || j.base_r.h != j.out_r.h || j.base_r.interlaced != j.out_r.interlaced)
+            return fail("bazės rastras neatitinka išėjimo");
+    } else if (!j.out_r.alpha) {
+        return fail("be bazės galimas tik v210a išėjimas");  // R12
+    }
+    for (int l = 0; l < j.k; ++l) {
+        const Layer& L = j.layers[l];
+        if (!L.grain) return fail("sluoksnio grain nullptr");
+        if (!raster_ok(L.r)) return fail("netinkamas sluoksnio rastras");
+        if (L.r.interlaced != j.out_r.interlaced) return fail("sluoksnio interlace neatitinka išėjimo");
+        if (L.x < 0 || (L.x & 1) || L.y < 0) return fail("sluoksnio x / y neleistinas");
+        if (j.out_r.interlaced && (L.y & 1)) return fail("nelyginis y interlaced rastre");  // R1
+        if (std::isnan(L.opacity)) return fail("opacity NaN");
+    }
+    return true;
+}
 
 namespace detail {
 // Randa `"key"` ir grąžina nuorodą į reikšmės pradžią (po ':' ir tarpų) arba nullptr. Pakanka plokščių MXL flow aprašų

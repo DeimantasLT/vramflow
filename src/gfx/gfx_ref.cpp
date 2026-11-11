@@ -82,12 +82,6 @@ void pack_key_line(std::uint8_t* line, int w, const Row& row) {
     }
 }
 
-bool raster_ok(const Raster& r) {
-    if (r.w <= 0 || r.h <= 0 || (r.w & 1)) return false;  // R7
-    if (r.interlaced && (r.h & 1)) return false;
-    return true;
-}
-
 int clamp_fill(int v) { return std::clamp(v, 4, 1019); }
 
 }  // namespace
@@ -154,17 +148,8 @@ int mix_v210(int f, int ae, int b) {
 
 bool composite(const std::uint8_t* base, const Raster& base_r, const Layer* layers, int k, const Raster& out_r,
                int parity, std::uint8_t* out) {
-    if (!out || !raster_ok(out_r) || k < 0 || (k > 0 && !layers)) return false;
-    if (out_r.interlaced && parity != 0 && parity != 1) return false;
-    if (base && (!raster_ok(base_r) || base_r.w != out_r.w || base_r.h != out_r.h || base_r.interlaced != out_r.interlaced))
-        return false;
-    for (int l = 0; l < k; ++l) {
-        const Layer& L = layers[l];
-        if (!L.grain || !raster_ok(L.r) || L.r.interlaced != out_r.interlaced) return false;
-        if (L.x < 0 || (L.x & 1) || L.y < 0) return false;
-        if (out_r.interlaced && (L.y & 1)) return false;  // R1
-        if (std::isnan(L.opacity)) return false;
-    }
+    const CompositeJob job{base, base_r, layers, k, out_r, out};
+    if (!composite_job_valid(job, parity)) return false;  // R13: bendras patikrinimas
 
     const int w = out_r.w;
     const int lines = grain_lines(out_r);

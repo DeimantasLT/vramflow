@@ -4,8 +4,10 @@
 // Variantai H / G: CUDA RGBA -> v210a ir batch kompozitorius (alfa kompozitoriaus 5 užduotis). Sutartis ta pati kaip
 // gfx::ref (gfx_ref.hpp), rezultatas bitas į bitą lygus etalonui; skirtumas — klaidos grąžinamos kaip cudaError_t:
 // netinkama geometrija (nelyginis plotis / x, neigiami x / y, nelyginis y interlaced rastre, neatitinkantys rastrai,
-// nullptr, paritetas ne 0/1 interlaced rastre, NaN opacity, k per didelis) -> cudaErrorInvalidValue, NIEKAS nepaleidžiama
-// (patikra visa host pusėje, prieš bet kokį paleidimą). Sėkmės atveju visas išėjimo grain'as perrašomas (padding = 0,
+// nullptr, paritetas ne 0/1 interlaced rastre, NaN opacity, k per didelis, base == nullptr su v210 išėjimu) ->
+// cudaErrorInvalidValue, NIEKAS nepaleidžiama: bent vienas netinkamas job'as atmeta visą batch'ą (R11; patikra —
+// bendra gfx::composite_job_valid, R13, visa host pusėje, prieš bet kokį paleidimą). Klaidų būsena: po paleidimo
+// naudojamas cudaPeekAtLastError (neišvalo svetimų klaidų). Sėkmės atveju visas išėjimo grain'as perrašomas (padding = 0,
 // net jei device buferis purvinas).
 //
 // Rodyklės (grain, rgba, bazė, sluoksniai, išėjimas) — device atmintis, išlygiuota bent 4 B. Funkcijos asinchroninės
@@ -36,6 +38,9 @@ cudaError_t rgba_to_v210a(const std::uint8_t* rgba_dev, int w, int h, std::size_
 // (CompositeJob::base, layers[i].grain ir out — device; pats `layers` masyvas — host). n <= kMaxBatch; n == 0 —
 // nieko nedaro. Jei sluoksnių suma > kMaxBatchLayers, batch'as dalijamas į kelis paleidimus tame pačiame stream'e.
 // parity validuojamas kaip etalone (interlaced išėjimui 0/1); pats kompozitoriaus kernel'is nuo jo nepriklauso.
+// Aprašai kernel'ui perduodami __grid_constant__ parametru; didelė partija (> 4 KiB, apie 23 KiB) naudoja CUDA 12.1+ /
+// draiverio >= 530 leidžiamą iki 32 764 B parametrų ribą (senesnė platforma — tik klasikinė 4 KiB; tada naudoti n <= 8
+// ir <= 64 sluoksnių sumą).
 cudaError_t composite_batch(const CompositeJob* jobs, int n, int parity, cudaStream_t s);
 
 }  // namespace vramflow::gfx::cuda

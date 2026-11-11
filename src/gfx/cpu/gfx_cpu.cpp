@@ -24,12 +24,6 @@ constexpr int kChunkLines = 16;
 inline u32 ld32(const std::uint8_t* p) { u32 v; std::memcpy(&v, p, 4); return v; }
 inline void st32(std::uint8_t* p, u32 v) { std::memcpy(p, &v, 4); }
 
-bool raster_ok(const Raster& r) {
-    if (r.w <= 0 || r.h <= 0 || (r.w & 1)) return false;  // R7
-    if (r.interlaced && (r.h & 1)) return false;
-    return true;
-}
-
 // --- v210 / key pakavimas eilutėmis -------------------------------------------------------------------------------
 // v210 grupė (6 px, 16 B): w0 = Cb0|Y0|Cr0, w1 = Y1|Cb1|Y2, w2 = Cr1|Y3|Cb2, w3 = Y4|Cr2|Y5 (laukai po 10 bitų, postūmiai 0/10/20).
 void unpack_fill(const std::uint8_t* line, int groups, u16* __restrict y, u16* __restrict cb, u16* __restrict cr) {
@@ -194,30 +188,20 @@ void process_row(const CompositeJob& job, int r, Scratch& s) {
     if (oa) pack_key(job.out + fill_bytes(out_r) + static_cast<std::size_t>(r) * key_line_bytes(W), W, s.ab.data(), 64);
 }
 
-bool job_valid(const CompositeJob& j, int parity) {
-    if (!j.out || !raster_ok(j.out_r) || j.k < 0 || (j.k > 0 && !j.layers)) return false;
-    if (j.out_r.interlaced && parity != 0 && parity != 1) return false;
-    if (j.base && (!raster_ok(j.base_r) || j.base_r.w != j.out_r.w || j.base_r.h != j.out_r.h || j.base_r.interlaced != j.out_r.interlaced))
-        return false;
-    for (int l = 0; l < j.k; ++l) {
-        const Layer& L = j.layers[l];
-        if (!L.grain || !raster_ok(L.r) || L.r.interlaced != j.out_r.interlaced) return false;
-        if (L.x < 0 || (L.x & 1) || L.y < 0) return false;
-        if (j.out_r.interlaced && (L.y & 1)) return false;  // R1
-        if (std::isnan(L.opacity)) return false;
-    }
-    return true;
-}
-
 }  // namespace
 
 bool composite_batch(const CompositeJob* jobs, int n, int parity, mxlv::func::ThreadPool* pool) {
     if (n < 0 || (n > 0 && !jobs)) return false;
+    // R11 / R13: bent vienas netinkamas job'as -> nieko nerašoma, false (kaip etalonas ir CUDA).
+    for (int i = 0; i < n; ++i)
+        if (!composite_job_valid(jobs[i], parity)) return false;
     struct Task { int job, row0; };
-    std::vector<Task> tasks;
-    bool all_ok = true;
+    // Užduočių sąrašas — kvietėjo gijos scratch (be malloc karštame kelyje po apšilimo). Nuoroda, o ne pavadinimas,
+    // lambda'oje: thread_local pavadinimas pool darbinėje gijoje rodytų į ŠIOS gijos kopiją.
+    thread_local std::vector<Task> scratch;
+    scratch.clear();
+    std::vector<Task>& tasks = scratch;
     for (int i = 0; i < n; ++i) {
-        if (!job_valid(jobs[i], parity)) { all_ok = false; continue; }
         const int lines = grain_lines(jobs[i].out_r);
         for (int r0 = 0; r0 < lines; r0 += kChunkLines) tasks.push_back({i, r0});
     }
@@ -232,7 +216,7 @@ bool composite_batch(const CompositeJob* jobs, int n, int parity, mxlv::func::Th
         pool->run(nt, body);
     else
         for (int t = 0; t < nt; ++t) body(t);
-    return all_ok;
+    return true;
 }
 
 bool composite(const std::uint8_t* base, const Raster& base_r, const Layer* layers, int k, const Raster& out_r, int parity,
