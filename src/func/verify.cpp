@@ -36,8 +36,6 @@
 namespace mxlv::func {
 
 bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err);
-bool parse_layer_geoms(const Opts& o, std::vector<vramflow::gfx::Raster>& out, std::string& err);  // gfxgen.cpp
-bool parse_xy(const std::string& s, int& x, int& y);                                                // composite.cpp
 
 namespace {
 bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint32_t>& host) {

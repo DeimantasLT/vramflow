@@ -14,6 +14,7 @@
 
 #include "common/histogram.hpp"
 #include "func/thread_pool.hpp"
+#include "gfx/raster.hpp"
 
 namespace mxlv::func {
 
@@ -87,6 +88,10 @@ struct Stats {
     int exit_code = 0;
     void add_hist(const char* k, std::uint64_t ns) { hist[k].add(ns); }
 };
+
+// Sluoksnių argumentai, bendri gfxgen / composite / verify --mode composite (apibrėžta gfxgen.cpp / composite.cpp).
+bool parse_layer_geoms(const Opts& o, std::vector<vramflow::gfx::Raster>& out, std::string& err);  // --layer-geom -> K rastrų
+bool parse_xy(const std::string& s, int& x, int& y);                                                // "X,Y"
 
 std::string storage_options(const Opts& o, int dev);  // writer'io opcijos pagal --storage
 std::atomic<bool>& stop_flag();

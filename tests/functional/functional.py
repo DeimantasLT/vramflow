@@ -492,12 +492,13 @@ def fcomp4(out):
     C / H / G. Tikrasis verify: verification_errors == 0 ir patikrintų > 0; tyčinis neatitikimas (kita --opacity) —
     verification_errors > 0 (įrodo, kad patikra veikia). Abu verify procesai skaito tą patį composite išėjimą."""
     res = []
-    N, K, DUR = 1, 2, 10
+    N, K, DUR = 1, 2, 6
+    MIN_SAMPLES = 20  # 6 s, --every 5: pasiekta >= ~35 (manual, apkrauta) / ~50 (pace)
     xy = ["--layer-xy", "1488,64", "--layer-xy", "0,0"]
     for tag, impl, storage in comp_variants():
-        for gm, ofmt in (("manual", "v210a"), ("pace", "v210")):
+        for gm, ofmt in (("manual", "v210a"), ("manual", "v210"), ("pace", "v210a"), ("pace", "v210")):
             tid = f"fcomp4[{tag}/{gm}/{ofmt}]"
-            sub = f"fcomp4-{tag}-{gm}"
+            sub = f"fcomp4-{tag}-{gm}-{ofmt}"
             d = fresh_domain(sub)
             v = vcommon(impl, storage)
             g = FProc(out, sub, "gen", d, "--flows", N, "--duration", 80, *v)
@@ -531,11 +532,12 @@ def fcomp4(out):
 
             sa, sb = vsum(va), vsum(vb)
             pa, pb = (sa or {}).get("proc", {}), (sb or {}).get("proc", {})
-            ok = (sa is not None and sb is not None and pa.get("verification_errors", 1) == 0 and pa.get("samples_total", 0) > 0
+            ok = (sa is not None and sb is not None and pa.get("verification_errors", 1) == 0 and pa.get("samples_total", 0) >= MIN_SAMPLES
                   and pb.get("verification_errors", 0) > 0 and pb.get("samples_total", 0) > 0)
             res.append(result(tid, "PASS" if ok else "FAIL",
                               why=f"exit ok={ra} bad={rb} ok.verification_errors={pa.get('verification_errors')} ok.samples={pa.get('samples_total')} "
-                                  f"ok.capacity_errors={pa.get('capacity_errors')} bad.verification_errors={pb.get('verification_errors')} "
+                                  f"ok.capacity_errors={pa.get('capacity_errors')} check_dropped={((sa or {}).get('flows') or [{}])[0].get('check_dropped')} "
+                                  f"bad.verification_errors={pb.get('verification_errors')} "
                                   f"expect_ms={((sa or {}).get('hist') or {}).get('expect_ms')}", ok=sa, bad=sb))
     return res
 
