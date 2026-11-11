@@ -11,7 +11,9 @@
 //  - Storage: VISI įėjimai turi būti tokioje pačioje saugykloje kaip --storage (C, H: host; G: cuda-linear), kaip `logo`.
 //    Mišrios saugyklos (pvz. bazė host, sluoksniai cuda) nepalaikomos: startas nepavyksta (exit 1). H variantas kiekvieną
 //    įėjimą (host) pakelia į device scratch, apdoroja ir rezultatą nukopijuoja į host išėjimo slot'ą.
-//  - Bazė `none` (tik v210a išėjimas): išėjimo rastras 1920×1080 interlaced; kitaip išėjimo rastras = bazės (w, h, interlace).
+//  - Bazė `none` (tik v210a išėjimas): išėjimo rastras = --format rastras (numatytasis 1920×1080 interlaced); kitaip išėjimo
+//    rastras = bazės (w, h, interlace), o bazė turi atitikti --format. Visų įėjimų grain'o ritmas turi sutapti su --format
+//    (libvramflow-gfx sluoksniai šiuo metu — tik 50/1, todėl kompozicija galima 1080i50 / 1080p50 / 720p50 / 2160p50).
 //  - `--layer-flow K:UUID`: K — sluoksnio indeksas nuo 0 (0…layers-1); tas pats flow VISIEMS išėjimams n (grandinei N=1).
 //  - [PF-3] įėjimas, kurio skaitymas grąžina MXL_ERR_FLOW_INVALID (writer'is perkurtas), uždaromas ir atidaromas iš naujo
 //    neblokuojančiai (po vieną bandymą kas 100 ms, tarp tick'ų; skaitiklis `reopened`). Išėjimas, kurio įėjimas trūksta, tuo metu
@@ -132,9 +134,19 @@ int run_composite(const Opts& o) {
     int rc = 0;
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
-            if (!in[n * per + s].open(inst, in_flow_id(n, s), 15000, stop, err, static_cast<const vramflow::gfx::Raster*>(nullptr))) {
+            if (!in[n * per + s].open(inst, in_flow_id(n, s), 15000, stop, err, static_cast<const vramflow::VideoFormat*>(nullptr))) {
                 st.fatal = "in " + std::to_string(n) + "/" + std::to_string(s) + ": " + err;
                 rc = 4;
+            } else if (!vramflow::same_rate(in[n * per + s].fmt.grain_rate(), o.fmt.grain_rate())) {
+                const vramflow::Rational g = in[n * per + s].fmt.grain_rate(), w = o.fmt.grain_rate();
+                st.fatal = "in " + std::to_string(n) + "/" + std::to_string(s) + ": grain'o ritmas " + std::to_string(g.num) + "/" +
+                           std::to_string(g.den) + " != " + std::to_string(w.num) + "/" + std::to_string(w.den) + " (--format " +
+                           vramflow::format_name(o.fmt) + ")";
+                rc = 1;
+            } else if (has_base && s == 0 && !(in[n * per].fmt.raster == o.fmt.raster)) {
+                st.fatal = "bazė " + std::to_string(n) + ": formatas " + vramflow::format_name(in[n * per].fmt) + " != --format " +
+                           vramflow::format_name(o.fmt);
+                rc = 1;
             }
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t s = 0; s < per && !rc; ++s)
@@ -145,7 +157,7 @@ int run_composite(const Opts& o) {
     std::vector<Layer> lay(static_cast<std::size_t>(N) * K);
     static const std::uint8_t dummy[8]{};
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
-        const Raster base_r = has_base ? in[idx_base(n)].raster : gfx::kHd1080i;
+        const Raster base_r = has_base ? in[idx_base(n)].raster : Raster{o.fmt.raster.w, o.fmt.raster.h, o.fmt.raster.interlaced, false};
         out_r[n] = Raster{base_r.w, base_r.h, base_r.interlaced, out_alpha};
         for (std::uint32_t k = 0; k < K; ++k) lay[n * K + k] = Layer{dummy, in[idx_layer(n, k)].raster, lx[k], ly[k], lop[k]};
         const CompositeJob j{has_base ? dummy : nullptr, base_r, &lay[n * K], static_cast<int>(K), out_r[n], const_cast<std::uint8_t*>(dummy)};
@@ -155,7 +167,8 @@ int run_composite(const Opts& o) {
     }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < N && !rc; ++n)
-        if (!out[n].create(inst, comp_def(o.flow_base + n, out_r[n], o.run_seed), opts, err, out_r[n])) {
+        if (!out[n].create(inst, comp_def(o.flow_base + n, vramflow::VideoFormat{out_r[n], o.fmt.frame_rate}, o.run_seed), opts, err,
+                           vramflow::VideoFormat{out_r[n], o.fmt.frame_rate})) {
             st.fatal = "out " + std::to_string(n) + ": " + err;
             rc = 2;
         }
@@ -197,7 +210,8 @@ int run_composite(const Opts& o) {
 
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + 1;
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
     ClockWatch cw;
     cw.stepped();
 
@@ -208,8 +222,9 @@ int run_composite(const Opts& o) {
             next_reopen[a] = now_tai() + 100'000'000ull;
             VideoIn fresh;
             std::string e;
-            if (fresh.open(inst, in[a].id, 0, stop, e, static_cast<const vramflow::gfx::Raster*>(nullptr))) {
-                if (fresh.raster == want_r[a] && fresh.cuda == static_cast<bool>(want_cuda[a])) {
+            if (fresh.open(inst, in[a].id, 0, stop, e, static_cast<const vramflow::VideoFormat*>(nullptr))) {
+                if (fresh.raster == want_r[a] && fresh.cuda == static_cast<bool>(want_cuda[a]) &&
+                    vramflow::same_rate(fresh.fmt.grain_rate(), o.fmt.grain_rate())) {
                     in[a] = fresh;
                     closed[a] = 0;
                     st.flows[a / per].inc("reopened");
@@ -224,7 +239,7 @@ int run_composite(const Opts& o) {
         if (wait_until(i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
-        const std::uint64_t deadline = mxlIndexToTimestamp(&kFieldRate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
+        const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::fill(dead.begin(), dead.end(), 0);
         for (std::uint32_t n = 0; n < N; ++n)
@@ -280,7 +295,7 @@ int run_composite(const Opts& o) {
                                    std::to_string(static_cast<long long>(in[n * per + s].head()) - static_cast<long long>(i)) + ")";
                     std::fprintf(stderr, "[composite] išėjimas %u: indeksas %llu (tick %lld, pabudimas +%.2f ms) necommit'intas, nesulaukta:%s\n", n,
                                  static_cast<unsigned long long>(i), static_cast<long long>(i - (st.first_index == ~0ull ? i : st.first_index)),
-                                 (static_cast<double>(t_wake) - static_cast<double>(mxlIndexToTimestamp(&kFieldRate, i))) / 1e6, who.c_str());
+                                 (static_cast<double>(t_wake) - static_cast<double>(mxlIndexToTimestamp(&rate, i))) / 1e6, who.c_str());
                 }
             }
         }
@@ -327,7 +342,7 @@ int run_composite(const Opts& o) {
                     base = s_in[a];
                 }
             }
-            jobs.push_back(CompositeJob{base, has_base ? in[idx_base(n)].raster : gfx::kHd1080i, &lay[n * K], static_cast<int>(K), out_r[n],
+            jobs.push_back(CompositeJob{base, has_base ? in[idx_base(n)].raster : out_r[n], &lay[n * K], static_cast<int>(K), out_r[n],
                                         host_gpu ? s_out[n] : host_dst[j]});
         }
         if (cpu) {
@@ -347,7 +362,7 @@ int run_composite(const Opts& o) {
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; }
         if (rc) break;
         // 6: lap patikra visiems įėjimams, 7: commit
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
         for (const std::uint32_t n : job_out) {
             bool lap = false;
             for (std::uint32_t s = 0; s < per; ++s) {
@@ -367,13 +382,13 @@ int run_composite(const Opts& o) {
         if (t_commit >= warm) {
             st.add_hist("proc_ms", t_commit - t_ready);
             st.add_hist("wait_ms", t_ready - t_wake);
-            st.add_hist("out_lateness", t_commit - mxlIndexToTimestamp(&kFieldRate, i));
+            st.add_hist("out_lateness", t_commit - mxlIndexToTimestamp(&rate, i));
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
         const bool clk = cw.stepped();
-        const std::uint64_t now2 = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now2 = mxlGetCurrentIndex(&rate);
         if (now2 > i) {
             for (auto& f : st.flows) f.inc(clk ? "clock_skips" : (t_commit < warm ? "warmup_skips" : "late_skips"), now2 - i);
             i = now2;

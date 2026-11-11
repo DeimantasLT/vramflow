@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// enc — F-ENC (architektūra GPU funkcijų §5.3): N × MXL 1080i50 (+ audio) → H.264 7,5 Mbit/s + AAC 192k → MPEG-TS → UDP.
+// enc — F-ENC (architektūra GPU funkcijų §5.3): N × MXL (+ audio) → H.264 7,5 Mbit/s + AAC 192k → MPEG-TS → UDP.
+// --format: interlaced (1080i50 / 59,94) — du laukai suaudžiami į kadrą; progresyvus — vienas kadro grain'as = kadras
+// (progresyvus weave, chroma (c[2k] + c[2k+1] + 4) >> 3), koderis be interlaced vėliavų.
 //  (a) --encoder nvenc: du laukai suaudžiami GPU tiesiai į CUDA AVFrame (be host kopijos) → h264_nvenc.
 //      NVENC šioje kortoje neturi lauko kodavimo (field_encoding=0, išmatuota) → srautas formaliai progresyvus 1080p25
 //      su interlaced turiniu. Tinka talpos matavimui ir vidinei kontribucijai, NE 1080i50 emisijai.
@@ -36,7 +38,6 @@ namespace mxlv::func {
 namespace {
 
 constexpr int kQueueMax = 4;
-constexpr int kAudioPerFrame = 2 * static_cast<int>(kAudioPerField);  // 1920
 
 std::string averr(int e) {
     char b[AV_ERROR_MAX_STRING_SIZE]{};
@@ -46,7 +47,7 @@ std::string averr(int e) {
 
 struct Item {
     AVFrame* video = nullptr;  // CUDA (nvenc) arba NV12 sistemos atmintyje (x264); pts = F
-    std::vector<float> l, r;   // 1920 mėginių; first_sample = 2F·960
+    std::vector<float> l, r;   // kadro mėginiai [sample_begin(kadrų dažnis, F), sample_begin(…, F + 1))
     std::int64_t frame = 0;
     std::uint64_t t_ready = 0;  // TAI, kada kadras paruoštas (latencijai)
     bool audio_ok = false;
@@ -65,7 +66,7 @@ struct Stream {
     std::uint64_t frames_encoded = 0, packets_video = 0, packets_audio = 0, bytes_video = 0, mux_errors = 0, encode_errors = 0;
     Histogram encode_ms;
     // x264 staging
-    std::uint8_t* d_stage = nullptr;  // device NV12 pitch 1920
+    std::uint8_t* d_stage = nullptr;  // device NV12 pitch = plotis
     std::vector<std::uint8_t*> pinned;  // laisvi host buferiai
     std::mutex pool_m;
     bool pinned_fallback = false;
@@ -75,9 +76,16 @@ struct Ctx {
     const Opts* o = nullptr;
     AVBufferRef* hw = nullptr;
     std::vector<AVBufferRef*> frames;  // per srautą (nvenc)
+    int w = 1920, h = 1080;
+    std::size_t nv12_bytes() const { return static_cast<std::size_t>(w) * h * 3 / 2; }
 };
 
-constexpr std::size_t kNv12Bytes = 1920 * 1080 * 3 / 2;
+// H.264 lygis pagal makrobloko greitį: ≤ 1080p30 — 4.0, ≤ 1080p60 — 4.2, UHD — 5.1 (≤ 2160p30) / 5.2.
+const char* h264_level(const vramflow::VideoFormat& f) {
+    const double fps = static_cast<double>(f.frame_rate.num) / static_cast<double>(f.frame_rate.den);
+    if (f.raster.h > 1088) return fps > 31 ? "5.2" : "5.1";
+    return fps > 31 ? "4.2" : "4.0";
+}
 
 void return_pinned(void* opaque, std::uint8_t* data) {
     auto* s = static_cast<Stream*>(opaque);
@@ -85,22 +93,24 @@ void return_pinned(void* opaque, std::uint8_t* data) {
     s->pinned.push_back(data);
 }
 
-AVFrame* wrap_pinned(Stream& s, std::uint8_t* buf) {
+AVFrame* wrap_pinned(const Ctx& cx, Stream& s, std::uint8_t* buf) {
     AVFrame* f = av_frame_alloc();
     f->format = AV_PIX_FMT_NV12;
-    f->width = 1920;
-    f->height = 1080;
-    f->buf[0] = av_buffer_create(buf, kNv12Bytes, return_pinned, &s, 0);
+    f->width = cx.w;
+    f->height = cx.h;
+    f->buf[0] = av_buffer_create(buf, cx.nv12_bytes(), return_pinned, &s, 0);
     f->data[0] = buf;
-    f->data[1] = buf + 1920 * 1080;
-    f->linesize[0] = 1920;
-    f->linesize[1] = 1920;
+    f->data[1] = buf + static_cast<std::size_t>(cx.w) * cx.h;
+    f->linesize[0] = cx.w;
+    f->linesize[1] = cx.w;
     return f;
 }
 
 void worker(Ctx& cx, Stream& s) {
     const Opts& o = *cx.o;
     const bool nvenc = o.encoder == "nvenc";
+    const vramflow::VideoFormat& fmt = o.fmt;
+    const bool inter = fmt.raster.interlaced;
     AVCodecContext* vc = nullptr;
     AVCodecContext* ac = nullptr;
     AVFormatContext* oc = nullptr;
@@ -115,15 +125,15 @@ void worker(Ctx& cx, Stream& s) {
     const AVCodec* vcodec = avcodec_find_encoder_by_name(nvenc ? "h264_nvenc" : "libx264");
     if (!vcodec) { fail("koderis nerastas"); goto out; }
     vc = avcodec_alloc_context3(vcodec);
-    vc->width = 1920;
-    vc->height = 1080;
-    vc->time_base = {1, 25};
-    vc->framerate = {25, 1};
+    vc->width = cx.w;
+    vc->height = cx.h;
+    vc->time_base = {static_cast<int>(fmt.frame_rate.den), static_cast<int>(fmt.frame_rate.num)};  // pts = kadro numeris
+    vc->framerate = {static_cast<int>(fmt.frame_rate.num), static_cast<int>(fmt.frame_rate.den)};
     vc->sample_aspect_ratio = {1, 1};
     vc->bit_rate = o.vbitrate;
     vc->rc_max_rate = o.vbitrate;
     vc->rc_buffer_size = static_cast<int>(o.vbitrate);
-    vc->gop_size = 25;
+    vc->gop_size = static_cast<int>((fmt.frame_rate.num + fmt.frame_rate.den / 2) / fmt.frame_rate.den);  // ~1 s
     vc->color_primaries = AVCOL_PRI_BT709;
     vc->color_trc = AVCOL_TRC_BT709;
     vc->colorspace = AVCOL_SPC_BT709;
@@ -140,7 +150,7 @@ void worker(Ctx& cx, Stream& s) {
             av_dict_set(&d, "tune", o.tune.c_str(), 0);
             av_dict_set(&d, "rc", "cbr", 0);
             av_dict_set(&d, "profile", "high", 0);
-            av_dict_set(&d, "level", "4.0", 0);
+            av_dict_set(&d, "level", h264_level(fmt), 0);
             av_dict_set(&d, "aud", "1", 0);
             av_dict_set(&d, "strict_gop", "1", 0);
             av_dict_set(&d, "forced-idr", "1", 0);
@@ -150,14 +160,14 @@ void worker(Ctx& cx, Stream& s) {
             else av_dict_set(&d, "b_ref_mode", "middle", 0);
         } else {
             vc->pix_fmt = AV_PIX_FMT_NV12;
-            vc->flags |= AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME;
+            if (inter) vc->flags |= AV_CODEC_FLAG_INTERLACED_DCT | AV_CODEC_FLAG_INTERLACED_ME;
             vc->max_b_frames = 2;
             vc->thread_count = o.x264_threads;
             vc->thread_type = FF_THREAD_FRAME;
             av_dict_set(&d, "preset", o.x264_preset.c_str(), 0);
             av_dict_set(&d, "profile", "high", 0);
-            av_dict_set(&d, "level", "4.0", 0);
-            av_dict_set(&d, "x264-params", "tff=1:nal-hrd=cbr:force-cfr=1:scenecut=0:aud=1", 0);
+            av_dict_set(&d, "level", h264_level(fmt), 0);
+            av_dict_set(&d, "x264-params", inter ? "tff=1:nal-hrd=cbr:force-cfr=1:scenecut=0:aud=1" : "nal-hrd=cbr:force-cfr=1:scenecut=0:aud=1", 0);
         }
         e = avcodec_open2(vc, vcodec, &d);
         av_dict_free(&d);
@@ -225,10 +235,10 @@ void worker(Ctx& cx, Stream& s) {
         ++s.frames_encoded;
         if (ac) {
             float* planes[2] = {it.l.data(), it.r.data()};
-            av_audio_fifo_write(fifo, reinterpret_cast<void**>(planes), kAudioPerFrame);
-            // fifo pradžios mėginio indeksas: 2F·960 − (dar neužkoduota fifo dalis prieš šį bloką)
+            av_audio_fifo_write(fifo, reinterpret_cast<void**>(planes), static_cast<int>(it.l.size()));
+            // fifo pradžios mėginio indeksas: pirmo kadro sample_begin (toliau — tolydžiai)
             static thread_local std::int64_t next_sample = -1;
-            if (next_sample < 0) next_sample = it.frame * kAudioPerFrame;
+            if (next_sample < 0) next_sample = static_cast<std::int64_t>(vramflow::sample_begin(o.fmt.frame_rate, static_cast<std::uint64_t>(it.frame)));
             while (av_audio_fifo_size(fifo) >= ac->frame_size) {
                 AVFrame* af = av_frame_alloc();
                 af->nb_samples = ac->frame_size;
@@ -290,6 +300,13 @@ int run_enc(const Opts& o) {
     const bool nvenc = o.encoder == "nvenc";
     Ctx cx;
     cx.o = &o;
+    cx.w = o.fmt.raster.w;
+    cx.h = o.fmt.raster.h;
+    const bool inter = o.fmt.raster.interlaced;
+    const media::Dim dim{cx.w, cx.h};
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    const std::uint64_t gpf = inter ? 2 : 1;  // grain'ų kadre
+    const std::size_t nv12 = cx.nv12_bytes(), ysz = static_cast<std::size_t>(cx.w) * cx.h;
     std::vector<std::unique_ptr<Stream>> streams;
     auto finish = [&](int rc) {
         st.exit_code = rc;
@@ -334,8 +351,8 @@ int run_enc(const Opts& o) {
         auto* fc = reinterpret_cast<AVHWFramesContext*>(fr->data);
         fc->format = AV_PIX_FMT_CUDA;
         fc->sw_format = AV_PIX_FMT_NV12;
-        fc->width = 1920;
-        fc->height = 1080;
+        fc->width = cx.w;
+        fc->height = cx.h;
         fc->initial_pool_size = 16;  // iš anksto: pirmas cudaMalloc WSL'e trunka dešimtis ms ir vėlintų tick'ą
         if (int e = av_hwframe_ctx_init(fr); e < 0) { st.fatal = "hwframe_ctx_init: " + averr(e); return finish(2); }
         cx.frames.push_back(fr);
@@ -348,7 +365,7 @@ int run_enc(const Opts& o) {
     std::string err;
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
         if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), 15000, stop, err)) { st.fatal = err; rc = 4; }
 
@@ -358,15 +375,15 @@ int run_enc(const Opts& o) {
         auto s = std::make_unique<Stream>();
         s->n = static_cast<int>(n);
         if (cpu) {  // C: tik sistemos atmintis
-            for (int k = 0; k < kQueueMax + 3; ++k) s->pinned.push_back(static_cast<std::uint8_t*>(std::malloc(kNv12Bytes)));
+            for (int k = 0; k < kQueueMax + 3; ++k) s->pinned.push_back(static_cast<std::uint8_t*>(std::malloc(nv12)));
             s->pinned_fallback = true;
         } else if (!nvenc) {
-            if (cudaMalloc(reinterpret_cast<void**>(&s->d_stage), kNv12Bytes) != cudaSuccess) { st.fatal = "staging"; rc = 2; break; }
+            if (cudaMalloc(reinterpret_cast<void**>(&s->d_stage), nv12) != cudaSuccess) { st.fatal = "staging"; rc = 2; break; }
             for (int k = 0; k < kQueueMax + 3; ++k) {
                 std::uint8_t* p = nullptr;
-                if (cudaHostAlloc(reinterpret_cast<void**>(&p), kNv12Bytes, cudaHostAllocDefault) != cudaSuccess) {
+                if (cudaHostAlloc(reinterpret_cast<void**>(&p), nv12, cudaHostAllocDefault) != cudaSuccess) {
                     (void)cudaGetLastError();
-                    p = static_cast<std::uint8_t*>(std::malloc(kNv12Bytes));
+                    p = static_cast<std::uint8_t*>(std::malloc(nv12));
                     s->pinned_fallback = true;
                 }
                 s->pinned.push_back(p);
@@ -385,19 +402,20 @@ int run_enc(const Opts& o) {
     std::vector<AVFrame*> job_frame;
     std::vector<const std::uint32_t*> top(o.flows), bot(o.flows);
     std::vector<int> state(o.flows);
-    std::vector<std::vector<float>> al(o.flows, std::vector<float>(kAudioPerFrame)), ar(o.flows, std::vector<float>(kAudioPerFrame));
+    std::vector<std::vector<float>> al(o.flows), ar(o.flows);
     const std::uint32_t gc = o.flows ? in[0].layout.slotCount : 10;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t F = (mxlGetCurrentIndex(&kFieldRate) >> 1) + 1;
+    std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
     ClockWatch cw;
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
-        const std::uint64_t i_top = 2 * F, i_bot = 2 * F + 1;
-        if (wait_until(i_bot, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
+        // interlaced: kadras F = laukai 2F, 2F+1; progresyvus: kadras F = grain'as F (i_top == i_bot)
+        const std::uint64_t i_top = gpf * F, i_bot = gpf * F + gpf - 1;
+        if (wait_until(rate, i_bot, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
-        const std::uint64_t deadline = mxlIndexToTimestamp(&kFieldRate, i_bot) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
+        const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i_bot) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::uint32_t pending = o.flows;
         for (;;) {
@@ -438,7 +456,7 @@ int run_enc(const Opts& o) {
                 if (!jobs.empty() && f->linesize[0] != job_frame[0]->linesize[0]) { st.fatal = "skirtingi pitch"; rc = 2; av_frame_free(&f); break; }
             } else if (!cpu) {
                 j.dst_y = streams[n]->d_stage;
-                j.dst_uv = streams[n]->d_stage + 1920 * 1080;
+                j.dst_uv = streams[n]->d_stage + ysz;
             }
             jobs.push_back(j);
             job_flow.push_back(n);
@@ -446,8 +464,8 @@ int run_enc(const Opts& o) {
         }
         if (rc) break;
         cudaError_t ce = cudaSuccess;
-        const int py = nvenc && !job_frame.empty() ? job_frame[0]->linesize[0] : 1920;
-        const int puv = nvenc && !job_frame.empty() ? job_frame[0]->linesize[1] : 1920;
+        const int py = nvenc && !job_frame.empty() ? job_frame[0]->linesize[0] : cx.w;
+        const int puv = nvenc && !job_frame.empty() ? job_frame[0]->linesize[1] : cx.w;
         std::vector<std::uint8_t*> host_bufs(jobs.size(), nullptr);
         if (cpu) {
             // C: buferis iš pool'o, CPU weave tiesiai iš host flow slot'ų (gijų baseine)
@@ -460,10 +478,10 @@ int run_enc(const Opts& o) {
             }
             pool.run(static_cast<int>(jobs.size()), [&](int k) {
                 if (host_bufs[k])
-                    media::cpu::weave_nv12(jobs[k].top, jobs[k].bottom, host_bufs[k], host_bufs[k] + 1920 * 1080, 1920, 1920);
+                    media::cpu::weave_nv12(jobs[k].top, jobs[k].bottom, host_bufs[k], host_bufs[k] + ysz, cx.w, cx.w, dim, inter);
             });
         } else if (!jobs.empty()) {
-            ce = media::weave_nv12(jobs.data(), static_cast<int>(jobs.size()), py, puv, stream);
+            ce = media::weave_nv12(jobs.data(), static_cast<int>(jobs.size()), dim, inter, py, puv, stream);
         }
         if (!cpu && !ce && !nvenc) {
             for (std::size_t k = 0; k < jobs.size(); ++k) {
@@ -472,13 +490,13 @@ int run_enc(const Opts& o) {
                 if (s.pinned.empty()) continue;  // pool tuščias → kadras bus atmestas (eilė pilna)
                 host_bufs[k] = s.pinned.back();
                 s.pinned.pop_back();
-                ce = cudaMemcpyAsync(host_bufs[k], s.d_stage, kNv12Bytes, cudaMemcpyDeviceToHost, stream);
+                ce = cudaMemcpyAsync(host_bufs[k], s.d_stage, nv12, cudaMemcpyDeviceToHost, stream);
                 if (ce) break;
             }
         }
         if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
         for (std::size_t k = 0; k < jobs.size(); ++k) {
             const std::uint32_t n = job_flow[k];
             AVFrame* f = job_frame[k];
@@ -491,26 +509,34 @@ int run_enc(const Opts& o) {
             }
             if (!nvenc) {
                 if (!host_bufs[k]) { st.flows[n].inc("frames_dropped_queue"); continue; }
-                f = wrap_pinned(*streams[n], host_bufs[k]);
-                f->flags |= AV_FRAME_FLAG_INTERLACED | AV_FRAME_FLAG_TOP_FIELD_FIRST;
+                f = wrap_pinned(cx, *streams[n], host_bufs[k]);
+                if (inter) f->flags |= AV_FRAME_FLAG_INTERLACED | AV_FRAME_FLAG_TOP_FIELD_FIRST;
             }
             Item item;
             item.video = f;
             item.frame = static_cast<std::int64_t>(F);
             item.t_ready = t_ready;
             if (!ain.empty()) {
+                // kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602
+                const std::uint64_t a_end = vramflow::sample_begin(o.fmt.frame_rate, F + 1);
+                const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(o.fmt.frame_rate, F));
                 item.l = std::move(al[n]);
                 item.r = std::move(ar[n]);
-                item.l.resize(kAudioPerFrame);
-                item.r.resize(kAudioPerFrame);
-                const mxlStatus as = ain[n].read((F + 1) * kAudioPerFrame, kAudioPerFrame, item.l.data(), item.r.data());
+                item.l.resize(a_count);
+                item.r.resize(a_count);
+                // gen garsą rašo iškart po video commit'o — trumpas pakartojimas iki termino (ne underrun dėl lenktynių)
+                mxlStatus as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
+                while (as != MXL_STATUS_OK && now_tai() < deadline && !stop.load()) {
+                    mxlSleepForNs(500'000);
+                    as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
+                }
                 if (as != MXL_STATUS_OK) {
                     st.flows[n].inc("audio_underrun_frames");
                     std::fill(item.l.begin(), item.l.end(), 0.f);
                     std::fill(item.r.begin(), item.r.end(), 0.f);
                 }
-                al[n].assign(kAudioPerFrame, 0.f);
-                ar[n].assign(kAudioPerFrame, 0.f);
+                al[n].clear();
+                ar[n].clear();
             }
             Stream& s = *streams[n];
             {
@@ -528,13 +554,13 @@ int run_enc(const Opts& o) {
         const std::uint64_t t_done = now_tai();
         if (t_done >= warm) {
             st.add_hist("weave_ms", t_done - t_ready);
-            st.add_hist("frame_lateness", t_done - mxlIndexToTimestamp(&kFieldRate, i_bot));
+            st.add_hist("frame_lateness", t_done - mxlIndexToTimestamp(&rate, i_bot));
         }
         if (st.first_index == ~0ull) st.first_index = i_top;
         st.last_index = i_bot;
         ++F;
         const bool clk = cw.stepped();
-        const std::uint64_t now2 = mxlGetCurrentIndex(&kFieldRate) >> 1;
+        const std::uint64_t now2 = mxlGetCurrentIndex(&rate) / gpf;
         if (now2 > F) {
             for (auto& fs : st.flows)
                 fs.inc(clk ? "clock_skips_frames" : (t_done < warm ? "warmup_skips_frames" : "late_skips_frames"), now2 - F);

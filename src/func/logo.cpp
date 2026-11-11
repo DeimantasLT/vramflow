@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// logo — F-LOGO (architektūra GPU funkcijų §3, §5.2): N × MXL 1080i50 įėjimų → logotipas įkepamas GPU (vienas batch
-// kernel'is visiems N per lauką) → N × MXL išėjimų. Visas kelias VRAM; CPU tik valdo.
+// logo — F-LOGO (architektūra GPU funkcijų §3, §5.2): N × MXL įėjimų (--format, numatytasis 1080i50) → logotipas
+// įkepamas GPU (vienas batch kernel'is visiems N per grain'ą: laukas arba kadras) → N × MXL išėjimų. Visas kelias VRAM;
+// CPU tik valdo.
 // Niekas nedingsta tyliai: kiekvienas indeksas kiekvienam flow'ui yra fields_ok arba late/invalid/lapped/too_late.
 #include <cuda_runtime_api.h>
 
@@ -58,8 +59,11 @@ bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err) {
         if (!err.empty()) return false;
         if (!media::ref::logo_from_rgba(rgba.data(), w, h, logo)) { err = "logotipo plotis turi būti lyginis"; return false; }
     }
-    if (o.logo_x % 2 || o.logo_x < 0 || o.logo_y < 0 || o.logo_x + logo.w > 1920 || o.logo_y + logo.h > 1080) {
-        err = "logotipas netelpa arba X nelyginis";
+    const int fw = o.fmt.raster.w, fh = o.fmt.raster.h;
+    if (o.logo_x % 2 || o.logo_x < 0 || o.logo_y < 0 || o.logo_x + logo.w > fw || o.logo_y + logo.h > fh) {
+        err = "logotipas " + std::to_string(logo.w) + "x" + std::to_string(logo.h) + " ties " + std::to_string(o.logo_x) + "," +
+              std::to_string(o.logo_y) + " netelpa į " + vramflow::format_name(o.fmt) + " kadrą " + std::to_string(fw) + "x" +
+              std::to_string(fh) + " arba X nelyginis";
         return false;
     }
     return true;
@@ -100,13 +104,20 @@ int run_logo(const Opts& o) {
     std::vector<VideoOut> out(o.flows);
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = "in " + std::to_string(n) + ": " + err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &o.fmt)) { st.fatal = "in " + std::to_string(n) + ": " + err; rc = 4; }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed), opts, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
+        if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (in[n].cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
+    const bool inter = o.fmt.raster.interlaced;
+    const std::size_t gbytes = media::grain_bytes(dim, inter);
+    // savitikros injekcijos žodis: logotipo viduje (kadro eilutė logo_y + 8, grupė logo_x / 6 + 1); 1080i50 — kaip anksčiau
+    const std::size_t inject_word = static_cast<std::size_t>(inter ? o.logo_y / 2 + 4 : o.logo_y + 8) * media::v210_words_per_line(dim.w) +
+                                    static_cast<std::size_t>(o.logo_x / 6) * 4 + 4;
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
     // H: device scratch įėjimui ir išėjimui kiekvienam flow'ui
@@ -114,8 +125,8 @@ int run_logo(const Opts& o) {
     if (host_gpu)
         for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
             std::uint32_t *a = nullptr, *b = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&a), media::kFieldBytes) != cudaSuccess ||
-                cudaMalloc(reinterpret_cast<void**>(&b), media::kFieldBytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
+            if (cudaMalloc(reinterpret_cast<void**>(&a), gbytes) != cudaSuccess ||
+                cudaMalloc(reinterpret_cast<void**>(&b), gbytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
             s_in.push_back(a);
             s_out.push_back(b);
         }
@@ -127,16 +138,16 @@ int run_logo(const Opts& o) {
     const std::uint32_t grain_count = o.flows ? in[0].layout.slotCount : 10;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + 1;
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
     std::uint64_t injected = 0;
     ClockWatch cw;
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
-        if (wait_until(i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
+        if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
-        const std::uint64_t deadline = mxlIndexToTimestamp(&kFieldRate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
+        const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
         std::fill(state.begin(), state.end(), 0);
         std::uint32_t pending = o.flows;
         // 3: visi įėjimai — neblokuojančiai; laukiantys kartojami kas 0,5 ms iki deadline
@@ -178,35 +189,35 @@ int run_logo(const Opts& o) {
         if (rc) break;
         // 5: apdorojimas — G: VIENAS batch paleidimas; H: H2D → batch → D2H; C: gijų baseinas
         cudaError_t ce = cudaSuccess;
-        const int parity = static_cast<int>(i & 1);
+        const int field = inter ? static_cast<int>(i & 1) : -1;  // −1 — progresyvus kadras
         if (cpu) {
-            pool.run(static_cast<int>(jobs.size()), [&](int k) { media::cpu::logo_field(jobs[k].src, jobs[k].dst, hlogo, parity); });
+            pool.run(static_cast<int>(jobs.size()), [&](int k) { media::cpu::logo_field(jobs[k].src, jobs[k].dst, hlogo, dim, field); });
             if (o.inject_every && i % o.inject_every == 0 && !jobs.empty()) {
-                jobs[0].dst[(o.logo_y / 2 + 4) * media::kWordsPerLine + (o.logo_x / 6) * 4 + 4] ^= 1u << 3;
+                jobs[0].dst[inject_word] ^= 1u << 3;
                 st.proc["injected"]++;
             }
         } else if (host_gpu) {
             host_jobs = jobs;
             for (std::size_t k = 0; k < jobs.size() && !ce; ++k) {
-                ce = cudaMemcpyAsync(s_in[job_flow[k]], jobs[k].src, media::kFieldBytes, cudaMemcpyHostToDevice, stream);
+                ce = cudaMemcpyAsync(s_in[job_flow[k]], jobs[k].src, gbytes, cudaMemcpyHostToDevice, stream);
                 jobs[k] = {s_in[job_flow[k]], s_out[job_flow[k]]};
             }
-            if (!ce && !jobs.empty()) ce = media::logo_fields(jobs.data(), static_cast<int>(jobs.size()), dlogo.d, parity, stream);
+            if (!ce && !jobs.empty()) ce = media::logo_fields(jobs.data(), static_cast<int>(jobs.size()), dlogo.d, dim, field, stream);
             for (std::size_t k = 0; k < jobs.size() && !ce; ++k)
-                ce = cudaMemcpyAsync(host_jobs[k].dst, jobs[k].dst, media::kFieldBytes, cudaMemcpyDeviceToHost, stream);
+                ce = cudaMemcpyAsync(host_jobs[k].dst, jobs[k].dst, gbytes, cudaMemcpyDeviceToHost, stream);
             jobs = host_jobs;  // injekcija ir tolesni žingsniai — host rodyklės
             if (!ce) ce = cudaStreamSynchronize(stream);
             if (!ce && o.inject_every && i % o.inject_every == 0 && !jobs.empty()) {
-                jobs[0].dst[(o.logo_y / 2 + 4) * media::kWordsPerLine + (o.logo_x / 6) * 4 + 4] ^= 1u << 3;
+                jobs[0].dst[inject_word] ^= 1u << 3;
                 st.proc["injected"]++;
             }
         } else if (!jobs.empty()) {
-            ce = media::logo_fields(jobs.data(), static_cast<int>(jobs.size()), dlogo.d, parity, stream);
+            ce = media::logo_fields(jobs.data(), static_cast<int>(jobs.size()), dlogo.d, dim, field, stream);
         }
         if (!cpu && !host_gpu && !ce && o.inject_every && i % o.inject_every == 0 && !jobs.empty()) {
             // savitikra: vienas bitas pirmo flow'o išėjime logotipo srityje (verify privalo aptikti)
             std::uint32_t w = 0;
-            std::uint32_t* p = jobs[0].dst + (o.logo_y / 2 + 4) * media::kWordsPerLine + (o.logo_x / 6) * 4 + 4;
+            std::uint32_t* p = jobs[0].dst + inject_word;
             ce = cudaMemcpyAsync(&w, p, 4, cudaMemcpyDeviceToHost, stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
             w ^= 1u << 3;
@@ -217,7 +228,7 @@ int run_logo(const Opts& o) {
         if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
         // 6: lap patikra įėjimams, 7: commit
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
         for (std::size_t k = 0; k < jobs.size(); ++k) {
             const std::uint32_t n = job_flow[k];
             const std::uint64_t h = in[n].head();
@@ -233,13 +244,13 @@ int run_logo(const Opts& o) {
         if (t_commit >= warm) {
             st.add_hist("proc_ms", t_commit - t_ready);  // paruošta → commit (kernel + sync + commit)
             st.add_hist("wait_ms", t_ready - t_wake);    // laukimas įėjimų
-            st.add_hist("out_lateness", t_commit - mxlIndexToTimestamp(&kFieldRate, i));
+            st.add_hist("out_lateness", t_commit - mxlIndexToTimestamp(&rate, i));
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
         const bool clk = cw.stepped();
-        const std::uint64_t now2 = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now2 = mxlGetCurrentIndex(&rate);
         if (now2 > i) {
             for (auto& f : st.flows) f.inc(clk ? "clock_skips" : (t_commit < warm ? "warmup_skips" : "late_skips"), now2 - i);
             i = now2;

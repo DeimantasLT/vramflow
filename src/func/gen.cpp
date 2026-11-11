@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// gen — apkrovos generatorius (architektūra GPU funkcijų §5.1): N × 1080i50 v210 laukų (cuda-linear) vienu batch
-// kernel'iu per lauką + pasirinktinai N × 48 kHz stereo audio (1 kHz −20 dBFS, kas sekundę 10 ms −6 dBFS pyptelėjimas,
-// sutampantis su vaizdo sync blyksniu index mod 50 == 0).
+// gen — apkrovos generatorius (architektūra GPU funkcijų §5.1): N × v210 grain'ų (--format: interlaced — laukai,
+// progresyvus — kadrai; cuda-linear) vienu batch kernel'iu per grain'ą + pasirinktinai N × 48 kHz stereo audio (1 kHz
+// −20 dBFS, kas sekundę 10 ms −6 dBFS pyptelėjimas; 50 Hz grain'ams sutampa su vaizdo sync blyksniu index mod 50 == 0).
+// Garso mėginiai grain'ui — [sample_begin(i), sample_begin(i + 1)) (sveikaisiais skaičiais, 59,94 — 800 / 801).
 #include <cuda_runtime_api.h>
 
 #include <cmath>
@@ -40,11 +41,16 @@ int run_gen(const Opts& o) {
     std::vector<AudioOut> aout(o.audio ? o.flows : 0);
     std::string err;
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
+    const vramflow::Rational grain = o.fmt.grain_rate();
+    const mxlRational rate = mxl_rate(grain);
+    const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
+    const bool inter = o.fmt.raster.interlaced;
+    const std::size_t gbytes = media::grain_bytes(dim, inter);
     int rc = 0;
     for (std::uint32_t n = 0; n < vout.size() && !rc; ++n)
-        if (!vout[n].create(inst, video_def(kRoleGen, o.flow_base + n, o.run_seed), opts, err)) { st.fatal = "video " + std::to_string(n) + ": " + err; rc = 2; }
+        if (!vout[n].create(inst, video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = "video " + std::to_string(n) + ": " + err; rc = 2; }
     for (std::uint32_t n = 0; n < aout.size() && !rc; ++n)
-        if (!aout[n].create(inst, audio_def(o.flow_base + n, o.run_seed), err)) { st.fatal = "audio " + std::to_string(n) + ": " + err; rc = 2; }
+        if (!aout[n].create(inst, audio_def(o.flow_base + n, o.run_seed), err, grain)) { st.fatal = "audio " + std::to_string(n) + ": " + err; rc = 2; }
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
@@ -54,18 +60,18 @@ int run_gen(const Opts& o) {
     if (host_gpu)
         for (std::size_t n = 0; n < vout.size(); ++n) {
             std::uint32_t* p = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&p), media::kFieldBytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; break; }
+            if (cudaMalloc(reinterpret_cast<void**>(&p), gbytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; break; }
             scratch.push_back(p);
         }
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + 1;
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
     const double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
     ClockWatch cw;
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
-        if (wait_until(i, 0, stop)) st.proc["clock_backward"]++;
+        if (wait_until(rate, i, 0, stop)) st.proc["clock_backward"]++;
         if (stop.load()) break;
         const std::uint64_t t_wake = now_tai();
         bool ok = true;
@@ -92,19 +98,19 @@ int run_gen(const Opts& o) {
             pool.run(static_cast<int>(jobs.size()), [&](int n) {
                 media::GenParams g = base;
                 g.flow = jobs[n].flow;
-                media::cpu::gen_field(g, i, jobs[n].dst);
+                media::cpu::gen_field(g, i, dim, inter, jobs[n].dst);
             });
         } else if (host_gpu) {
             for (std::size_t n = 0; n < jobs.size(); ++n) {
                 host_dst[n] = jobs[n].dst;
                 jobs[n].dst = scratch[n];
             }
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, stream);
+            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter, stream);
             for (std::size_t n = 0; n < jobs.size() && !ce; ++n)
-                ce = cudaMemcpyAsync(host_dst[n], scratch[n], media::kFieldBytes, cudaMemcpyDeviceToHost, stream);
+                ce = cudaMemcpyAsync(host_dst[n], scratch[n], gbytes, cudaMemcpyDeviceToHost, stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
         } else {
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, stream);
+            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter, stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
         }
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
@@ -112,9 +118,11 @@ int run_gen(const Opts& o) {
             if (vout[n].commit() != MXL_STATUS_OK) { st.fatal = "CommitGrain"; rc = 2; break; }
             st.flows[n].inc("fields_written");
         }
-        // audio: laukas i apima mėginius [i·960, (i+1)·960)
+        // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
+        const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
+        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
         for (std::uint32_t n = 0; n < aout.size(); ++n) {
-            const mxlStatus as = aout[n].write((i + 1) * kAudioPerField, kAudioPerField, [&](int, std::uint64_t s) {
+            const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
                 const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
                 return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
             });
@@ -124,13 +132,13 @@ int run_gen(const Opts& o) {
         const std::uint64_t t_done = now_tai();
         if (t_done >= warm) {
             st.add_hist("gen_ms", t_done - t_wake);
-            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&kFieldRate, i));
+            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
         const bool clk = cw.stepped();
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
         if (now_idx > i) {
             st.proc[clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips")] += now_idx - i;
             i = now_idx;

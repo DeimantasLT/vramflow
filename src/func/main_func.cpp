@@ -4,6 +4,8 @@
 // Architektūra: docs/architektura/2026-11-10-gpu-media-funkcijos.md
 #include <CLI/CLI.hpp>
 
+#include <cstdio>
+
 #include "func/func_common.hpp"
 
 namespace mxlv::func {
@@ -15,7 +17,8 @@ int run_verify(const Opts&);
 int run_enc(const Opts&);
 int run_dec(const Opts&);
 int run_clip(const Opts&, std::uint32_t frames, std::uint64_t first_field);
-int run_ref_crc(const std::string& path);
+int run_ref_crc(const Opts&, const std::string& path);
+int run_split_raw(const Opts&, const std::string& in, const std::string& out, bool frame_chroma);
 }  // namespace mxlv::func
 
 using namespace mxlv::func;
@@ -38,6 +41,7 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--impl", o.impl, "gpu | cpu (cpu ⇒ host storage, CUDA nekuriamas)")->check(CLI::IsMember({"gpu", "cpu"}));
     c->add_option("--storage", o.storage, "cuda-linear | host")->check(CLI::IsMember({"cuda-linear", "host"}));
     c->add_option("--threads", o.threads, "CPU varianto gijos (0 = automatiškai)");
+    c->add_option("--format", o.format, "flow formatas: 1080i50 (numatytasis), 1080p25, 1080p50, 720p50, 1080i59.94, 2160p50 …");
 }
 }  // namespace
 
@@ -46,7 +50,7 @@ int main(int argc, char** argv) {
     CLI::App app{"vramflow-func — GPU media funkcijos ant MXL"};
     app.require_subcommand(1);
     Opts o;
-    auto* g = app.add_subcommand("gen", "N × 1080i50 v210 (+ audio) generatorius");
+    auto* g = app.add_subcommand("gen", "N × v210 (--format, numatytasis 1080i50) (+ audio) generatorius");
     common(g, o);
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
@@ -112,13 +116,31 @@ int main(int argc, char** argv) {
     cl->add_option("--complexity", o.complexity);
     cl->add_option("--run-seed", o.run_seed);
     cl->add_option("--flow-base", o.flow_base);
+    cl->add_option("--format", o.format, "formatas (progresyviam — kadrai iš kadro grain'ų)");
+    std::string conv_chroma = "frame";
+    std::string conv_in, conv_out;
+    auto* cv = app.add_subcommand("split-raw", "raw NV12 kadrai → v210 kadrai etalonu (chromos PSNR įrankiui)");
+    cv->add_option("--in", conv_in)->required();
+    cv->add_option("--out", conv_out)->required();
+    cv->add_option("--format", o.format, "kadro matmenys (pvz. 1080p50)");
+    cv->add_option("--chroma", conv_chroma, "frame (kadro chroma) | field (lauko chroma: kadras kaip du laukai)")
+        ->check(CLI::IsMember({"frame", "field"}));
     std::string ref_path;
     auto* rc = app.add_subcommand("ref-crc", "raw NV12 → laukų CRC32C etalonas (JSON)");
     rc->add_option("nv12", ref_path)->required();
+    rc->add_option("--format", o.format, "formatas (progresyviam — kadro grain'ų CRC)");
     CLI11_PARSE(app, argc, argv);
+    {
+        std::string why;
+        if (!vramflow::parse_format(o.format, o.fmt, why) || !vramflow::format_supported(o.fmt, why)) {
+            std::fprintf(stderr, "--format: %s\n", why.c_str());
+            return 1;
+        }
+    }
     if (o.impl == "cpu") o.storage = "host";  // CPU variantas visada su host flow'ais
-    if (app.got_subcommand("clip")) return run_clip(o, clip_frames, clip_first & ~1ull);
-    if (app.got_subcommand("ref-crc")) return run_ref_crc(ref_path);
+    if (app.got_subcommand("clip")) return run_clip(o, clip_frames, o.fmt.raster.interlaced ? clip_first & ~1ull : clip_first);
+    if (app.got_subcommand("ref-crc")) return run_ref_crc(o, ref_path);
+    if (app.got_subcommand("split-raw")) return run_split_raw(o, conv_in, conv_out, conv_chroma == "frame");
     if (app.got_subcommand("gen")) return run_gen(o);
     if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);

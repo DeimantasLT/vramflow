@@ -14,6 +14,7 @@
 
 #include "common/histogram.hpp"
 #include "func/thread_pool.hpp"
+#include "common/format.hpp"
 #include "gfx/raster.hpp"
 
 namespace mxlv::func {
@@ -26,6 +27,9 @@ struct Opts {
     std::string storage = "cuda-linear";
     int threads = 0;  // CPU variantui: darbininkų gijų skaičius (0 = min(flows, hardware_concurrency))
     std::uint32_t flows = 1;
+    // Flow formatas (--format, planas §P2): "1080i50" (numatytasis), "1080p25", "1080p50", "720p50" …; fmt — išskaidytas.
+    std::string format = "1080i50";
+    vramflow::VideoFormat fmt = vramflow::kFmt1080i50;
     std::uint32_t flow_base = 0;
     std::uint64_t run_seed = 0x4C52544D584C4756ull;
     double duration_s = 30;

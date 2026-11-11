@@ -17,7 +17,9 @@
 // perduodamas kaip VFGFX_MEM_CUDA — manual režime tas pats įkeltas kadras naudojamas abiem laukams, todėl H2D mokama kartą
 // per kadrą, ne per lauką. Įkėlimas — upload_h2d (grįžta tik baigus DMA: biblioteka kadrą skaito savo srautu, cuda_upload.hpp).
 // host saugyklai (cpu arba gpu+host) kadras perduodamas kaip VFGFX_MEM_HOST (konvertuoja CPU).
-// Sluoksnio geometrija (--layer-geom): logo = 384×216, full = 1920×1080 arba WxH; neišvardintiems k: k = 0 logo, kiti full.
+// Sluoksnio geometrija (--layer-geom): logo = 384×216, full = --format kadras (numatytasis 1920×1080) arba WxH; neišvardintiems
+// k: k = 0 logo, kiti full. Skenavimas ir kadrų dažnis — iš --format; libvramflow-gfx priima tik 50/1 grain'o ritmą (R9),
+// todėl 1080p25 / 59,94 šeima atmetama su aiškia klaida.
 // Nelyginis k siunčiamas kaip premultiplied, lyginis — straight (kaip gfx_content).
 #include <cuda_runtime_api.h>
 
@@ -41,8 +43,6 @@ namespace {
 
 using vramflow::gfx::Raster;
 
-constexpr Raster kLogoGeom{384, 216, true, true};
-constexpr Raster kFullGeom{1920, 1080, true, true};
 
 }  // namespace
 
@@ -54,11 +54,13 @@ bool parse_layer_geoms(const Opts& o, std::vector<Raster>& out, std::string& err
     if (toks.size() > o.layers) { err = "--layer-geom turi daugiau elementų nei --layers"; return false; }
     for (std::uint32_t k = 0; k < o.layers; ++k) {
         const std::string t = k < toks.size() ? toks[k] : (k == 0 ? "logo" : "full");
-        Raster r = kFullGeom;
+        const bool inter = o.fmt.raster.interlaced;
+        const Raster full{o.fmt.raster.w, o.fmt.raster.h, inter, true};
+        Raster r = full;
         int w = 0, h = 0;
-        if (t == "logo") r = kLogoGeom;
-        else if (t == "full") r = kFullGeom;
-        else if (std::sscanf(t.c_str(), "%dx%d", &w, &h) == 2 && w >= 256 && h > 0) r = Raster{w, h, true, true};
+        if (t == "logo") r = Raster{384, 216, inter, true};
+        else if (t == "full") r = full;
+        else if (std::sscanf(t.c_str(), "%dx%d", &w, &h) == 2 && w >= 256 && h > 0) r = Raster{w, h, inter, true};
         else { err = "netinkama geometrija '" + t + "' (logo | full | WxH, W >= 256)"; return false; }
         if (!vramflow::gfx::raster_ok(r)) { err = "netinkamas rastras '" + t + "' (lyginis plotis ir aukštis)"; return false; }
         out.push_back(r);
@@ -108,6 +110,12 @@ int run_gfxgen(const Opts& o) {
     std::string err;
     if (!parse_layer_geoms(o, geom, err)) { st.fatal = err; return finish(2); }
     const bool manual = o.gfx_mode == "manual";
+    const bool inter = o.fmt.raster.interlaced;
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    if (rate.numerator != 50 || rate.denominator != 1) {
+        st.fatal = "libvramflow-gfx palaiko tik 50/1 grain'o ritmą (R9); --format " + vramflow::format_name(o.fmt) + " nepalaikomas";
+        return finish(1);
+    }
     const bool upload = o.impl != "cpu" && o.storage == "cuda-linear";  // kadras į GPU kartą, perduodamas kaip MEM_CUDA
     int dev = -1;
     if (upload) {
@@ -134,7 +142,8 @@ int run_gfxgen(const Opts& o) {
             s.n = o.flow_base + n;  // flow ID ir turinys priklauso nuo flow_base + n (kaip gen)
             s.k = k;
             s.r = geom[k];
-            const int c = vfgfx_writer_create(inst, gfx_def(s.n, k, s.r, o.run_seed).c_str(), opts.empty() ? nullptr : opts.c_str(), &s.w);
+            const int c = vfgfx_writer_create(inst, gfx_def(s.n, k, vramflow::VideoFormat{s.r, o.fmt.frame_rate}, o.run_seed).c_str(),
+                                              opts.empty() ? nullptr : opts.c_str(), &s.w);
             if (c) { st.fatal = "writer " + std::to_string(n) + "/" + std::to_string(k) + ": " + std::to_string(c) + " " + vfgfx_last_error(nullptr); rc = 2; }
         }
 
@@ -186,14 +195,14 @@ int run_gfxgen(const Opts& o) {
         std::uint64_t idx0 = 0;
         const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
         if (!rc) {
-            idx0 = mxlGetCurrentIndex(&kFieldRate) + 1;
+            idx0 = mxlGetCurrentIndex(&rate) + 1;
             for (auto& s : src) {
                 const int c = vfgfx_start_pacing(s.w, 0);
                 if (c) { st.fatal = "start_pacing: " + std::to_string(c) + " " + vfgfx_last_error(s.w); rc = 2; break; }
             }
         }
         while (!rc && !stop.load() && now_tai() < end_tai) mxlSleepForNs(20'000'000ull);
-        const std::uint64_t idx1 = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t idx1 = mxlGetCurrentIndex(&rate);
         for (std::size_t i = 0; i < src.size(); ++i) {
             const int c = vfgfx_stop_pacing(src[i].w);
             if (c) count_err(i, c);
@@ -223,10 +232,10 @@ int run_gfxgen(const Opts& o) {
         // --- manual: pats laikausi ritmo, vfgfx_write kiekvienam laukui ---
         const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
         const double warm = warm_tai_after(o.warmup_s);
-        std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + 1;
+        std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
         const bool par_write = !upload;  // host saugykla: rašytojai nepriklausomi, konvertuoja CPU — lygiagrečiai
         while (!rc && !stop.load() && now_tai() < end_tai) {
-            const std::uint64_t fr = i / 2;
+            const std::uint64_t fr = inter ? i / 2 : i;  // interlaced: abu laukai — tas pats kadras
             if (src[0].frame[0] != fr) {
                 if (src[0].frame[1] == fr) {  // iš anksto paruoštas kadras
                     for (auto& s : src) {
@@ -236,7 +245,7 @@ int run_gfxgen(const Opts& o) {
                     }
                 } else if (!prepare(0, fr)) { st.fatal = "cudaMemcpy"; rc = 2; break; }
             }
-            if (wait_until(i, 0, stop)) st.proc["clock_backward"]++;
+            if (wait_until(rate, i, 0, stop)) st.proc["clock_backward"]++;
             if (stop.load()) break;
             const std::uint64_t t_wake = now_tai();
             auto one = [&](int j) {
@@ -252,19 +261,21 @@ int run_gfxgen(const Opts& o) {
             const std::uint64_t t_done = now_tai();
             if (t_done >= warm) {
                 st.add_hist("write_ms", t_done - t_wake);
-                st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&kFieldRate, i));
+                st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
             }
             if (st.first_index == ~0ull) st.first_index = i;
             st.last_index = i;
             const bool wrote_even = (i & 1) == 0;
             ++i;
-            if (wrote_even) {  // laisvas ~20 ms tarpas iki nelyginio lauko -> kito kadro prefetch
+            // interlaced: laisvas ~20 ms tarpas iki nelyginio lauko -> kito kadro prefetch; progresyvus: kiekvienas grain'as — naujas
+            // kadras, prefetch po kiekvieno rašymo
+            if (inter ? wrote_even : true) {
                 const std::uint64_t t0 = now_tai();
-                if (!prepare(1, i / 2 + 1)) { st.fatal = "cudaMemcpy"; rc = 2; break; }
+                if (!prepare(1, inter ? i / 2 + 1 : i)) { st.fatal = "cudaMemcpy"; rc = 2; break; }
                 if (t_done >= warm) st.add_hist("prep_ms", now_tai() - t0);
             }
             const bool clk = cw.stepped();
-            const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+            const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
             if (now_idx > i) {
                 st.proc[clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips")] += now_idx - i;
                 i = now_idx;

@@ -38,10 +38,11 @@ namespace mxlv::func {
 bool load_logo(const Opts& o, media::ref::Logo& logo, std::string& err);
 
 namespace {
-bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint32_t>& host) {
-    host.resize(media::kFieldWords);
-    if (v.cuda) return cudaMemcpy(host.data(), p, media::kFieldBytes, cudaMemcpyDeviceToHost) == cudaSuccess;
-    std::memcpy(host.data(), p, media::kFieldBytes);
+// Vienas grain'as (laukas arba kadras, `words` žodžių) į host buferį.
+bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint32_t>& host, std::size_t words) {
+    host.resize(words);
+    if (v.cuda) return cudaMemcpy(host.data(), p, words * 4, cudaMemcpyDeviceToHost) == cudaSuccess;
+    std::memcpy(host.data(), p, words * 4);
     return true;
 }
 }  // namespace
@@ -87,9 +88,13 @@ int verify_composite(const Opts& o, Stats& st) {
     std::vector<gfx::Raster> geom;
     std::string err;
     if (!parse_layer_geoms(o, geom, err)) { st.fatal = err; return 1; }
-    const gfx::Raster base_r = gfx::kHd1080i;
+    const gfx::Raster base_r{o.fmt.raster.w, o.fmt.raster.h, o.fmt.raster.interlaced, false};
+    const bool inter = base_r.interlaced;
+    const media::Dim dim{base_r.w, base_r.h};
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
     const gfx::Raster out_r{base_r.w, base_r.h, base_r.interlaced, out_alpha};
     const std::size_t out_bytes = gfx::grain_bytes(out_r);
+    const vramflow::VideoFormat out_fmt{out_r, o.fmt.frame_rate};
     auto& stop = stop_flag();
 
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
@@ -97,7 +102,7 @@ int verify_composite(const Opts& o, Stats& st) {
     std::vector<VideoIn> out(N);
     int rc = 0;
     for (std::uint32_t n = 0; n < N && !rc; ++n)
-        if (!out[n].open(inst, flow_id(kRoleComp, o.flow_base + n), 20000, stop, err, &out_r)) { st.fatal = err; rc = 4; }
+        if (!out[n].open(inst, flow_id(kRoleComp, o.flow_base + n), 20000, stop, err, &out_fmt)) { st.fatal = err; rc = 4; }
     if (rc) { mxlDestroyInstance(inst); return rc; }
 
     struct LayerCache {
@@ -127,10 +132,10 @@ int verify_composite(const Opts& o, Stats& st) {
 
     auto check = [&](Worker& w, Job& job, std::vector<std::uint32_t>& base, std::vector<std::uint8_t>& exp, std::vector<gfx::Layer>& lay) {
         FlowStats& f = w.fs[job.n];
-        const int parity = static_cast<int>(job.i & 1);
+        const int parity = inter ? static_cast<int>(job.i & 1) : 0;
         const std::uint64_t t0 = now_tai();
-        const std::uint64_t fr = manual ? job.i / 2 : 0;
-        if (has_base) media::ref::gen_field({o.run_seed, o.flow_base + job.n, o.complexity}, job.i, base.data());
+        const std::uint64_t fr = manual ? (inter ? job.i / 2 : job.i) : 0;
+        if (has_base) media::ref::gen_field({o.run_seed, o.flow_base + job.n, o.complexity}, job.i, dim, inter, base.data());
         bool ok = true;
         for (std::uint32_t k = 0; k < K && ok; ++k) {
             LayerCache& c = cache[static_cast<std::size_t>(job.n) * K + k];
@@ -179,7 +184,7 @@ int verify_composite(const Opts& o, Stats& st) {
     for (std::uint32_t w = 0; w < W; ++w)
         wk[w]->t = std::thread([&, w] {
             Worker& me = *wk[w];
-            std::vector<std::uint32_t> base(media::kFieldWords);
+            std::vector<std::uint32_t> base(media::grain_words(dim, inter));
             std::vector<std::uint8_t> exp(out_bytes);
             std::vector<gfx::Layer> lay(K);
             for (;;) {
@@ -196,11 +201,14 @@ int verify_composite(const Opts& o, Stats& st) {
         });
 
     const std::uint32_t gc = out[0].layout.slotCount;
+    // Atsilikimas grain'ais: ne daugiau nei gc − 3, kad grain'as dar būtų skaitomas (readable: head − idx <= gc − 2), net kai
+    // ring'as trumpas (MXL numatytasis 200 ms: 1080p25 — tik 5 grain'ai).
+    const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + static_cast<std::uint64_t>(o.warmup_s * 50);
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
     std::vector<std::uint8_t> act(out_bytes);
     while (!stop.load() && now_tai() < end_tai) {
-        wait_until(i + o.lag_fields, 0, stop);  // verify sąmoningai atsilieka lag_fields laukų
+        wait_until(rate, i + lag, 0, stop);  // verify sąmoningai atsilieka lag_fields grain'ų
         if (stop.load()) break;
         for (std::uint32_t n = 0; n < N; ++n) {
             mxlGrainInfo info{};
@@ -224,7 +232,7 @@ int verify_composite(const Opts& o, Stats& st) {
                 std::memcpy(act.data(), p, out_bytes);
             }
             const std::uint64_t head = out[n].head();
-            if (lapped(std::max(head == MXL_UNDEFINED_INDEX ? 0 : head, mxlGetCurrentIndex(&kFieldRate)), i, gc)) {
+            if (lapped(std::max(head == MXL_UNDEFINED_INDEX ? 0 : head, mxlGetCurrentIndex(&rate)), i, gc)) {
                 f.inc("sample_lapped");
                 continue;
             }
@@ -237,10 +245,10 @@ int verify_composite(const Opts& o, Stats& st) {
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
-        if (now_idx > i + gc - 3) {  // atsilikom per daug - praleidžiam (užskaitoma)
-            for (auto& f : st.flows) f.inc("verify_skipped", now_idx - (i + o.lag_fields));
-            i = now_idx - o.lag_fields;
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
+        if (now_idx > i + gc - 3 && now_idx > i + lag) {  // atsilikom per daug - praleidžiam (užskaitoma)
+            for (auto& f : st.flows) f.inc("verify_skipped", now_idx - (i + lag));
+            i = now_idx - lag;
         }
     }
     for (auto& w : wk) {
@@ -311,15 +319,24 @@ int run_verify(const Opts& o) {
     std::vector<VideoIn> out(o.flows), in(logo_mode ? o.flows : 0);
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].open(inst, flow_id(out_role, o.flow_base + n), 20000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
+        if (!out[n].open(inst, flow_id(out_role, o.flow_base + n), 20000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
     for (std::uint32_t n = 0; n < in.size() && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 20000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 20000, stop, err, &o.fmt)) { st.fatal = err; rc = 4; }
     if (rc) { mxlDestroyInstance(inst); return finish(rc); }
 
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
+    const bool inter = o.fmt.raster.interlaced;
+    const std::size_t gwords = media::grain_words(dim, inter);
+    const int words = media::v210_words_per_line(dim.w);
     const std::uint32_t gc = out[0].layout.slotCount;
-    std::vector<std::uint32_t> ho, hi, ref(media::kFieldWords);
+    // Atsilikimas grain'ais: ne daugiau nei gc − 3, kad grain'as dar būtų skaitomas (readable: head − idx <= gc − 2), net kai
+    // ring'as trumpas (MXL numatytasis 200 ms: 1080p25 — tik 5 grain'ai).
+    const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
+    std::vector<std::uint32_t> ho, hi, ref(gwords);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    const std::uint64_t warm_idx = mxlGetCurrentIndex(&kFieldRate) + static_cast<std::uint64_t>(o.warmup_s * 50);
+    const std::uint64_t warm_idx =
+        mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
     std::uint64_t i = warm_idx;
     // logotipo stačiakampis grupėmis (už jo išėjimas turi sutapti su įėjimu)
     const int g0 = o.logo_x / 6, g1 = (o.logo_x + logo.w + 5) / 6;
@@ -327,7 +344,7 @@ int run_verify(const Opts& o) {
     while (!stop.load() && now_tai() < end_tai) {
         // laukiam, kol laukas i bus seniai commit'intas (lag), bet dar ring'e (lag < gc-2)
         // verify sąmoningai atsilieka lag_fields laukų, todėl ilgas laukimas čia nėra laikrodžio šuolis
-        wait_until(i + o.lag_fields, 0, stop);
+        wait_until(rate, i + lag, 0, stop);
         if (stop.load()) break;
         for (std::uint32_t n = 0; n < o.flows; ++n) {
             mxlGrainInfo info{};
@@ -341,16 +358,16 @@ int run_verify(const Opts& o) {
             f.inc("present");
             if ((i + n) % o.every != 0) continue;
             // imtis
-            if (!copy_field(out[n], p, ho)) { f.inc("cuda_errors"); continue; }
+            if (!copy_field(out[n], p, ho, gwords)) { f.inc("cuda_errors"); continue; }
             const std::uint32_t* ip = nullptr;
             if (logo_mode) {
                 mxlGrainInfo ii{};
-                if (in[n].get(i, 0, ii, ip) != MXL_STATUS_OK || (ii.flags & MXL_GRAIN_FLAG_INVALID) || !copy_field(in[n], ip, hi)) {
+                if (in[n].get(i, 0, ii, ip) != MXL_STATUS_OK || (ii.flags & MXL_GRAIN_FLAG_INVALID) || !copy_field(in[n], ip, hi, gwords)) {
                     f.inc("sample_in_unavailable");
                     continue;
                 }
             }
-            const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+            const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
             const std::uint64_t ho_head = out[n].head();
             const std::uint64_t hi_head = logo_mode ? in[n].head() : 0;
             if (lapped(std::max(ho_head == MXL_UNDEFINED_INDEX ? 0 : ho_head, now_idx), i, gc) ||
@@ -361,9 +378,10 @@ int run_verify(const Opts& o) {
             if (dec_mode) {
                 // Po kodavimo/dekodavimo tikslaus turinio neturime — tikrinam barkodą (paritetas, tolydi seka) ir,
                 // jei yra etalonas, CRC32C bitų tikslumu prieš programinį dekoderį.
-                const std::uint32_t mk = media::ref::decode_marker(ho.data());
+                const std::uint32_t mk = media::ref::decode_marker(ho.data(), words);
                 f.inc("samples");
-                if (((mk >> 24) & 1u) != (i & 1u)) f.inc("parity_mismatch");
+                // lauko tvarka: interlaced — šaltinio lauko paritetas == išėjimo indekso paritetas; progresyviam netaikoma
+                if (inter && ((mk >> 24) & 1u) != (i & 1u)) f.inc("parity_mismatch");
                 const std::int64_t off = (static_cast<std::int64_t>(mk & 0xFFFFFFu) - static_cast<std::int64_t>(i % (1u << 24)) +
                                           (kLoopFields << 30)) % kLoopFields;
                 // Poslinkio pokytis (paritetas teisingas) = kadras praleistas/pakartotas atkūrime — pajėgumo įvykio
@@ -376,7 +394,7 @@ int run_verify(const Opts& o) {
                     const bool near_loop = idx < 50 || idx >= static_cast<std::int64_t>(ref_crc.size()) - 50;
                     auto it = ref_crc.find(mk);
                     if (it == ref_crc.end()) f.inc("ref_marker_unknown");
-                    else if (crc32c(reinterpret_cast<const std::uint8_t*>(ho.data()), media::kFieldBytes) != it->second) {
+                    else if (crc32c(reinterpret_cast<const std::uint8_t*>(ho.data()), gwords * 4) != it->second) {
                         f.inc(near_loop ? "dec_mismatch_near_loop" : "dec_mismatch");
                         // diagnostika: pirmi 24 neatitinkantys laukai į failą (klipo indeksas, MXL indeksas)
                         static int dumped = 0;
@@ -384,7 +402,7 @@ int run_verify(const Opts& o) {
                             ++dumped;
                             const std::string p = o.out + "/mismatch_clip" + std::to_string(idx) + "_i" + std::to_string(i) + ".v210";
                             if (FILE* df = std::fopen(p.c_str(), "wb")) {
-                                std::fwrite(ho.data(), 1, media::kFieldBytes, df);
+                                std::fwrite(ho.data(), 1, gwords * 4, df);
                                 std::fclose(df);
                             }
                         }
@@ -393,15 +411,17 @@ int run_verify(const Opts& o) {
                 }
                 continue;
             }
-            if (logo_mode) media::ref::logo_field(hi.data(), ref.data(), logo, o.logo_x, o.logo_y, static_cast<int>(i & 1));
-            else media::ref::gen_field({o.run_seed, o.flow_base + n, o.complexity}, i, ref.data());
+            const int field = inter ? static_cast<int>(i & 1) : -1;
+            if (logo_mode) media::ref::logo_field(hi.data(), ref.data(), logo, o.logo_x, o.logo_y, dim, field);
+            else media::ref::gen_field({o.run_seed, o.flow_base + n, o.complexity}, i, dim, inter, ref.data());
+            const media::Geom G = media::geom_of(dim, field);
             std::uint64_t bad = 0, outside = 0;
-            for (std::uint32_t w = 0; w < media::kFieldWords; ++w) {
+            for (std::size_t w = 0; w < gwords; ++w) {
                 if (ho[w] != ref[w]) ++bad;
                 if (logo_mode) {
-                    const int j = static_cast<int>(w / media::kWordsPerLine);
-                    const int g = static_cast<int>((w % media::kWordsPerLine) / 4);
-                    const int fy = 2 * j + static_cast<int>(i & 1);
+                    const int j = static_cast<int>(w / static_cast<std::size_t>(words));
+                    const int g = static_cast<int>((w % static_cast<std::size_t>(words)) / 4);
+                    const int fy = G.row(j);
                     const bool inside = fy >= o.logo_y && fy < o.logo_y + logo.h && g >= g0 && g < g1;
                     if (!inside && ho[w] != hi[w]) ++outside;
                 }
@@ -409,16 +429,16 @@ int run_verify(const Opts& o) {
             f.inc("samples");
             if (bad) { f.inc("mismatch_fields"); f.inc("mismatch_words", bad); }
             if (outside) { f.inc("outside_diff_fields"); f.inc("outside_diff_words", outside); }
-            const std::uint32_t mk = media::ref::decode_marker(ho.data());
+            const std::uint32_t mk = media::ref::decode_marker(ho.data(), words);
             if (mk != media::marker_word(i, o.flow_base + n)) f.inc("marker_bad");
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
-        if (now_idx > i + gc - 3) {  // atsilikom per daug — praleidžiam (užskaitoma)
-            for (auto& f : st.flows) f.inc("verify_skipped", now_idx - (i + o.lag_fields));
-            i = now_idx - o.lag_fields;
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
+        if (now_idx > i + gc - 3 && now_idx > i + lag) {  // atsilikom per daug — praleidžiam (užskaitoma)
+            for (auto& f : st.flows) f.inc("verify_skipped", now_idx - (i + lag));
+            i = now_idx - lag;
         }
     }
     for (auto& v : out) v.release(inst);

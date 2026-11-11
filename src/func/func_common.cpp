@@ -66,7 +66,7 @@ std::string map_json(const std::map<std::string, std::uint64_t>& m) {
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json) {
     std::error_code ec;
     std::filesystem::create_directories(o.out, ec);
-    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + mxlv::versions_json() + ",\"flows_n\":" + std::to_string(o.flows) +
+    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + mxlv::versions_json() + ",\"format\":\"" + vramflow::format_name(o.fmt) + "\",\"flows_n\":" + std::to_string(o.flows) +
                     ",\"duration_s\":" + std::to_string(o.duration_s) + ",\"exit_code\":" + std::to_string(s.exit_code) +
                     ",\"first_index\":" + std::to_string(s.first_index == ~0ull ? 0 : s.first_index) +
                     ",\"last_index\":" + std::to_string(s.last_index) + ",\"proc\":" + map_json(s.proc) + ",\"hist\":{";

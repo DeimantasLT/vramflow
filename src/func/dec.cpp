@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
-// dec — F-DEC (architektūra GPU funkcijų §5.4): N × H.264 1080i50 MPEG-TS per UDP → h264_cuvid (NVDEC, deint=weave)
-// → NV12 CUDA kadrai → jitter eilė → batch kernel'is skaido į du v210 laukus → N × MXL 1080i50 (cuda-linear).
+// dec — F-DEC (architektūra GPU funkcijų §5.4): N × H.264 MPEG-TS per UDP → h264_cuvid (NVDEC, deint=weave)
+// → NV12 CUDA kadrai → jitter eilė → batch kernel'is → N × MXL (cuda-linear), formatas --format (numatytasis 1080i50):
+//  - interlaced flow: kadras → du v210 laukai; chroma pagal KADRO žymę AV_FRAME_FLAG_INTERLACED: pažymėtas interlaced —
+//    lauko chroma (FieldSited), progresyvus kadras (PsF) — kadro chroma (FrameSited);
+//  - progresyvus flow: kadras → vienas kadro grain'as (split_nv12_progressive, kadro chroma).
 // Taip pat: `clip` (bandomojo klipo NV12 kadrai stdout'e iš CPU etalono) ir `ref-crc` (programinio dekoderio NV12 →
 // laukų CRC32C etalonas bitų tikslumo patikrai).
 extern "C" {
@@ -16,6 +19,7 @@ extern "C" {
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -72,6 +76,8 @@ struct DecStream {
 };
 
 void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<bool>& stop) {
+    const bool inter = o.fmt.raster.interlaced;
+    const double fps = static_cast<double>(o.fmt.frame_rate.num) / static_cast<double>(o.fmt.frame_rate.den);
     AVFormatContext* ic = nullptr;
     AVCodecContext* c = nullptr;
     AVPacket* pkt = av_packet_alloc();
@@ -139,18 +145,23 @@ void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<
                 continue;                  // dar laukiam vietos dekoderyje
             }
             const AVPixelFormat want_fmt = o.impl == "cpu" ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_CUDA;
-            if (fr->format != want_fmt || fr->width != 1920 || fr->height != 1080) {
-                s.error = "netikėtas kadro formatas";
+            if (fr->format != want_fmt || fr->width != o.fmt.raster.w || fr->height != o.fmt.raster.h) {
+                s.error = "netikėtas kadro formatas " + std::to_string(fr->width) + "x" + std::to_string(fr->height) + " (laukta " +
+                          vramflow::format_name(o.fmt) + ")";
                 av_frame_unref(fr);
                 goto out;
             }
-            if (!(fr->flags & AV_FRAME_FLAG_INTERLACED) || !(fr->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST)) ++s.flag_mismatch;
+            // žymė neatitinka flow'o skenavimo: interlaced flow'ui — ne TFF interlaced kadras (progresyvus kadras vis tiek
+            // teisingas — kadro chroma), progresyviam — interlaced kadras (informacinis skaitiklis)
+            if (inter ? (!(fr->flags & AV_FRAME_FLAG_INTERLACED) || !(fr->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST))
+                      : (fr->flags & AV_FRAME_FLAG_INTERLACED) != 0)
+                ++s.flag_mismatch;
             if (fr->decode_error_flags) ++s.decode_errors;
             const std::int64_t pts = fr->best_effort_timestamp != AV_NOPTS_VALUE ? fr->best_effort_timestamp : fr->pts;
             const AVRational tb = ic->streams[vs]->time_base;
             if (s.pts0 == AV_NOPTS_VALUE) s.pts0 = pts;
-            // kadro numeris: (pts − pts0) / kadro trukmė (1/25 s)
-            const std::int64_t n = static_cast<std::int64_t>(std::llround(static_cast<double>(pts - s.pts0) * tb.num * 25.0 / tb.den));
+            // kadro numeris: (pts − pts0) / kadro trukmė (1 / kadrų dažnis)
+            const std::int64_t n = static_cast<std::int64_t>(std::llround(static_cast<double>(pts - s.pts0) * tb.num * fps / tb.den));
             if (s.prev_n >= 0 && n > s.prev_n + 1) s.pts_gap_frames += n - s.prev_n - 1;
             s.prev_n = std::max(s.prev_n, n);
             ++s.frames_decoded;
@@ -218,8 +229,13 @@ int run_dec(const Opts& o) {
     std::string err;
     int rc = 0;
     const std::string opts = cpu ? std::string{} : cuda_options(dev);
+    const bool inter = o.fmt.raster.interlaced;
+    const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
+    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
+    const std::uint64_t gpf = inter ? 2 : 1;  // grain'ų kadre
+    const int fps_i = static_cast<int>((o.fmt.frame_rate.num + o.fmt.frame_rate.den / 2) / o.fmt.frame_rate.den);  // ~kadrų per 1 s
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].create(inst, video_def(kRoleDec, o.flow_base + n, o.run_seed), opts, err)) { st.fatal = err; rc = 2; }
+        if (!out[n].create(inst, video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt), opts, err, o.fmt)) { st.fatal = err; rc = 2; }
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         auto s = std::make_unique<DecStream>();
         s->idx = static_cast<int>(n);
@@ -234,6 +250,7 @@ int run_dec(const Opts& o) {
     std::vector<AVFrame*> job_src;  // C: planar kadrai CPU split'ui
     std::vector<media::SplitJob> jobs;
     std::vector<std::uint32_t> job_flow;
+    std::vector<media::ChromaMode> job_mode;  // interlaced flow: pagal kadro žymę
     std::vector<std::int64_t> anchor(o.flows, INT64_MIN);
     std::vector<AVFrame*> cur(o.flows, nullptr);
     std::vector<std::int64_t> cur_n(o.flows, -1);
@@ -241,26 +258,27 @@ int run_dec(const Opts& o) {
     std::vector<std::uint64_t> first_play(o.flows, 0);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&kFieldRate) + 1;
-    if (i & 1) ++i;  // pradėti nuo viršutinio lauko
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
+    if (inter && (i & 1)) ++i;  // pradėti nuo viršutinio lauko
     ClockWatch cw;
     cw.stepped();
 
     while (!rc && !stop.load() && now_tai() < end_tai) {
         // Jei teks laukti ilgiau nei 2 laukus — laikrodis šoko atgal: žymim PRIEŠ laukimą, kad darbininkų eilių
         // perpildymas laukimo metu būtų priskirtas šuoliui
-        if (mxlIndexToTimestamp(&kFieldRate, i) > now_tai() + 40'000'000ull) g_clock_event_mono = mono_ns();
-        if (wait_until(i, o.read_offset_us * 1000, stop)) {
+        if (mxlIndexToTimestamp(&rate, i) > now_tai() + 2 * (mxlIndexToTimestamp(&rate, 1) - mxlIndexToTimestamp(&rate, 0)))
+            g_clock_event_mono = mono_ns();
+        if (wait_until(rate, i, o.read_offset_us * 1000, stop)) {
             st.proc["clock_backward"]++;
             g_clock_event_mono = mono_ns();
         }
         if (stop.load()) break;
-        const std::int64_t F = static_cast<std::int64_t>(i >> 1);
-        const int p = static_cast<int>(i & 1);
+        const int p = inter ? static_cast<int>(i & 1) : 0;  // progresyviam kiekvienas grain'as — naujas kadras
         const std::uint64_t t_wake = now_tai();
         jobs.clear();
         job_flow.clear();
         job_src.clear();
+        job_mode.clear();
         int pitch_y = -1, pitch_uv = -1;
         for (std::uint32_t n = 0; n < o.flows; ++n) {
             DecStream& s = *ds[n];
@@ -290,7 +308,7 @@ int run_dec(const Opts& o) {
                 // per daug sukaupta (siuntėjas greitesnis / pliūpsnis) → seniausi išmetami ir užskaitomi
                 // dekoderis kadrus išduoda pliūpsniais (B perrikiavimas, UDP gija) — riba +25 kadrų (1 s) sugeria drebėjimą;
                 // viršijus — ilgalaikis greičių neatitikimas (tikras perpildymas)
-                while (static_cast<int>(s.q.size()) > o.playout_frames + 25) {
+                while (static_cast<int>(s.q.size()) > o.playout_frames + fps_i) {
                     av_frame_free(&s.q.front().f);
                     s.q.pop_front();
                     st.flows[n].inc(in_warm ? "warmup_overrun_frames" : (after_clock_event() ? "clock_overrun_frames" : "overrun_frames"));
@@ -302,7 +320,7 @@ int run_dec(const Opts& o) {
                     underrun_run[n] = 0;
                 } else {
                     st.flows[n].inc(in_warm ? "warmup_underrun_frames" : "underrun_frames");
-                    if (++underrun_run[n] >= 25) {  // 1 s be kadrų → iš naujo pildyti buferį
+                    if (++underrun_run[n] >= fps_i) {  // 1 s be kadrų → iš naujo pildyti buferį
                         anchor[n] = INT64_MIN;
                         underrun_run[n] = 0;
                         st.flows[n].inc("rebuffer");
@@ -330,16 +348,29 @@ int run_dec(const Opts& o) {
             jobs.push_back({cur[n]->data[0], cur[n]->data[1], dst});
             job_flow.push_back(n);
             job_src.push_back(cur[n]);
+            job_mode.push_back(inter && !(cur[n]->flags & AV_FRAME_FLAG_INTERLACED) ? media::ChromaMode::FrameSited : media::ChromaMode::FieldSited);
         }
         if (rc) break;
         cudaError_t ce = cudaSuccess;
+        const int field = inter ? p : -1;
         if (cpu) {
             pool.run(static_cast<int>(jobs.size()), [&](int k) {
                 const AVFrame* f = job_src[k];
-                media::cpu::split_yuv420p(f->data[0], f->data[1], f->data[2], f->linesize[0], f->linesize[1], p, jobs[k].dst);
+                media::cpu::split_yuv420p(f->data[0], f->data[1], f->data[2], f->linesize[0], f->linesize[1], dim, field,
+                                          inter ? job_mode[k] : media::ChromaMode::FrameSited, jobs[k].dst);
             });
         } else if (!jobs.empty()) {
-            ce = media::split_nv12(jobs.data(), static_cast<int>(jobs.size()), p, pitch_y, pitch_uv, stream);
+            if (!inter) {
+                ce = media::split_nv12_progressive(jobs.data(), static_cast<int>(jobs.size()), dim, pitch_y, pitch_uv, stream);
+            } else {
+                // vienas paleidimas kiekvienam chromos režimui (dažniausiai visi kadrai to paties tipo — vienas paleidimas)
+                for (const media::ChromaMode m : {media::ChromaMode::FieldSited, media::ChromaMode::FrameSited}) {
+                    std::vector<media::SplitJob> part;
+                    for (std::size_t k = 0; k < jobs.size(); ++k)
+                        if (job_mode[k] == m) part.push_back(jobs[k]);
+                    if (!part.empty() && !ce) ce = media::split_nv12(part.data(), static_cast<int>(part.size()), dim, p, m, pitch_y, pitch_uv, stream);
+                }
+            }
         }
         if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
         if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
@@ -350,17 +381,17 @@ int run_dec(const Opts& o) {
         const std::uint64_t t_done = now_tai();
         if (t_done >= warm) {
             st.add_hist("split_ms", t_done - t_wake);
-            st.add_hist("out_lateness", t_done - mxlIndexToTimestamp(&kFieldRate, i));
+            st.add_hist("out_lateness", t_done - mxlIndexToTimestamp(&rate, i));
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;
         ++i;
         const bool clk = cw.stepped();
         if (clk) g_clock_event_mono = mono_ns();
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&kFieldRate);
+        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
         if (now_idx > i) {
             for (auto& f : st.flows) f.inc(clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips"), now_idx - i);
-            i = now_idx + (now_idx & 1);  // tęsti nuo viršutinio lauko
+            i = inter ? now_idx + (now_idx & 1) : now_idx;  // interlaced: tęsti nuo viršutinio lauko
         }
     }
     stop = true;  // darbininkai baigia (UDP read su timeout)
@@ -384,7 +415,8 @@ int run_dec(const Opts& o) {
         // Laikrodžio domenų neatitikimas: siuntėjai tempą skaičiuoja monotoniniu laikrodžiu, atkūrimas — TAI.
         // Kiek TAI šoko atgal (WSL2 koreguoja ~1,3 s kas ~31 s), tiek kadrų atkūrimas privalo išmesti — tokį
         // overrun kiekį (+1 kadras per šuolį) priskiriam aplinkai; perteklius lieka pajėgumo praradimu.
-        std::uint64_t allow = cw.back_ns / 40'000'000ull + cw.steps;
+        const std::uint64_t frame_ns = static_cast<std::uint64_t>(mxlIndexToTimestamp(&rate, gpf) - mxlIndexToTimestamp(&rate, 0));
+        std::uint64_t allow = cw.back_ns / frame_ns + cw.steps;
         for (const char* k : {"overrun_frames", "overflow_drops"}) {  // ta pati tolerancija abiem eilėms kartu
             const std::uint64_t ov = f.c[k];
             const std::uint64_t mv = std::min(ov, allow);
@@ -410,34 +442,44 @@ int run_dec(const Opts& o) {
     return finish(rc);
 }
 
-// clip: `frames` kadrų iš CPU etalono (gen_field → weave_nv12) į stdout raw NV12 (ffmpeg kodavimui).
+// clip: `frames` kadrų iš CPU etalono į stdout raw NV12 (ffmpeg kodavimui). Interlaced: gen_field laukai → weave;
+// progresyvus: gen_field kadras (indeksas = first_field + k) → progresyvus weave.
 int run_clip(const Opts& o, std::uint32_t frames, std::uint64_t first_field) {
-    std::vector<std::uint32_t> top(media::kFieldWords), bot(media::kFieldWords);
-    std::vector<std::uint8_t> nv12(1920 * 1080 * 3 / 2);
+    const media::Dim d{o.fmt.raster.w, o.fmt.raster.h};
+    const bool inter = o.fmt.raster.interlaced;
+    const std::size_t ysz = static_cast<std::size_t>(d.w) * d.h;
+    std::vector<std::uint32_t> top(media::grain_words(d, inter)), bot(top.size());
+    std::vector<std::uint8_t> nv12(ysz * 3 / 2);
     const media::GenParams g{o.run_seed, o.flow_base, o.complexity};
     for (std::uint32_t k = 0; k < frames; ++k) {
-        const std::uint64_t i = first_field + 2ull * k;
-        media::ref::gen_field(g, i, top.data());
-        media::ref::gen_field(g, i + 1, bot.data());
-        media::ref::weave_nv12(top.data(), bot.data(), nv12.data(), nv12.data() + 1920 * 1080, 1920, 1920);
+        const std::uint64_t i = first_field + (inter ? 2ull : 1ull) * k;
+        media::ref::gen_field(g, i, d, inter, top.data());
+        if (inter) media::ref::gen_field(g, i + 1, d, inter, bot.data());
+        media::ref::weave_nv12(top.data(), bot.data(), nv12.data(), nv12.data() + ysz, d.w, d.w, d, inter);
         if (std::fwrite(nv12.data(), 1, nv12.size(), stdout) != nv12.size()) return 2;
     }
     return 0;
 }
 
-// ref-crc: raw NV12 (programinio dekoderio išvestis) → kiekvieno lauko v210 CRC32C + barkodas (JSON į stdout).
-int run_ref_crc(const std::string& path) {
+// ref-crc: raw NV12 (programinio dekoderio išvestis) → kiekvieno grain'o v210 CRC32C + barkodas (JSON į stdout).
+// Interlaced: du laukai kadrui (lauko chroma); progresyvus: vienas kadro grain'as (kadro chroma).
+int run_ref_crc(const Opts& o, const std::string& path) {
     FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return 1;
-    std::vector<std::uint8_t> nv12(1920 * 1080 * 3 / 2);
-    std::vector<std::uint32_t> field(media::kFieldWords);
+    const media::Dim d{o.fmt.raster.w, o.fmt.raster.h};
+    const bool inter = o.fmt.raster.interlaced;
+    const std::size_t ysz = static_cast<std::size_t>(d.w) * d.h;
+    const int words = media::v210_words_per_line(d.w);
+    std::vector<std::uint8_t> nv12(ysz * 3 / 2);
+    std::vector<std::uint32_t> field(media::grain_words(d, inter));
     std::printf("{\"fields\":[");
     bool first = true;
     while (std::fread(nv12.data(), 1, nv12.size(), f) == nv12.size()) {
-        for (int p = 0; p < 2; ++p) {
-            media::ref::split_nv12(nv12.data(), nv12.data() + 1920 * 1080, 1920, 1920, p, field.data());
-            const std::uint32_t crc = crc32c(reinterpret_cast<const std::uint8_t*>(field.data()), media::kFieldBytes);
-            const std::uint32_t mk = media::ref::decode_marker(field.data());
+        for (int p = 0; p < (inter ? 2 : 1); ++p) {
+            if (inter) media::ref::split_nv12(nv12.data(), nv12.data() + ysz, d.w, d.w, d, p, media::ChromaMode::FieldSited, field.data());
+            else media::ref::split_nv12_progressive(nv12.data(), nv12.data() + ysz, d.w, d.w, d, field.data());
+            const std::uint32_t crc = crc32c(reinterpret_cast<const std::uint8_t*>(field.data()), field.size() * 4);
+            const std::uint32_t mk = media::ref::decode_marker(field.data(), words);
             std::printf("%s[%u,%u]", first ? "" : ",", mk, crc);
             first = false;
         }
@@ -445,6 +487,43 @@ int run_ref_crc(const std::string& path) {
     std::printf("]}\n");
     std::fclose(f);
     return 0;
+}
+
+// split-raw: raw NV12 kadrai → v210 kadrai (eilutės iš eilės) nepriklausomu etalonu, chromos PSNR įrankiui
+// (tests/perf/chroma_psnr.py). frame_chroma — kadro chroma (progresyvus kelias); kitaip kadras skaidomas į du laukus su
+// LAUKO chroma ir laukai vėl supinami eilutėmis (taip progresyvų turinį apdorotų senas interlaced kelias).
+int run_split_raw(const Opts& o, const std::string& in, const std::string& out, bool frame_chroma) {
+    const media::Dim d{o.fmt.raster.w, o.fmt.raster.h};
+    if (!media::dim_ok(d, !frame_chroma)) { std::fprintf(stderr, "split-raw: netinkami matmenys\n"); return 1; }
+    FILE* fi = std::fopen(in.c_str(), "rb");
+    FILE* fo = std::fopen(out.c_str(), "wb");
+    if (!fi || !fo) {
+        if (fi) std::fclose(fi);
+        if (fo) std::fclose(fo);
+        std::fprintf(stderr, "split-raw: nepavyko atidaryti failų\n");
+        return 1;
+    }
+    const std::size_t ysz = static_cast<std::size_t>(d.w) * d.h;
+    const int words = media::v210_words_per_line(d.w);
+    std::vector<std::uint8_t> nv12(ysz * 3 / 2);
+    std::vector<std::uint32_t> frame(media::grain_words(d, false)), field(media::grain_words(d, true));
+    int rc = 0;
+    while (std::fread(nv12.data(), 1, nv12.size(), fi) == nv12.size()) {
+        if (frame_chroma) {
+            media::ref::split_nv12_progressive(nv12.data(), nv12.data() + ysz, d.w, d.w, d, frame.data());
+        } else {
+            for (int p = 0; p < 2; ++p) {
+                media::ref::split_nv12(nv12.data(), nv12.data() + ysz, d.w, d.w, d, p, media::ChromaMode::FieldSited, field.data());
+                for (int j = 0; j < d.h / 2; ++j)
+                    std::memcpy(frame.data() + static_cast<std::size_t>(2 * j + p) * words, field.data() + static_cast<std::size_t>(j) * words,
+                                static_cast<std::size_t>(words) * 4);
+            }
+        }
+        if (std::fwrite(frame.data(), 4, frame.size(), fo) != frame.size()) { rc = 2; break; }
+    }
+    std::fclose(fi);
+    if (std::fclose(fo) != 0) rc = 2;
+    return rc;
 }
 
 }  // namespace mxlv::func
