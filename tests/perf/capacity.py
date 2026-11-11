@@ -24,6 +24,8 @@ import subprocess
 import sys
 import time
 
+import domain  # tests/perf/domain.py
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
 LIB = os.environ.get("MXL_LIB", str(pathlib.Path.home() / "src/mxl-pr653/install/Linux-Clang-Release/lib"))
@@ -263,9 +265,8 @@ def run_level(a, n):
     d = pathlib.Path(a.out) / f"{tag}-{variant}-n{n}"
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
-    dom = f"/dev/shm/mxlf-{tag}-{n}"
-    shutil.rmtree(dom, ignore_errors=True)
-    os.makedirs(dom)
+    # Unikalus domenas kiekvienam lygiui (planas §P6): du lygiagretūs capacity.py vienas kito domeno netrina.
+    dom = str(domain.make_domain(f"mxlf-{tag}-{n}"))
     P = Procs(d)
     S, W = a.seconds, a.warmup
     total = S + W
@@ -384,7 +385,8 @@ def run_level(a, n):
     stop_gpu_probe(gpu_probe)
     gpu = gpu_stats(gpu_csv)
     codes = P.stop_all()
-    shutil.rmtree(dom, ignore_errors=True)
+    if not domain.remove_domain(dom):  # trinama tik be gyvų savininkų (nuomos <domenas>.vramflow/)
+        print(f"[capacity] domenas {dom} turi gyvų savininkų {domain.live_owners(dom)} — nepašalintas", flush=True)
     wall = t1 - t0
     cpu = {k: (c1[k] - c0[k]) / wall for k in c0 if c0.get(k) is not None and c1.get(k) is not None}
 

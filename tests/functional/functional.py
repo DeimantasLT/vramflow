@@ -19,6 +19,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "perf"))
+import domain  # noqa: E402  tests/perf/domain.py — unikalūs domenai, trynimas tik be gyvų savininkų
+
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
 FUNC_BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
 MXL_INFO = os.environ.get("MXL_INFO", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin/mxl-info")
@@ -64,11 +67,20 @@ def verify_errors(s):
     return s["totals"]["verification_errors"] if s else None
 
 
+DOMAINS = []  # šio paleidimo domenai — pašalinami pabaigoje (tik be gyvų savininkų)
+
+
 def fresh_domain(name):
-    d = pathlib.Path(f"/dev/shm/mxlv-{name}")
-    shutil.rmtree(d, ignore_errors=True)
-    d.mkdir(parents=True)
+    """Unikalus domenas šiam paleidimui (planas §P6): du functional.py paleidimai vienas kito domenų netrina."""
+    d = domain.make_domain(f"mxlv-{name}")
+    DOMAINS.append(d)
     return d
+
+
+def cleanup_domains():
+    left = [str(d) for d in DOMAINS if not domain.remove_domain(d)]
+    if left:
+        print(f"[functional] domenai su gyvais savininkais nepašalinti: {left}", flush=True)
 
 
 def leftovers(domain):
@@ -599,7 +611,7 @@ def fcli1(out):
                             "--layer-xy", "0,0", *lf], capture_output=True, text=True, timeout=30)
         res.append(result(f"fcli1[{name}]", "PASS" if r.returncode == 1 else "FAIL", why=f"exit {r.returncode}"))
     ok = subprocess.run([FUNC_BIN, "composite", "--domain", str(d), "--out", str(out / "fcli1-ok"), "--flows", "1", "--layers", "1",
-                         "--layer-xy", "0,0", "--layer-flow", f"0:{u}", "--duration", "1"], capture_output=True, text=True, timeout=60)
+                         "--layer-xy", "0,0", "--layer-flow", f"0:{u}", "--duration", "1", "--input-wait-ms", "2000"], capture_output=True, text=True, timeout=60)
     # galiojantis argumentas praeina parsinimą (toliau gali baigtis kitu kodu — įėjimų nėra), bet ne exit 1 dėl --layer-flow
     res.append(result("fcli1[galiojantis]", "PASS" if "tikimasi K:UUID" not in ok.stderr + ok.stdout and "daugiau nei kartą" not in ok.stderr else "FAIL",
                       why=f"exit {ok.returncode}"))
@@ -950,6 +962,10 @@ def main():
              "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
+    # Paleidimo / sustabdymo testai (planas §P6) — atskirame modulyje; jis naudoja šį modulį (ne antrą jo kopiją).
+    sys.modules.setdefault("functional", sys.modules[__name__])
+    import startstop
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in startstop.TESTS.items()})
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):
@@ -958,6 +974,7 @@ def main():
             results += fn()
         except Exception as e:  # testo infrastruktūros klaida — FAIL, ne tylėjimas
             results.append(result(name, "FAIL", why=f"išimtis: {e!r}"))
+    cleanup_domains()
     (out / "functional.json").write_text(json.dumps(results, indent=1))
     failed = [r["id"] for r in results if r["status"] == "FAIL"]
     print(f"FUNCTIONAL: {'PASS' if not failed else 'FAIL ' + ','.join(failed)} ({len(results)} testai)")

@@ -19,6 +19,8 @@ import statistics
 import subprocess
 import time
 
+import domain  # tests/perf/domain.py
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
 LIB = os.environ.get("MXL_LIB", str(pathlib.Path.home() / "src/mxl-pr653/install/Linux-Clang-Release/lib"))
@@ -68,9 +70,7 @@ def run_level(out, storage, n, seconds, warm, history_ms, rate_num=50):
     d = out / f"{storage}-n{n}"
     shutil.rmtree(d, ignore_errors=True)
     d.mkdir(parents=True)
-    dom = pathlib.Path(f"/dev/shm/mxlv-scale-{storage}-{n}")
-    shutil.rmtree(dom, ignore_errors=True)
-    dom.mkdir(parents=True)
+    dom = domain.make_domain(f"mxlv-scale-{storage}-{n}")  # unikalus (planas §P6)
     if history_ms:
         (dom / "options.json").write_text(json.dumps({"urn:x-mxl:option:history_duration/v1.0": history_ms * 1_000_000}))
     common = ["--domain", str(dom), "--storage", storage, "--flows", str(n), "--warmup", str(warm),
@@ -88,7 +88,7 @@ def run_level(out, storage, n, seconds, warm, history_ms, rate_num=50):
         wcode = w.wait()
         smi.terminate()
         smi.wait()
-    shutil.rmtree(dom, ignore_errors=True)
+    domain.remove_domain(dom)
     ws = json.loads((d / "summary-writer.json").read_text())
     rs = json.loads((d / "summary-reader.json").read_text())
     return d, ws, rs, rcode, wcode

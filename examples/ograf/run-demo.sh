@@ -13,7 +13,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO="$(cd "$HERE/../.." && pwd)"
 VF_BUILD="${VF_BUILD:-/root/build/vramflow/func}"; MXL="${MXL:-/root/src/mxl-pr653/install/Linux-Clang-Release}"
 NODE="${NODE:-/mnt/c/nvm4w/nodejs/node.exe}"; T="${SECONDS_RUN:-20}"; SOURCE="${SOURCE:-synthetic}"; CXX="${CXX:-clang++-19}"
-OUT="${1:-/tmp/vf-ograf}"; D=/dev/shm/vf-ograf; mkdir -p "$OUT/bin"; rm -rf "$D" "$OUT/feed.ready" "$OUT/stop.fifo"; mkdir -p "$D"; mkfifo "$OUT/stop.fifo"; sleep 100000 > "$OUT/stop.fifo" & HOLD=$!   # HOLD laiko fifo rašymo galą; jį nužudžius renderis gauna stdin EOF
+OUT="${1:-/tmp/vf-ograf}"; D=$(mktemp -d /dev/shm/vf-ograf-XXXXXXXX); mkdir -p "$OUT/bin"; rm -rf "$OUT/feed.ready" "$OUT/stop.fifo"; mkfifo "$OUT/stop.fifo"; sleep 100000 > "$OUT/stop.fifo" & HOLD=$!   # HOLD laiko fifo rašymo galą; jį nužudžius renderis gauna stdin EOF
 LAYER=4d584c47-0005-4000-8000-0000000000ff; COMP=4d584c47-0006-4000-8000-000000000001   # alfa išėjimas (composite --flow-base 1)
 # Nutraukimo / klaidos atveju: visi fono procesai (gen, feed, renderis, composite) nutraukiami, domenas išvalomas.
 stop_bg() {
@@ -22,7 +22,8 @@ stop_bg() {
   pkill -TERM -f "vramflow-func (gen|composite) --domain $D" 2>/dev/null || true
   wait 2>/dev/null || true
 }
-cleanup() { trap - EXIT; stop_bg; rm -rf "$D"; }
+# Unikalus domenas (planas §P6): du demo paleidimai vienas kito netrina; šalinamas kartu su nuomos katalogu <D>.vramflow
+cleanup() { trap - EXIT; stop_bg; rm -rf "$D" "$D.vramflow"; }
 trap cleanup EXIT; trap 'exit 130' INT TERM
 
 for p in feed probe; do   # kompiliatoriaus klaidos rodomos (set -e nutraukia)
