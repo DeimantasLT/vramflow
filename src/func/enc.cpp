@@ -348,7 +348,7 @@ int run_enc(const Opts& o) {
     std::string err;
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err)) { st.fatal = err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
         if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), 15000, stop, err)) { st.fatal = err; rc = 4; }
 

@@ -74,7 +74,22 @@ bool wait_until(std::uint64_t index, std::int64_t offset_ns, const std::atomic<b
 }
 
 // --- VideoOut ---------------------------------------------------------------------------------------------------------
-bool VideoOut::create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err) {
+namespace {
+// Plokštumų skaičius ir dydžiai prieš rastrą (fill [+ key]); tuščias tekstas — tinka.
+std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r) {
+    const std::uint32_t want_planes = r.alpha ? 2 : 1;
+    if (l.planeCount != want_planes) return "plokštumų " + std::to_string(l.planeCount) + " != " + std::to_string(want_planes);
+    if (l.planes[0].size != vramflow::gfx::fill_bytes(r))
+        return "fill dydis " + std::to_string(l.planes[0].size) + " != " + std::to_string(vramflow::gfx::fill_bytes(r));
+    if (r.alpha && l.planes[1].size != vramflow::gfx::key_bytes(r))
+        return "key dydis " + std::to_string(l.planes[1].size) + " != " + std::to_string(vramflow::gfx::key_bytes(r));
+    return {};
+}
+}  // namespace
+
+bool VideoOut::create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err,
+                      const vramflow::gfx::Raster& r) {
+    raster = r;
     mxlFlowConfigInfo cfg{};
     bool created = false;
     mxlStatus st = mxlCreateFlowWriter(inst, def.c_str(), options.empty() ? nullptr : options.c_str(), &w, &cfg, &created);
@@ -84,7 +99,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
         return false;
     }
     if (!created) { err = "flow jau egzistavo (created=false)"; return false; }
-    if (cfg.common.grainRate.numerator != 50 || cfg.common.grainRate.denominator != 1) {
+    if (r.interlaced && (cfg.common.grainRate.numerator != 50 || cfg.common.grainRate.denominator != 1)) {
         err = "grainRate ne 50/1 (" + std::to_string(cfg.common.grainRate.numerator) + "/" +
               std::to_string(cfg.common.grainRate.denominator) + ")";
         return false;
@@ -93,10 +108,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
     slots.assign(layout.slotCount, mxlGrainStorage{});
     if ((st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data())) != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
     mxlFlowWriterGetStorageLayout(w, &layout);
-    if (layout.planeCount != 1 || layout.planes[0].size != media::kFieldBytes) {
-        err = "lauko dydis " + std::to_string(layout.planes[0].size) + " != " + std::to_string(media::kFieldBytes);
-        return false;
-    }
+    if (const std::string bad = check_layout(layout, r); !bad.empty()) { err = "lauko " + bad; return false; }
     return true;
 }
 
@@ -104,7 +116,7 @@ std::uint32_t* VideoOut::open(std::uint64_t index, mxlStatus& st) {
     info = mxlGrainInfo{};
     st = mxlFlowWriterOpenGrainSlot(w, index, &info, &cur_slot);
     if (st != MXL_STATUS_OK) return nullptr;
-    if (cur_slot >= layout.slotCount || info.index != index || info.grainSize != media::kFieldBytes) {
+    if (cur_slot >= layout.slotCount || info.index != index || info.grainSize != vramflow::gfx::grain_bytes(raster)) {
         mxlFlowWriterCancelGrain(w);
         st = MXL_ERR_INTERNAL;
         return nullptr;
@@ -134,7 +146,7 @@ void VideoOut::release(mxlInstance inst) {
 
 // --- VideoIn ----------------------------------------------------------------------------------------------------------
 bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop,
-                   std::string& err) {
+                   std::string& err, const vramflow::gfx::Raster* expect) {
     id = flow;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
     for (;;) {
@@ -156,7 +168,18 @@ bool VideoIn::open(mxlInstance inst, const std::string& flow, std::uint32_t wait
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     cuda = is_cuda_layout(layout);
-    if (layout.planes[0].size != media::kFieldBytes) { err = "įėjimo lauko dydis netinka"; return false; }
+    if (expect) {
+        raster = *expect;
+    } else {
+        size_t n = 0;
+        mxlGetFlowDef(inst, flow.c_str(), nullptr, &n);  // grąžina INVALID_ARG ir reikiamą dydį
+        std::string def(n ? n : 1, ' ');
+        const mxlStatus ds = n ? mxlGetFlowDef(inst, flow.c_str(), def.data(), &n) : MXL_ERR_INTERNAL;
+        if (ds != MXL_STATUS_OK) { err = "mxlGetFlowDef status " + std::to_string(ds); return false; }
+        def.resize(std::strlen(def.c_str()));
+        if (!vramflow::gfx::raster_from_flow_def(def, raster, err)) return false;
+    }
+    if (const std::string bad = check_layout(layout, raster); !bad.empty()) { err = "įėjimo " + bad; return false; }
     return true;
 }
 

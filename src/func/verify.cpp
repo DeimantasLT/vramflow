@@ -80,9 +80,9 @@ int run_verify(const Opts& o) {
     std::vector<VideoIn> out(o.flows), in(logo_mode ? o.flows : 0);
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!out[n].open(inst, flow_id(out_role, o.flow_base + n), 20000, stop, err)) { st.fatal = err; rc = 4; }
+        if (!out[n].open(inst, flow_id(out_role, o.flow_base + n), 20000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
     for (std::uint32_t n = 0; n < in.size() && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 20000, stop, err)) { st.fatal = err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 20000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = err; rc = 4; }
     if (rc) { mxlDestroyInstance(inst); return finish(rc); }
 
     const std::uint32_t gc = out[0].layout.slotCount;

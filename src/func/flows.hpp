@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "gfx/raster.hpp"
+
 namespace mxlv::func {
 
 // Flow rolės identifikatoriuose: 4d584c47-00RR-4000-8000-%012x
@@ -48,8 +50,10 @@ struct VideoOut {
     std::uint32_t cur_slot = 0;
     bool open_grain = false;
     std::string id;
-    // Sukuria flow ir patikrina 1080i50 geometriją. Klaida → tekstas į err, false.
-    bool create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err);
+    vramflow::gfx::Raster raster = vramflow::gfx::kHd1080i;
+    // Sukuria flow ir patikrina rastro geometriją (numatytoji — 1080i50 v210). Klaida → tekstas į err, false.
+    bool create(mxlInstance inst, const std::string& def, const std::string& options, std::string& err,
+                const vramflow::gfx::Raster& r = vramflow::gfx::kHd1080i);
     // Atidaro grain'ą; grąžina device rodyklę arba nullptr (st — MXL statusas).
     std::uint32_t* open(std::uint64_t index, mxlStatus& st);
     mxlStatus commit();
@@ -65,8 +69,11 @@ struct VideoIn {
     mxlFlowConfigInfo cfg{};
     std::string id;
     bool cuda = false;
-    // Laukia flow iki wait_ms. Klaida → err.
-    bool open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err);
+    vramflow::gfx::Raster raster = vramflow::gfx::kHd1080i;  // expect arba perskaitytas iš flow aprašo
+    // Laukia flow iki wait_ms. expect != nullptr → tikrinama prieš tą rastrą (nesutapimas = klaida);
+    // nullptr → rastras perskaitomas iš flow aprašo į `raster`. Klaida → err.
+    bool open(mxlInstance inst, const std::string& flow, std::uint32_t wait_ms, const std::atomic<bool>& stop, std::string& err,
+              const vramflow::gfx::Raster* expect = nullptr);
     // Neblokuojantis (timeout_ns = 0) arba blokuojantis grain'o gavimas; ptr — slot'o adresas (device arba host).
     mxlStatus get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainInfo& info, const std::uint32_t*& ptr);
     std::uint64_t head();  // MXL_UNDEFINED_INDEX, jei nežinoma

@@ -99,7 +99,7 @@ int run_logo(const Opts& o) {
     std::vector<VideoOut> out(o.flows);
     int rc = 0;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err)) { st.fatal = "in " + std::to_string(n) + ": " + err; rc = 4; }
+        if (!in[n].open(inst, flow_id(o.in_role, o.flow_base + n), 15000, stop, err, &vramflow::gfx::kHd1080i)) { st.fatal = "in " + std::to_string(n) + ": " + err; rc = 4; }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (!out[n].create(inst, video_def(kRoleLogo, o.flow_base + n, o.run_seed), opts, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
