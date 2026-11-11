@@ -9,7 +9,7 @@
  * Du režimai (vienu metu negalimi):
  *  - rankinis: vfgfx_write(index, kadras) rašo grain'ą `index` (interlaced rastre laukas index%2 — paritetas 0 =
  *    lyginis indeksas = viršutinis laukas = kadro eilutės 0, 2, 4…; progresyviame rastre paritetas ignoruojamas);
- *  - ritmo: vfgfx_start_pacing(offset_ns) paleidžia bibliotekos giją, kuri kas lauką (TAI laikas, 50/1) commit'ina
+ *  - ritmo: vfgfx_start_pacing(offset_ns) paleidžia bibliotekos giją, kuri kas grain'ą (TAI laikas, flow grain'o dažniu) commit'ina
  *    PASKUTINĮ vfgfx_submit kadrą. Iki pirmo submit grain'ų nėra. Kol ritmo gija veikia, ji vienintelė liečia MXL writer'į.
  *
  * Kadro atmintis ir kaina: abi atminties rūšys (VFGFX_MEM_HOST / VFGFX_MEM_CUDA) veikia su abiem saugyklomis.
@@ -29,7 +29,7 @@
  * grįžus, f->rgba buferį (host ar CUDA) galima iškart naudoti iš naujo / atlaisvinti — biblioteka jo neišsaugo.
  *
  * Ritmo laikas: vfgfx_start_pacing(offset_ns) — grain indeksas i commit'inamas laiku T(i) + offset_ns, kur T(i) — indekso
- * pradžios TAI laikas (50/1). offset_ns > 0 = vėliau, < 0 = anksčiau (iš anksto). Pirmas indeksas — pirmas, kurio laikas
+ * pradžios TAI laikas (flow grain'o dažnis: interlaced — 2 × kadrų dažnis). offset_ns > 0 = vėliau, < 0 = anksčiau (iš anksto). Pirmas indeksas — pirmas, kurio laikas
  * dar nepraėjo; sustabdžius ir vėl paleidus, jau commit'inti indeksai nekartojami. Jei gija pavėluoja, vėluojantis indeksas
  * vis tiek įrašomas, o praleisti laukai nerašomi (jokio „catch-up“ srauto).
  *
@@ -46,7 +46,7 @@
  *
  * Gijų sauga: vienas vfgfx_writer — vfgfx_write / vfgfx_submit / start / stop gali būti kviečiami iš kelių gijų (vidinės
  * užraktai juos serializuoja), tačiau vfgfx_write ritmo metu grąžina VFGFX_ERR_STATE. Laiko žymės: indeksai iš TAI
- * (mxlGetTime), grain'ų ritmas 50/1.
+ * (mxlGetTime), grain'ų ritmas — flow aprašo grain_rate (25p, 50p, 29,97p, 59,94p, 50i, 59,94i).
  */
 #include <stdint.h>
 

@@ -112,6 +112,16 @@ inline bool format_supported(const VideoFormat& f, std::string& why) {
     return false;
 }
 
+// Ar kadrų dažnis palaikomas šiam skenavimui (tas pats sąrašas kaip format_supported, bet bet kokiam rastrui — grafikos
+// sluoksniams). why — priežastis su dažniu.
+inline bool rate_supported(bool interlaced, Rational frame_rate, std::string& why) {
+    for (const auto& r : detail_fmt::rates(interlaced))
+        if (same_rate(r.frame, frame_rate)) return true;
+    why = "nepalaikomas kadrų dažnis " + std::to_string(frame_rate.num) + "/" + std::to_string(frame_rate.den) +
+          (interlaced ? " (interlaced: 25/1, 30000/1001)" : " (progresyvus: 25/1, 50/1, 30000/1001, 60000/1001)");
+    return false;
+}
+
 // "1080i50", "1080p25", "720p50", "2160p50", "1080p59.94" … (alpha = false). Klaida → false ir tekstas į err.
 inline bool parse_format(const std::string& s, VideoFormat& out, std::string& err) {
     const auto bad = [&](const std::string& why) {

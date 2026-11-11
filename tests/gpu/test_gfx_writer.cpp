@@ -92,18 +92,18 @@ struct FlowId {
 };
 
 // v210a flow aprašas; interlaced: grain_rate 25 (-> grain 50/1), progresyvus: 50 (kitaip VideoOut atmeta).
-std::string def(const std::string& id, int w, int h, bool interlaced, int rate = 0) {
+std::string def(const std::string& id, int w, int h, bool interlaced, int rate = 0, int den = 1) {
     char b[2048];
     std::snprintf(b, sizeof b,
                   R"({"id":"%s","description":"vramflow gfx writer test","label":"vramflow gfx writer test",)"
                   R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-gfxw-test:Video"]},)"
                   R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"video/v210a",)"
-                  R"("grain_rate":{"numerator":%d,"denominator":1},"frame_width":%d,"frame_height":%d,)"
+                  R"("grain_rate":{"numerator":%d,"denominator":%d},"frame_width":%d,"frame_height":%d,)"
                   R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
                   R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
                   R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
                   R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
-                  id.c_str(), rate ? rate : (interlaced ? 25 : 50), w, h, interlaced ? "interlaced_tff" : "progressive", w, h, w / 2, h,
+                  id.c_str(), rate ? rate : (interlaced ? 25 : 50), den, w, h, interlaced ? "interlaced_tff" : "progressive", w, h, w / 2, h,
                   w / 2, h);
     return b;
 }
@@ -328,8 +328,11 @@ TEST_CASE("gfx_writer: klaidų kodai (INVALID_ARG, GEOMETRY, flow aprašas)", "[
     std::string v210 = def(fid.id, 1920, 1080, true);
     v210.replace(v210.find("video/v210a"), 11, "video/v210");
     CHECK(vfgfx_writer_create(d.inst, v210.c_str(), nullptr, &w) == 2001);
-    // progresyvus 25p: grainRate != 50/1 -> GEOMETRY
-    CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false, 25).c_str(), nullptr, &w) == 2002);
+    // nepalaikomas kadrų dažnis (24p; interlaced 50 kadrų/s = 100 laukų) -> GEOMETRY (palaikomi — žr. „palaikomi formatai“)
+    CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false, 24).c_str(), nullptr, &w) == 2002);
+    CHECK(w == nullptr);
+    CHECK(std::string(vfgfx_last_error(nullptr)).find("24/1") != std::string::npos);
+    CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, true, 50).c_str(), nullptr, &w) == 2002);
     CHECK(w == nullptr);
 
     FlowId fid2;
@@ -750,4 +753,50 @@ TEST_CASE("gfx_writer: host rašytuvas nekuria CUDA konteksto", "[gfx_writer][mx
     CHECK(active() == 0);  // host -> host: jokio CUDA konteksto
     vfgfx_writer_destroy(w, d.inst);
     CHECK(active() == 0);
+}
+
+// Planas §P2: biblioteka priima kiekvieną palaikomą dažnį (format.hpp), ritmas ir grain'ai — pagal flow formatą.
+TEST_CASE("gfx_writer: palaikomi formatai (25p, 29,97p, 59,94p, 50i, 59,94i) priimami ir rašomi == ref", "[gfx_writer][mxl][format]") {
+    struct R {
+        int num, den;
+        bool interlaced;
+    };
+    const R rate = GENERATE(R{25, 1, false}, R{30000, 1001, false}, R{60000, 1001, false}, R{25, 1, true}, R{30000, 1001, true});
+    Domain d(40);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    INFO(rate.num << "/" << rate.den << (rate.interlaced ? "i" : "p"));
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, rate.interlaced, rate.num, rate.den).c_str(), nullptr, &w) == 0);
+    const gfx::Raster r{64, 16, rate.interlaced, true};
+    const vramflow::VideoFormat f{r, {rate.num, rate.den}};
+    VideoIn in;
+    std::atomic<bool> stop{false};
+    std::string err;
+    REQUIRE(in.open(d.inst, fid.id, 2000, stop, err, &f));
+    const mxlRational g = mxlv::func::mxl_rate(f.grain_rate());
+    CHECK(in.cfg.common.grainRate.numerator == g.numerator);
+    CHECK(in.cfg.common.grainRate.denominator == g.denominator);
+    Frame fr(64, 16, 5, VFGFX_ALPHA_STRAIGHT, false);
+    const std::uint64_t base = mxlGetCurrentIndex(&g) & ~1ull;
+    for (std::uint64_t k = 0; k < 2; ++k) REQUIRE(vfgfx_write(w, base + k, &fr.f) == 0);
+    std::vector<std::uint8_t> buf(gfx::grain_bytes(r));
+    for (std::uint64_t k = 0; k < 2; ++k) {
+        mxlGrainInfo info{};
+        const std::uint32_t* ptr = nullptr;
+        REQUIRE(in.get(base + k, 0, info, ptr) == MXL_STATUS_OK);
+        std::memcpy(buf.data(), ptr, buf.size());
+        CHECK(buf == fr.ref(r, rate.interlaced ? static_cast<int>((base + k) & 1) : 0));
+    }
+    // ritmo gija commit'ina grain'o dažniu (ne 50/1): per ~0,5 s — apie 0,5 · dažnis grain'ų
+    REQUIRE(vfgfx_submit(w, &fr.f) == 0);
+    const std::uint64_t c0 = vfgfx_committed(w);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    const double hz = static_cast<double>(g.numerator) / g.denominator;
+    const double got = static_cast<double>(vfgfx_committed(w) - c0);
+    CHECK(got >= 0.5 * hz - 3);
+    CHECK(got <= 0.5 * hz + 3);
+    in.release(d.inst);
+    vfgfx_writer_destroy(w, d.inst);
 }

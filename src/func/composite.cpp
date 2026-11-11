@@ -12,8 +12,7 @@
 //    Mišrios saugyklos (pvz. bazė host, sluoksniai cuda) nepalaikomos: startas nepavyksta (exit 1). H variantas kiekvieną
 //    įėjimą (host) pakelia į device scratch, apdoroja ir rezultatą nukopijuoja į host išėjimo slot'ą.
 //  - Bazė `none` (tik v210a išėjimas): išėjimo rastras = --format rastras (numatytasis 1920×1080 interlaced); kitaip išėjimo
-//    rastras = bazės (w, h, interlace), o bazė turi atitikti --format. Visų įėjimų grain'o ritmas turi sutapti su --format
-//    (libvramflow-gfx sluoksniai šiuo metu — tik 50/1, todėl kompozicija galima 1080i50 / 1080p50 / 720p50 / 2160p50).
+//    rastras = bazės (w, h, interlace), o bazė turi atitikti --format. Visų įėjimų grain'o ritmas turi sutapti su --format.
 //  - `--layer-flow K:UUID`: K — sluoksnio indeksas nuo 0 (0…layers-1); tas pats flow VISIEMS išėjimams n (grandinei N=1).
 //  - [PF-3] įėjimas, kurio skaitymas grąžina MXL_ERR_FLOW_INVALID (writer'is perkurtas), uždaromas ir atidaromas iš naujo
 //    neblokuojančiai (po vieną bandymą kas 100 ms, tarp tick'ų; skaitiklis `reopened`). Išėjimas, kurio įėjimas trūksta, tuo metu

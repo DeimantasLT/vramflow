@@ -76,6 +76,8 @@ struct vfgfx_writer_s {
     mxlInstance inst = nullptr;
     func::VideoOut out;
     gfx::Raster r{};
+    vramflow::VideoFormat fmt{};  // r + kadrų dažnis iš flow aprašo; ritmas — fmt.grain_rate()
+    mxlRational rate{50, 1};
     bool cuda_store = false;
     int device = -1;       // cuda-linear saugyklos įrenginys; host saugykloje -1 (jokių CUDA kvietimų)
     int conv_dev = -1;     // host saugykla: įrenginys CUDA kadrų atsisiuntimui (deviceUuid arba -1 = numatytasis); s_conv kuriamas tik tada
@@ -246,7 +248,7 @@ struct vfgfx_writer_s {
         } else {
             t += 0 - static_cast<std::uint64_t>(offset_ns);  // beženklė neigimas: saugu ir INT64_MIN
         }
-        return mxlTimestampToIndex(&func::kFieldRate, t);
+        return mxlTimestampToIndex(&rate, t);
     }
 
     void pace_loop();
@@ -273,7 +275,7 @@ void vfgfx_writer_s::pace_loop_body() {
     if (committed.load() > 0) i = std::max(i, out.last_committed + 1);  // restartas: niekada nekartoti commit'into indekso
     const std::size_t gb = gfx::grain_bytes(r);
     while (!stop.load()) {
-        const bool back = hooks.wait ? hooks.wait(i, offset_ns, stop) : func::wait_until(i, offset_ns, stop);
+        const bool back = hooks.wait ? hooks.wait(i, offset_ns, stop) : func::wait_until(rate, i, offset_ns, stop);
         if (stop.load()) break;
         if (back) bump(&gi::PacingStats::clock_backward);
         bool wrote = false;
@@ -366,15 +368,20 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
     if (!inst || !flow_def_json || !out) return fail(VFGFX_ERR_INVALID_ARG, "inst, flow_def_json ir out turi būti ne nullptr");
     const std::string def = flow_def_json;
     const std::string opts = writer_options_json ? writer_options_json : "";
-    gfx::Raster r{};
+    vramflow::VideoFormat fmt{};
     std::string err;
-    if (!gfx::raster_from_flow_def(def, r, err)) return fail(VFGFX_ERR_INVALID_ARG, err);
+    if (!vramflow::format_from_flow_def(def, fmt, err)) return fail(VFGFX_ERR_INVALID_ARG, err);
+    const gfx::Raster r = fmt.raster;
+    // dažnis — bet kuris palaikomas (format.hpp); rastras — bet koks (grafikos sluoksniai)
+    if (!vramflow::rate_supported(r.interlaced, fmt.frame_rate, err)) return fail(VFGFX_ERR_GEOMETRY, err);
     if (!r.alpha) return fail(VFGFX_ERR_INVALID_ARG, "flow turi būti video/v210a");
     if (!gfx::raster_ok(r)) return fail(VFGFX_ERR_GEOMETRY, "netinkamas rastras (plotis ir interlaced aukštis lyginiai)");
 
     auto w = std::make_unique<vfgfx_writer_s>();
     w->inst = inst;
     w->r = r;
+    w->fmt = fmt;
+    w->rate = func::mxl_rate(fmt.grain_rate());
     w->fields = r.interlaced ? 2 : 1;
     // deviceUuid nurodytas, bet tokio įrenginio nėra: aiški klaida, ne tylus kitas įrenginys. Ieškoma vieną kartą per create.
     const int uuid_dev = device_from_options(opts);
@@ -383,7 +390,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         if (gfx::detail::json_str(opts, "deviceUuid", u) && !u.empty() && uuid_dev < 0)
             return fail(VFGFX_ERR_INVALID_ARG, "deviceUuid " + u + " neatitinka jokio CUDA įrenginio");
     }
-    if (!w->out.create(inst, def, opts, err, r)) {
+    if (!w->out.create(inst, def, opts, err, fmt)) {
         const int code = w->out.create_status != MXL_STATUS_OK ? static_cast<int>(w->out.create_status)
                          : w->out.existed                       ? VFGFX_ERR_STATE
                                                                 : VFGFX_ERR_GEOMETRY;

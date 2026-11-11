@@ -18,8 +18,7 @@
 // per kadrą, ne per lauką. Įkėlimas — upload_h2d (grįžta tik baigus DMA: biblioteka kadrą skaito savo srautu, cuda_upload.hpp).
 // host saugyklai (cpu arba gpu+host) kadras perduodamas kaip VFGFX_MEM_HOST (konvertuoja CPU).
 // Sluoksnio geometrija (--layer-geom): logo = 384×216, full = --format kadras (numatytasis 1920×1080) arba WxH; neišvardintiems
-// k: k = 0 logo, kiti full. Skenavimas ir kadrų dažnis — iš --format; libvramflow-gfx priima tik 50/1 grain'o ritmą (R9),
-// todėl 1080p25 / 59,94 šeima atmetama su aiškia klaida.
+// k: k = 0 logo, kiti full. Skenavimas ir kadrų dažnis — iš --format (bet kuris palaikomas).
 // Nelyginis k siunčiamas kaip premultiplied, lyginis — straight (kaip gfx_content).
 #include <cuda_runtime_api.h>
 
@@ -112,10 +111,6 @@ int run_gfxgen(const Opts& o) {
     const bool manual = o.gfx_mode == "manual";
     const bool inter = o.fmt.raster.interlaced;
     const mxlRational rate = mxl_rate(o.fmt.grain_rate());
-    if (rate.numerator != 50 || rate.denominator != 1) {
-        st.fatal = "libvramflow-gfx palaiko tik 50/1 grain'o ritmą (R9); --format " + vramflow::format_name(o.fmt) + " nepalaikomas";
-        return finish(1);
-    }
     const bool upload = o.impl != "cpu" && o.storage == "cuda-linear";  // kadras į GPU kartą, perduodamas kaip MEM_CUDA
     int dev = -1;
     if (upload) {
