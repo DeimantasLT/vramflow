@@ -51,9 +51,11 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
 - **C variantas:** `--impl cpu` priverstinai naudoja host storage (`src/func/main_func.cpp`: `if (o.impl == "cpu") o.storage = "host"`),
   CUDA kontekstas nekuriamas (`verify` C/H variantuose taip pat CPU).
 - **Harness po matavimų pakeistas** (be perkartojimo): composite `--duration` sutrumpintas iki `total + 20` (anksčiau `+ 40`, tik
-  tuščias laukimas po lango); jei tarpas tarp composite ir verify starto > 14 s, pakopa žymima „NEDERINA“ (ne PASS/FAIL). **Visa pateikta
-  kampanija vyko su senąja `+ 40` uodega, todėl jos matavimo langas nebuvo paveiktas**, patikros aprėptis įrašoma į JSON, VRAM modelis pakeistas regresija (žr. žemiau). Matavimo langas ir
-  PASS kriterijai nepakito.
+  tuščias laukimas po lango); jei tarpas tarp composite ir verify starto > 9 s (= `COMP_TAIL_S` − 11), pakopa žymima „NEDERINA“ (ne
+  PASS/FAIL) ir N* ties ja nutrūksta. 9 s riba parinkta taip: matavimo langas baigiasi ≤ verify starto + `total` + 5 s (5 s mėginių ciklas),
+  todėl realus rezervas iki composite pabaigos ≥ 20 − 9 − 5 = 6 s. **Visa pateikta kampanija vyko su senąja `+ 40` uodega, todėl jos
+  matavimo langas nebuvo paveiktas.** Taip pat: patikros aprėptis įrašoma į JSON, VRAM modelis pakeistas regresija (žr. žemiau). Matavimo
+  langas ir PASS kriterijai nepakito.
 - **10.1 dūmų bandymas** (K=2, N=1, 20 s + 5 s apšilimas, `--source fair`, `capacity.py` tiesiogiai): C — griežtai PASS, verif 0, 40 mėginių,
   CPU/srautui 0,354; G — pirmas paleidimas griežtai FAIL (1 `late_skips`, WSL2 drebėjimas), tol PASS, verif 0 (39 mėginiai); G pakartojimas
   — griežtai PASS, verif 0. Žaliavos: `evidence/composite-smoke/`.
@@ -75,7 +77,7 @@ Data: 2026-11-11 (kampanija 13:15–14:33 vietos laiku). Užduotis 10, alfa komp
 - **Laikrodžio zondas** (`80-clock-probe.py`, 30 s), C/H kampanija (ir pirmoji, negaliojanti G): prieš — realtime/raw 2,2 ppm, PHC 0,9 ppm, realtime−PHC 0,036 ms,
   žingsnių 0; po — −0,1 ppm, −0,2 ppm, −0,016 ms, žingsnių 0. G pakartojimas (15:04–15:39): prieš — 0,0 / −0,0 ppm, 0,002 ms; po —
   0,1 / −0,2 ppm, 0,012 ms, žingsnių 0 (`clock-before.json`, `clock-after.json` abiejuose kataloguose). Zondas aprėpia tik 30 s langą;
-  **WSL2 gamintojų drebėjimas (pavieniai vėluojantys laukai) išlieka** ir lemia dalį pavienių „griežtai FAIL“ (R14).
+  **WSL2 gamintojų drebėjimas (pavieniai vėluojantys laukai) išlieka** ir, tikėtina, lemia dalį pavienių „griežtai FAIL“ (R14; netikrinta).
 
 ## VRAM / atminties biudžetas (R19)
 

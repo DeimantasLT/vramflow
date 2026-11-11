@@ -114,11 +114,14 @@ def composite_section(rows):
                           f"{hq(r, 'out_lateness', 'p50')} / {hq(r, 'out_lateness', 'p99')} | {r.get('vram_delta_mb')} | "
                           f"{'–' if not g else f'{g['util_gpu']['mean']:.0f}'} | {'–' if not g else f'{g['power_w']['mean']:.0f}'} | "
                           f"`{r['_src']}` |")
-            ran = [r for r in rs if not r.get("skipped") and not r.get("invalid_reason")]
+            ran = [r for r in rs if not r.get("skipped")]  # NEDERINA pakopos lieka sekoje kaip pertrūkis (nstar: pass = False)
+            invalid = sorted({r["n"] for r in ran if r.get("invalid_reason")})
             skipped = sorted({r["n"] for r in rs if r.get("skipped")})
             nmap[(k, v)] = (nstar(ran, "pass"), nstar(ran, "pass_tol"), max((r["n"] for r in ran), default=0), skipped)
             ns, nt, top, sk = nmap[(k, v)]
             tail = ""
+            if invalid:
+                tail += f" (N={','.join(map(str, invalid))} NEDERINA — N* nutrauktas ties pirmąja nederinama pakopa)"
             if sk:
                 tail = f" (N={','.join(map(str, sk))} praleista, žr. eilutės priežastį — riba nepasiekta tik todėl, kad pakopos nevykdytos)"
             md += ["", f"N* griežtai = **{ns}**, N* tol = **{nt}**" + tail, ""]
@@ -138,7 +141,19 @@ def composite_section(rows):
     return md + [""]
 
 
+def _selftest():
+    """N* turi nutrūkti ties NEDERINA pakopa: 1,2,4 PASS, 8 nederina, 16 PASS -> N* = 4 (ne 16)."""
+    ok = lambda n: {"n": n, "pass": True, "pass_tol": True}
+    bad = {"n": 8, "pass": False, "pass_tol": False, "invalid_reason": "x"}
+    rows = [ok(1), ok(2), ok(4), bad, ok(16)]
+    assert nstar(rows, "pass") == 4 and nstar(rows, "pass_tol") == 4, (nstar(rows, "pass"), nstar(rows, "pass_tol"))
+    assert nstar([ok(1), ok(2), ok(4), ok(8), ok(16)], "pass") == 16
+    print("selftest OK: N* nutrūksta ties NEDERINA (4), be jos 16")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        return _selftest()
     out = sys.argv[1]
     rows = []
     for d in sys.argv[2:]:

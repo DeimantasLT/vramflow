@@ -105,7 +105,10 @@ def gpu_stats(path):
 # --- composite (N išėjimų × K grafikos sluoksnių) -------------------------------------------------------------------------
 # Sluoksnių geometrija pagal specifikaciją §4.7: K=1 → logo; K=2 → logo,full; K=4 → logo,full,full,full (K=3 — logo,full,full).
 # (geometrija, X,Y kadro koordinatės, nepermatomumas). Pozicijos fiksuotos, kad kampanijos būtų palyginamos.
-COMP_TAIL_S = 20  # composite --duration = total + tiek; leistinas tarpas iki verify starto = COMP_TAIL_S - 6 (= 14 s)
+# composite --duration = total + COMP_TAIL_S (nuo composite starto). Matavimo langas baigiasi ≤ verify starto + total + 5 s (5 s
+# mėginių ciklas), todėl realus rezervas = COMP_TAIL_S - tarpas - 5. Reikalaujame ≥ 6 s: leistinas tarpas = COMP_TAIL_S - 11 (= 9 s).
+COMP_TAIL_S = 20
+COMP_MAX_GAP_S = COMP_TAIL_S - 11
 COMP_LAYERS = [("logo", "1488,64", 1.0), ("full", "0,0", 0.8), ("full", "0,0", 0.8), ("full", "0,0", 0.8)]
 # Raster aprašai (plotis, aukštis, interlaced): lauko grain'as = h/2 eilučių
 GEOM_WH = {"logo": (384, 216), "full": (1920, 1080)}
@@ -482,9 +485,9 @@ def run_level(a, n):
     if f == "composite":
         res["src_flows_ready"], res["out_flows_ready"] = src_ok, out_ok
         res["composite_to_verify_gap_s"] = round(comp_gap_s, 1)
-        if comp_gap_s > COMP_TAIL_S - 6:
+        if comp_gap_s > COMP_MAX_GAP_S:
             # composite baigtųsi anksčiau už matavimo langą → rezultatas neinterpretuotinas (ne talpos FAIL)
-            res["invalid_reason"] = (f"composite starto → verify starto tarpas {comp_gap_s:.1f} s > {COMP_TAIL_S - 6} s: "
+            res["invalid_reason"] = (f"composite starto → verify starto tarpas {comp_gap_s:.1f} s > {COMP_MAX_GAP_S} s: "
                                      "composite pasibaigė anksčiau už matavimo langą")
         # R21: patikros aprėptis — patikrinta mėginių / laukiama (lauko indeksų intervalas × N / --every) ir nuleistos patikros
         vs = next((sm for nm, sm in sums.items() if nm.startswith("verify") and sm), None)
