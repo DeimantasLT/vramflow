@@ -59,7 +59,7 @@ Windows → WSL hop is a plain pipe (`node.exe … | ograf_feed`).
 ## Run it
 
 ```bash
-# WSL, repo built with scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
+# WSL, repo built with scripts/linux/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
 SOURCE=edge      bash examples/ograf/run-demo.sh /tmp/vf-ograf   # live OGraf render through Edge (needs Windows Edge + Node)
 SOURCE=synthetic bash examples/ograf/run-demo.sh /tmp/vf-ograf   # built-in source, nothing else needed
 ```

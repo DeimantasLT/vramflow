@@ -282,7 +282,7 @@ def fgold_dec(out):
     for tag, impl, storage in variants():
         tid = f"fgold_dec[{tag}]"
         if not (pathlib.Path(CLIP).exists() and pathlib.Path(REF).exists()):
-            res.append(F.result(tid, "FAIL", why=f"nėra klipo {CLIP} ar etalono {REF} (scripts/wsl/61-make-test-clip.sh)"))
+            res.append(F.result(tid, "FAIL", why=f"nėra klipo {CLIP} ar etalono {REF} (scripts/linux/61-make-test-clip.sh)"))
             continue
         r = run_dec(out, tag, impl, storage)
         if r.get("err"):

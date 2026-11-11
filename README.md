@@ -66,13 +66,13 @@ git checkout 6dddc91d92f56c3c9d90fa089c95d8f262bc2c92
 cd -
 
 # 2. Build and install MXL (into ~/src/mxl-pr653/install/Linux-Clang-Release)
-bash scripts/wsl/10-build-mxl.sh
+bash scripts/linux/10-build-mxl.sh
 
 # 3. Build VRAMFlow
-VERIFY_BUILD=$HOME/build/vramflow bash scripts/wsl/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
+VERIFY_BUILD=$HOME/build/vramflow bash scripts/linux/30-build-verify.sh -DMXLV_BUILD_FUNC=ON
 ```
 
-Paths and versions (`MXL_SRC`, `CUDA_HOME`, `VCPKG_ROOT`, …) are in `scripts/wsl/env.sh`; override any of them with an
+Paths and versions (`MXL_SRC`, `CUDA_HOME`, `VCPKG_ROOT`, …) are in `scripts/linux/env.sh`; override any of them with an
 environment variable. The build puts `vramflow-func`, `vramflow-verify` and `libvramflow-gfx.so` in `$VERIFY_BUILD`.
 
 Before running anything, in every shell:
@@ -407,14 +407,14 @@ the run ID and the software / GPU versions.
 ## 7. Tests and measurements
 
 ```bash
-bash scripts/wsl/run-all.sh --soak skip      # everything: probes, upstream tests, unit / GPU / functional tests, report
-bash scripts/wsl/61-make-test-clip.sh        # synthetic 1080i50 H.264 clip for the dec / chain tests
+bash scripts/linux/run-all.sh --soak skip      # everything: probes, upstream tests, unit / GPU / functional tests, report
+bash scripts/linux/61-make-test-clip.sh        # synthetic 1080i50 H.264 clip for the dec / chain tests
 
 # One capacity level: 8 logo flows on GPU flows, 60 s
 python3 tests/perf/capacity.py ~/evidence/try --func logo --n 8 --seconds 60 --impl gpu --storage cuda-linear
 
 # GPU vs CPU campaign and its report
-bash scripts/wsl/71-compare.sh ~/evidence/cmp-logo logo 1,2,4,8,16,32,64
+bash scripts/linux/71-compare.sh ~/evidence/cmp-logo logo 1,2,4,8,16,32,64
 python3 tests/perf/compare_report.py report.md ~/evidence/cmp-logo
 ```
 
@@ -467,7 +467,7 @@ invalid (a `gfxgen` bug, fixed) and was repeated. Details, latencies and VRAM mo
 | `src/mxlio/`, `src/gpu/` | `vramflow-verify` writer and reader |
 | `examples/ograf/` | OGraf graphic → `libvramflow-gfx` → `composite` example |
 | `tests/` | `unit/`, `gpu/` (Catch2), `functional/`, `perf/` (capacity and reports) |
-| `scripts/wsl/` | Build and run scripts |
+| `scripts/linux/` | Build and run scripts (native Linux and WSL2); `scripts/wsl/` keeps one-line redirects to them for one release |
 | `upstream/` | Draft patches for dmf-mxl/mxl PR #653 (U1–U4) with evidence |
 | `docs/` | Design notes, requirements, plans and results (in Lithuanian) |
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Verifikatoriaus savitikra (architektūra §5.1): detektorius PRIVALO aptikti kiekvieną injekciją.
 
-Kiekvienam atvejui paleidžiama writer+reader pora (scripts/wsl/lib/pair.sh). Writer'is užrašo kiekvienos
+Kiekvienam atvejui paleidžiama writer+reader pora (scripts/linux/lib/pair.sh). Writer'is užrašo kiekvienos
 injekcijos indeksą, reader'is — kiekvieno aptikto pažeidimo indeksą ir kategorijų bitus. Tikrinama, kad
 aptiktų indeksų aibė TIKSLIAI sutampa su injekcijų aibe reader'io lange (išskyrus indeksus, kurių reader'is
 negalėjo patikrinti: gap / lapped), ir kad exit kodas toks, kokio laukiama.
@@ -43,7 +43,7 @@ def run_case(repo, out, name, wargs, storage, seconds, crosscheck):
     subprocess.run(["rm", "-rf", str(d)], check=True)
     r = f"--storage {storage} --host-crosscheck-every {crosscheck}"
     w = f"--storage {storage} --gc-before-create {wargs}"
-    subprocess.run(["bash", str(repo / "scripts/wsl/lib/pair.sh"), str(d), str(seconds), w, r], check=False,
+    subprocess.run(["bash", str(repo / "scripts/linux/lib/pair.sh"), str(d), str(seconds), w, r], check=False,
                    stdout=subprocess.DEVNULL)
     ws = json.loads((d / "summary-writer.json").read_text())
     rs = json.loads((d / "summary-reader.json").read_text())
