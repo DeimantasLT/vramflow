@@ -229,3 +229,46 @@ TEST_CASE("review3: AudioFrames — kadro mėginiai ir head atvaizdavimas", "[en
     const std::uint64_t big = 1'000'000'007ull * 1920;  // ilgas TAI: be slankaus kablelio paklaidos
     CHECK(i50.last_ready(big) == 1'000'000'006ull * 2 + 1);
 }
+
+TEST_CASE("review3: C fazė — paruoštas WaitC vienetas nelaukia užstrigusio iki C ribos (riba t_r + Wr)", "[engine][review3][phasec]") {
+    // D = 30 ms prie 50 Hz: B = T + 17,5, C = T + 30. Indekse kI abu vienetai pernešti per kito tick'o atidarymą (T + 20,5):
+    // u0 ateina T + 22 ms, u1 (gyvas, bet užstrigęs) — niekada. Anksčiau u0 laukė iki C = T + 30, dabar — iki 22 + Wr = 27.
+    constexpr Index kI = 1010;
+    EngineConfig c = Rig::test_config();
+    c.cuts.deadline_ns = 30'000'000;
+    Rig r(2, c);
+    r.ins[0]->arrival = [](Index j) { return j == kI ? std::int64_t{22'000'000} : std::int64_t{1'200'000}; };
+    r.ins[1]->arrival = [](Index j) { return j >= kI ? kNever : std::int64_t{1'200'000}; };
+    r.stop_after(kI + 6);
+    r.build();
+    r.run();
+    const auto* e0 = r.outs[0]->find(kI);
+    REQUIRE(e0 != nullptr);
+    CHECK(e0->kind == RecordingOutput::Kind::Commit);
+    const std::int64_t at = static_cast<std::int64_t>(e0->tai) - T(kI);
+    CHECK(at >= 22'000'000);
+    CHECK(at <= 27'000'000);  // ≤ t_r + Wr (anksčiau — 30 ms, C riba)
+    // u1 indeksas kI — spraga ties C riba (nesulaukta), ne anksčiau
+    const auto* e1 = r.outs[1]->find(kI);
+    REQUIRE(e1 != nullptr);
+    CHECK(e1->kind == RecordingOutput::Kind::Gap);
+    CHECK(static_cast<std::int64_t>(e1->tai) - T(kI) >= 30'000'000);
+}
+
+TEST_CASE("review3: C fazė — du paruošti per Wr vienas nuo kito — vienas paleidimas", "[engine][review3][phasec]") {
+    constexpr Index kI = 1010;
+    EngineConfig c = Rig::test_config();
+    c.cuts.deadline_ns = 30'000'000;
+    Rig r(3, c);
+    r.ins[0]->arrival = [](Index j) { return j == kI ? std::int64_t{22'000'000} : std::int64_t{1'200'000}; };
+    r.ins[1]->arrival = [](Index j) { return j == kI ? std::int64_t{24'000'000} : std::int64_t{1'200'000}; };
+    r.ins[2]->arrival = [](Index j) { return j >= kI ? kNever : std::int64_t{1'200'000}; };
+    r.stop_after(kI + 6);
+    r.build();
+    r.run();
+    const auto calls = r.fn.calls_for(kI);
+    REQUIRE(calls.size() == 1);  // A ir B — tušti; vienas C su u0 ir u1
+    CHECK(calls[0]->phase == 2);
+    CHECK(calls[0]->units.size() == 2);
+    CHECK(static_cast<std::int64_t>(calls[0]->tai) - T(kI) <= 27'000'000);
+}

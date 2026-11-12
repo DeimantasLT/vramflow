@@ -98,7 +98,13 @@ TEST_CASE("engine: D = 30 ms, visi įėjimai 26 ms vienam indeksui — i + 1 nei
     EngineConfig c = Rig::test_config();
     c.cuts.deadline_ns = 30'000'000;
     Rig r(2, c);
-    for (auto& in : r.ins) in->arrival = [](Index j) { return j == kI ? std::int64_t{26'000'000} : std::int64_t{1'200'000}; };
+    // Rašytojas commit'ina eilės tvarka (MXL: head monotoniškas): kI ties T + 26, todėl kI + 1 — ne anksčiau kaip iškart po jo
+    // (T(kI + 1) + 6). Anksčiau tvarkaraštis „kI + 1 ties T(kI + 1) + 1,2“ (prieš kI) netikroviškas: pakaitalas grain'us ≤ head
+    // laiko paruoštais, o C grupės 1 ms gabalų laukimas (review3) tai pamatytų — lūkesčiai nepakito.
+    for (auto& in : r.ins)
+        in->arrival = [](Index j) {
+            return j == kI ? std::int64_t{26'000'000} : j == kI + 1 ? std::int64_t{6'000'000} : std::int64_t{1'200'000};
+        };
     std::map<Index, std::int64_t> end_at;
     r.fn.on_end_tick = [&](Index i, TickContext&) {
         end_at[i] = static_cast<std::int64_t>(r.clk.now_tai()) - T(i);

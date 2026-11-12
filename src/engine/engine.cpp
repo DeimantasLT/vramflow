@@ -26,8 +26,11 @@
 //  * B taisyklė: kai bent vienas Straggler'is paruoštas (anksčiausias — t_r), B laukia tik tų neparuoštų šviežių
 //    Straggler'ių, kurių laukiamas paruošimo laikas T(j) + ewma ≤ t_r + Wr (nežinomas — laukiama), ir ne ilgiau kaip
 //    min(b, t_r + Wr); likę — C fazėje iki savo ribos. Paruoštas Straggler'is laikomas ne ilgiau kaip Wr.
-//  * Prisijungiantys po pernešimo: C nepaleidžiama anksčiau, kol laukiama prisijungiančių (jų indeksas neprarandamas);
-//    legacy (viena riba) prisijungę po A — C fazėje iki tos pačios ribos.
+//  * C taisyklė (kaip B): kai bent vienas WaitC vienetas paruoštas (anksčiausias — t_r), C laukia neparuoštų WaitC vienetų ir
+//    prisijungsiančių po pernešimo ne ilgiau kaip min(c, t_r + Wr); paruoštas WaitC vienetas laikomas ne ilgiau kaip Wr
+//    (anksčiau — iki pačios C ribos dėl bet kurio neparuošto ar prisijungiančio). Kol indeksui liko process kvietimų
+//    (≤ 3 iš viso), likę WaitC / prisijungę vėliau paleidžiami kitu C kvietimu; kai nebeliko — spraga ties C riba.
+//    Legacy (viena riba) prisijungę po A — C fazėje iki tos pačios ribos.
 //  * Kiekvienas dalyvaujantis indeksas baigiasi: commit / spraga pagal politiką / skaitiklis su priežastimi
 //    (*_skips, gap_left, commit_errors). Lap'as — atšaukimas + spraga pagal politiką (lapped++).
 #include "engine/engine.hpp"
@@ -111,6 +114,7 @@ struct TickEngine::Impl {
         std::uint8_t calls = 0;
         std::int64_t held = 0;
         std::int64_t b_hold = INT64_MAX;  // B paleidimo riba, kai jau yra paruoštų Straggler'ių (min(b, t_r + Wr))
+        std::int64_t c_hold = INT64_MAX;  // C paleidimo riba, kai jau yra paruoštų WaitC vienetų (min(c, t_r + Wr))
     };
 
     Impl(const EngineConfig& c, Clock& k, StatsHub& h, const std::atomic<bool>& s)
@@ -188,7 +192,7 @@ struct TickEngine::Impl {
     std::int64_t deadline(const Unit& u) {
         const Rec& r = rec(u.cur);
         if (!r.a_done) return r.cuts.a;
-        if (u.stage == Stage::WaitC) return c_deadline(r);
+        if (u.stage == Stage::WaitC) return std::min(c_deadline(r), r.c_hold);
         return r.cuts.has_b ? std::min(r.cuts.b, r.b_hold) : r.cuts.a;
     }
 
@@ -658,18 +662,34 @@ struct TickEngine::Impl {
     }
 
     void fire_c(Rec& r) {
-        if (!r.b_done || r.c_done || ended) return;
+        if (!r.b_done || ended) return;
         bool any = false, all = true;
+        std::int64_t t_r = INT64_MAX;  // anksčiausiai paruošto WaitC vieneto paruošimo laikas
         for_rec(r, [&](const Unit& u) {
             if (u.stage != Stage::WaitC) return;
             any = true;
-            if (!ready(u, false)) all = false;
+            if (ready(u, false)) t_r = std::min(t_r, u.ready_at);
+            else all = false;
         });
         if (!any) return;
-        const bool at_cut = now() >= c_deadline(r);
-        if (!at_cut && (!all || r.joiners > 0)) return;  // laukiama ir prisijungsiančių (jų indeksas neprarandamas)
-        r.c_done = true;
-        launch(r, 2, [&](const Unit& u) { return u.stage == Stage::WaitC && ready(u, at_cut); });
+        const std::int64_t n = now();
+        const bool at_cut = n >= c_deadline(r);
+        if (!r.c_done && !at_cut) {
+            if (t_r == INT64_MAX) return;  // nė vieno paruošto — laukiama iki C ribos
+            if (!all || r.joiners > 0) {   // laukiama tik tų, kurie tikėtini per Wr nuo pirmo paruošto (kaip B)
+                r.c_hold = std::min(c_deadline(r), t_r + cfg.cuts.ready_wait_ns);
+                bool wait = r.joiners > 0;  // prisijungiančių paruošimo laikas nežinomas — laukiama iki c_hold
+                for_rec(r, [&](const Unit& u) {
+                    if (u.stage == Stage::WaitC && !ready(u, false) && expected(u) <= r.c_hold) wait = true;
+                });
+                if (wait && n < r.c_hold) return;
+            }
+        }
+        if (!r.c_done) {
+            r.c_hold = INT64_MAX;
+            launch(r, 2, [&](const Unit& u) { return u.stage == Stage::WaitC && ready(u, at_cut); });
+            if (at_cut || r.calls >= 3) r.c_done = true;  // ≤ 3 process kvietimai indeksui
+        }
         if (!at_cut) return;
         for (Unit& u : units)
             if (u.stage == Stage::WaitC && u.cur == r.idx) finalize_miss(u, 2);
@@ -814,18 +834,25 @@ struct TickEngine::Impl {
             for (std::uint32_t k = 0; k < u.nin; ++k) w = w || waitable(u, ins[u.in0 + k]);
             if (w) best = std::min(best, deadline(u));
         }
-        // B grupė: ašis — anksčiausiai laukiamas įėjimas (pirmas paruoštas Straggler'is paleidžia Wr laikmatį); kai
-        // laukiamų daugiau nei vienas — laukiama 1 ms gabalais, kad kitų atvykimas būtų pastebėtas laiku.
+        // B / C grupė: ašis — anksčiausiai laukiamas įėjimas (pirmas paruoštas vienetas paleidžia Wr laikmatį). Pirmenybė:
+        // švieži vienetai (pakibęs — miss_run ≥ 1 — tikėtina užstrigęs), tada tie, kurių laukiamas laikas dar ateityje. Kai
+        // laukiamų daugiau nei vienas — laukiama 1 ms gabalais, kad kitų atvykimas būtų pastebėtas laiku (C: ir kai ašis —
+        // užstrigęs brolis).
         std::uint32_t n_b = 0;
+        int best_rank = INT_MAX;
         std::int64_t best_exp = INT64_MAX;
+        const std::int64_t tnow = now();
         for (Unit& u : units) {
-            if (u.stage != Stage::WaitB || deadline(u) != best) continue;
+            if ((u.stage != Stage::WaitB && u.stage != Stage::WaitC) || deadline(u) != best) continue;
+            const bool fr = fresh(u);
             for (std::uint32_t k = 0; k < u.nin; ++k) {
                 const In& in = ins[u.in0 + k];
                 if (!waitable(u, in)) continue;
                 ++n_b;
                 const std::int64_t e = in.ewma_set ? T(jidx(u, in)) + in.ewma : INT64_MIN;
-                if (pivot < 0 || e <= best_exp) {
+                const int rank = (fr ? 0 : 2) + (e >= tnow ? 0 : 1);
+                if (pivot < 0 || rank < best_rank || (rank == best_rank && e <= best_exp)) {
+                    best_rank = rank;
                     best_exp = e;
                     pivot = static_cast<std::int64_t>(u.in0 + k);
                 }
