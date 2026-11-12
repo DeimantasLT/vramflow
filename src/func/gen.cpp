@@ -123,10 +123,18 @@ struct GenFn final : engine::TickFunction {
 
     void end_tick(engine::Index i, engine::TickContext&) override {
         const std::uint64_t t_done = now_tai();
+        const mxlRational r = mxl_rate(grain);
+        const std::uint64_t late = t_done - mxlIndexToTimestamp(&r, i);
         if (static_cast<double>(t_done) >= warm) {
             st.add_hist("gen_ms", t_done - t_wake);
-            const mxlRational r = mxl_rate(grain);
-            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&r, i));
+            st.add_hist("commit_lateness", late);
+        }
+        // Vėlesnis nei --deadline-ms commit'as: vartotojai su tokia riba šio indekso nesulaukia. Skaitiklis (visam
+        // paleidimui, ne tik po warmup) ir eilutė su TAI laiku — izoliacijos testai priskiria praradimus aukštupiui.
+        if (late > std::uint64_t{o.deadline_ms} * 1'000'000) {
+            st.proc["late_commits"]++;
+            std::fprintf(stderr, "[gen] vėlus commit: indeksas %llu, %.3f ms po T(i), TAI %llu\n", static_cast<unsigned long long>(i),
+                         static_cast<double>(late) / 1e6, static_cast<unsigned long long>(t_done));
         }
         if (first == ~0ull) first = i;
         last = i;

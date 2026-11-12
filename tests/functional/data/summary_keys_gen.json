@@ -28,6 +28,7 @@
  "optional": {
   "top": [],
   "proc": [
+   "late_commits",
    "late_skips"
   ],
   "hist": [],

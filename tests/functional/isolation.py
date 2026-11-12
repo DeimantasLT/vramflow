@@ -19,6 +19,12 @@ todėl `out_lateness` histograma abiem apima tą patį langą: nuo 9-os sekundė
 — „prieš“ stulpelis (be gedimo), antrasis — „po“. Santraukos skaitikliai kaupiami visam paleidimui, bet iki gedimo sveikame
 paleidime jie 0 (kontrolinis tai patikrina).
 
+Tikrinama savybė: funkcija sveikiems flow'ams nepriduria SAVO praradimų, kai kitas įėjimas miršta ar užstringa. Ką prarado ar
+pavėlavo pats sveikas aukštupis (gen A: `late_skips` + `late_commits` — commit'ai vėlesni nei --deadline-ms), funkcija
+atkurti negali: sveikų flow'ų praradimai tikrinami ≤ šio skaičiaus (kiekvienam flow'ui), viskas virš jo — FAIL. Aukštupio
+sutrikimas rašomas atskira INFO eilute (didžiausias gen A commit'o vėlavimas su gedimu / be jo ir vėlaus tick'o laikas nuo
+SIGSTOP / SIGCONT / kill momento).
+
 Būsena: fiso_kill ir fiso_stall — VARTAI logo funkcijai nuo V10 (izoliacija variklyje; tvirtinimai — logo_gate()); fiso_composite
 ir fiso_enc — kol kas INFO su skaičiais (vartais taps V11, V12). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
 nėra santraukos). Struktūruoti skaičiai — `before` / `after` laukuose (functional.json). „Prieš“ skaičiai —
@@ -29,6 +35,7 @@ Testai tikrina tik iš išorės: procesai, signalai, exit kodai, santraukų skai
 import json
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -86,19 +93,51 @@ def kill_at(t0, at):
         time.sleep(d)
 
 
+def tai_ns():
+    return time.clock_gettime_ns(time.CLOCK_TAI)
+
+
+FAULT_TAI = {}  # paskutinio apply_fault momentai TAI ns: {"kill"|"stop"|"cont": ns}
+
+
 def apply_fault(fault, victim, t0):
-    """kill: kill -9 ties FAULT_AT; stall: SIGSTOP ties FAULT_AT, SIGCONT po STALL_S. Grąžina faktinį gedimo laiką (s nuo t0)."""
+    """kill: kill -9 ties FAULT_AT; stall: SIGSTOP ties FAULT_AT, SIGCONT po STALL_S. Grąžina faktinį gedimo laiką (s nuo t0);
+    momentai TAI laiku — FAULT_TAI (aukštupio vėlaus tick'o laikui palyginti)."""
+    FAULT_TAI.clear()
     if fault == "none":
         return None
     kill_at(t0, FAULT_AT)
     t_fault = time.monotonic() - t0
     if fault == "kill":
+        FAULT_TAI["kill"] = tai_ns()
         victim.kill9()
     elif fault == "stall":
+        FAULT_TAI["stop"] = tai_ns()
         victim.p.send_signal(signal.SIGSTOP)
         time.sleep(STALL_S)
+        FAULT_TAI["cont"] = tai_ns()
         victim.p.send_signal(signal.SIGCONT)
     return round(t_fault, 2)
+
+
+LATE_RE = re.compile(r"\[gen\] vėlus commit: indeksas (\d+), ([\d.]+) ms po T\(i\), TAI (\d+)")
+
+
+def upstream(pr):
+    """Sveiko aukštupio (gen A) sutrikimai: praleisti / vėlūs indeksai, didžiausias commit'o vėlavimas, vėlių tick'ų laikas (ms)
+    nuo gedimo momentų."""
+    s = pr.summary() if pr is not None else None
+    proc = (s or {}).get("proc") or {}
+    late = []
+    try:
+        for m in LATE_RE.finditer(pr.err_path.read_text(encoding="utf-8", errors="replace")):
+            tai = int(m.group(3))
+            late.append({"index": int(m.group(1)), "late_ms": float(m.group(2)),
+                         **{f"vs_{k}_ms": round((tai - v) / 1e6, 1) for k, v in FAULT_TAI.items()}})
+    except OSError:
+        pass
+    return {"late_skips": proc.get("late_skips", 0), "late_commits": proc.get("late_commits", 0),
+            "max_lateness_ms": hist_of(s, "commit_lateness").get("max_ms"), "late_ticks": late[:10]}
 
 
 def stop_all(procs):
@@ -149,7 +188,9 @@ def run_logo(out, tag, impl, storage, fault):
         return {"err": f"nėra santraukų (logo={sl is not None}, verify={sv is not None})"}
     rec = {**common_record(fault, t_fault), "exit": {"logo": rl, "verify": rv}, "fn": split_summary(sl, FN_KEYS, N),
            "out_lateness": hist_of(sl, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
-           "verify_proc": (sv.get("proc") or {}), "fatal": sl.get("fatal")}
+           "verify_proc": (sv.get("proc") or {}), "fatal": sl.get("fatal"), "upstream": upstream(ga),
+           "fn_flows": [flow_view(sl, FN_KEYS, [n]) for n in range(N - 1)],
+           "verify_flows": [flow_view(sv, VER_KEYS, [n]) for n in range(N - 1)]}
     if vp is not None:
         sp = F.vsummary(vp, "verify-logo")
         rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
@@ -262,19 +303,33 @@ def describe(r):
     return s
 
 
+FN_LOSS = ("late_fields", "late_skips", "lapped", "too_late", "in_invalid", "read_errors", "missing_fields")
+
+
+def upstream_budget(r):
+    """Kiek indeksų kiekvienam sveikam flow'ui prarado / pavėlavo (> --deadline-ms) pats sveikas aukštupis."""
+    u = r.get("upstream") or {}
+    return u.get("late_skips", 0) + u.get("late_commits", 0)
+
+
 def logo_gate(fault, ctrl, r):
-    """V10 vartai (planas §9 V10): sveikiems N − 1 — late_fields, late_skips, lapped == 0, verify missing / invalid / mismatch
-    == 0; out_lateness p99 po gedimo ≤ p99 be gedimo + Wr + 1 ms; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir
-    po SIGCONT POST_S s be praradimų. Grąžina neatitikimų sąrašą (tuščias — PASS)."""
+    """V10 vartai (planas §9 V10) su priskyrimu: kiekvienam sveikam flow'ui funkcijos praradimai (FN_LOSS) ir verify missing +
+    invalid ≤ aukštupio biudžetas (upstream_budget; be aukštupio sutrikimų — 0), mismatch == 0 visada; out_lateness p99 po gedimo
+    ≤ p99 be gedimo + Wr + 1 ms; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir po SIGCONT POST_S s be praradimų.
+    Grąžina neatitikimų sąrašą (tuščias — PASS)."""
     bad = []
-    fh, fa = r["fn"]["healthy"], r["fn"]["affected"]
-    vh = r["verify"]["healthy"]
-    for k in ("late_fields", "late_skips", "lapped"):
-        if fh.get(k, 0):
-            bad.append(f"sveikų {k}={fh[k]}")
-    for k in ("missing", "invalid", "mismatch_fields"):
-        if vh.get(k, 0):
-            bad.append(f"verify sveikų {k}={vh[k]}")
+    fa = r["fn"]["affected"]
+    budget = upstream_budget(r)
+    for n, f in enumerate(r.get("fn_flows") or []):
+        lost = sum(f.get(k, 0) for k in FN_LOSS)
+        if lost > budget:
+            bad.append(f"sveiko #{n} funkcijos praradimai {lost} > aukštupio {budget} ({ {k: f[k] for k in FN_LOSS if f.get(k)} })")
+    for n, v in enumerate(r.get("verify_flows") or []):
+        lost = v.get("missing", 0) + v.get("invalid", 0)
+        if lost > budget:
+            bad.append(f"verify sveiko #{n} missing + invalid {lost} > aukštupio {budget}")
+        if v.get("mismatch_fields", 0):
+            bad.append(f"verify sveiko #{n} mismatch={v['mismatch_fields']}")
     p99a, p99b = r["out_lateness"].get("p99_ms"), ctrl["out_lateness"].get("p99_ms")
     if p99a is None or p99b is None or p99a > p99b + WR_MS + 1.0:
         bad.append(f"out_lateness p99 {p99b} → {p99a} ms > +{WR_MS + 1.0} ms")
@@ -306,6 +361,9 @@ def probe(out, name, runner, faults):
                 res.append(F.result(tid, "FAIL", why=f"kontrolinis: {describe(ctrl)}; su gedimu ({fault}): {describe(r)}"))
                 continue
             why = f"PRIEŠ (be gedimo): {describe(ctrl)} || PO ({fault} ties {r['fault_at_s']} s): {describe(r)}"
+            if "upstream" in r:  # sveiko aukštupio sutrikimai — atskira INFO eilutė su skaičiais
+                res.append(F.result(f"{tid}:upstream", "INFO", why=f"sveikas aukštupis (gen A): be gedimo {ctrl.get('upstream')} | "
+                                                                  f"su gedimu {r['upstream']}"))
             if runner is run_logo:
                 bad = logo_gate(fault, ctrl, r)
                 if r.get("post"):
