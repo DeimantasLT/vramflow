@@ -212,10 +212,13 @@ struct CompositeFn final : engine::TickFunction {
             if (c.stalls && c.stalls > f.c["stalls"]) f.c["stalls"] = c.stalls;
         }
         switch (oc) {
-            case engine::Outcome::Ready:
+            case engine::Outcome::Ready: {
                 f.inc("fields_ok");
                 t_commit = now_tai();
+                const mxlRational r = mxl_rate(o.fmt.grain_rate());
+                f.note_lateness(t_commit, mxlIndexToTimestamp(&r, ut.index), warm);
                 break;
+            }
             case engine::Outcome::Lapped: f.inc("lapped"); break;
             case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;

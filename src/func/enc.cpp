@@ -709,6 +709,8 @@ int run_enc(const Opts& o) {
             s.cv.notify_one();
             fs.inc("frames_queued");
             t_done = now_tai();
+            const mxlRational r = mxl_rate(o.fmt.grain_rate());
+            fs.note_lateness(t_done, mxlIndexToTimestamp(&r, ut.index), warm);
         }
 
         void end_tick(engine::Index i, engine::TickContext&) override {

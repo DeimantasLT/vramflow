@@ -55,6 +55,15 @@ struct GenFn final : engine::TickFunction {
 
     void begin_tick(engine::Index, engine::TickContext&) override { t_wake = now_tai(); }
 
+    // Variklio praleisti indeksai (T11): eilutė su TAI laiku (tik pirmam vienetui — visi praleidžia tuos pačius) —
+    // izoliacijos testai aukštupio praradimus priskiria tik gedimo langui (kaip ir vėlius commit'us).
+    void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext&) override {
+        if (unit != 0) return;
+        std::fprintf(stderr, "[gen] praleista: indeksai %llu…%llu (%llu), TAI %llu\n", static_cast<unsigned long long>(from),
+                     static_cast<unsigned long long>(to - 1), static_cast<unsigned long long>(to - from),
+                     static_cast<unsigned long long>(now_tai()));
+    }
+
     bool process(const engine::Batch& b, engine::TickContext& ctx) override {
         const std::uint64_t i = b.index;
         jobs.clear();

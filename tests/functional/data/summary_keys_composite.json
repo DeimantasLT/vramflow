@@ -32,7 +32,8 @@
   "flows": [
    "fields_ok",
    "lapped",
-   "late_skips"
+   "late_skips",
+   "lateness_max_us"
   ]
  }
 }

@@ -187,10 +187,13 @@ struct LogoFn final : engine::TickFunction {
         const engine::InCounters& c = hub.in(eng.in_id(n, 0));
         engine::InCounters& s = seen[n];
         switch (oc) {
-            case engine::Outcome::Ready:
+            case engine::Outcome::Ready: {
                 f.inc("fields_ok");
                 t_commit = now_tai();
+                const mxlRational r = mxl_rate(o.fmt.grain_rate());
+                f.note_lateness(t_commit, mxlIndexToTimestamp(&r, ut.index), warm);
                 break;
+            }
             case engine::Outcome::Lapped: f.inc("lapped"); break;
             case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;  // gamintojo nėra / užstrigęs
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;      // laikrodžio žingsnis — aplinka

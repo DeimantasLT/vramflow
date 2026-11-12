@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 // Bendros GPU media funkcijų dalys: opcijos, skaitikliai (rašo tik tick gija), latencijų histogramos, JSON santrauka.
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -109,6 +110,13 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
 struct FlowStats {
     std::map<std::string, std::uint64_t> c;
     void inc(const char* k, std::uint64_t v = 1) { c[k] += v; }
+    // lateness_max_us: šio flow'o didžiausias commit'o (enc — eilės) vėlavimas nuo T(i), µs, tik po įšilimo (t ≥ warm).
+    // Proceso histograma (out_lateness) apima visą tick'ą; šis — kiekvienam flow'ui atskirai (izoliacijos vartai).
+    void note_lateness(std::uint64_t t, std::uint64_t t_index, double warm) {
+        if (static_cast<double>(t) < warm || t < t_index) return;
+        std::uint64_t& m = c["lateness_max_us"];
+        m = std::max<std::uint64_t>(m, (t - t_index) / 1000);
+    }
 };
 
 struct Stats {

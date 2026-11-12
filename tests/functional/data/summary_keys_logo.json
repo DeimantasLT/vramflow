@@ -31,7 +31,8 @@
   "proc": [],
   "hist": [],
   "flows": [
-   "fields_ok"
+   "fields_ok",
+   "lateness_max_us"
   ]
  }
 }
