@@ -35,6 +35,7 @@
   "flows": [
    "fields_ok",
    "lateness_max_us",
+   "lateness_s",
    "output_errors"
   ]
  }

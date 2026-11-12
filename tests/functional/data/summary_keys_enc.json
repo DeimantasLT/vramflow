@@ -42,7 +42,8 @@
   "proc": [],
   "hist": [],
   "flows": [
-   "frames_queued"
+   "frames_queued",
+   "lateness_s"
   ]
  }
 }

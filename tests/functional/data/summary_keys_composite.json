@@ -36,6 +36,7 @@
    "lapped",
    "late_skips",
    "lateness_max_us",
+   "lateness_s",
    "output_errors",
    "reopen_mismatch"
   ]
