@@ -188,7 +188,7 @@ struct LogoFn final : engine::TickFunction {
     void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext& ctx) override {
         if (!ctx.skip_is_loss()) return;
         const mxlRational r = mxl_rate(o.fmt.grain_rate());
-        for (engine::Index i = from; i < to; ++i) ++st.flows[unit].loss_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+        for (engine::Index i = from; i < to; ++i) st.flows[unit].loss_s.add(mxlIndexToTimestamp(&r, i) / 1'000'000'000);
     }
 
     void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
@@ -253,6 +253,7 @@ int run_logo(const Opts& o_in) {
     Opts o = o_in;  // load_logo gali nustatyti numatytąją logotipo vietą
     Stats st;
     st.flows.resize(o.flows);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     auto finish = [&](int rc) {
         st.exit_code = rc;

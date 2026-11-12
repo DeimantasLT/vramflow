@@ -37,6 +37,8 @@ void common(CLI::App* c, Opts& o) {
                   "auto (numatyta): griežtas, kai --duration > 0 (praradimas → exit 4, sugedęs vienetas → 2), tarnyboje — "
                   "tvarkingas sustabdymas → 0 | on | off")
         ->check(CLI::IsMember({"auto", "on", "off"}));
+    c->add_option("--lateness-seconds", o.seconds_kept, "santraukos sekundžių eilių (lateness_s, loss_s) gylis — paskutinės N s (numatyta 3600)")
+        ->check(CLI::Range(1u, 1000000u));
     c->add_option("--drain-ms", o.drain_ms, "sustabdant: eilių išleidimo riba, ms (numatyta 500; antras signalas — iškart)");
     c->add_option("--rt-priority", o.rt_priority, "variklio gijai SCHED_FIFO prioritetas 1…99 (0 — ne; numatyta)")
         ->check(CLI::Range(0, 99));

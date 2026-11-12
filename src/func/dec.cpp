@@ -195,6 +195,7 @@ out:
 int run_dec(const Opts& o) {
     Stats st;
     st.flows.resize(o.flows);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     std::vector<std::unique_ptr<DecStream>> ds;
     AVBufferRef* hw = nullptr;

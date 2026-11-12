@@ -349,6 +349,7 @@ out:
 int run_enc(const Opts& o) {
     Stats st;
     st.flows.resize(o.flows);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     const bool nvenc = o.encoder == "nvenc";
     Ctx cx;
@@ -669,7 +670,7 @@ int run_enc(const Opts& o) {
             if (!ctx.skip_is_loss()) return;
             const mxlRational r = mxl_rate(o.fmt.grain_rate());
             for (engine::Index i = from; i < to; ++i)
-                if (i % gpf == gpf - 1) ++st.flows[unit].loss_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+                if (i % gpf == gpf - 1) st.flows[unit].loss_s.add(mxlIndexToTimestamp(&r, i) / 1'000'000'000);
         }
 
         void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {

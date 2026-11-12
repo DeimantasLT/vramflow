@@ -163,8 +163,7 @@ struct GenFn final : engine::TickFunction {
         if (static_cast<double>(t_done) >= warm) {
             st.add_hist("gen_ms", t_done - t_wake);
             st.add_hist("commit_lateness", late);
-            std::uint64_t& m = st.commit_lateness_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
-            m = std::max<std::uint64_t>(m, late / 1000);
+            st.commit_lateness_s.max(mxlIndexToTimestamp(&r, i) / 1'000'000'000, late / 1000);
         }
         // Vėlesnis nei --deadline-ms commit'as: vartotojai su tokia riba šio indekso nesulaukia. Skaitiklis (visam
         // paleidimui, ne tik po warmup) ir eilutė su TAI laiku — izoliacijos testai priskiria praradimus aukštupiui.
@@ -182,6 +181,7 @@ struct GenFn final : engine::TickFunction {
 int run_gen(const Opts& o) {
     Stats st;
     st.flows.resize(o.flows);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     const bool cpu = o.impl == "cpu";                 // C: CPU turinys į host flow, CUDA nekuriamas
     const bool host_gpu = !cpu && o.storage == "host";  // H: GPU turinys → D2H į host flow

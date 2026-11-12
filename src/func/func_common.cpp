@@ -140,7 +140,8 @@ std::string hist_json(const Histogram& h) {
                   h.quantile(0.5) / 1e6, h.quantile(0.99) / 1e6, h.quantile(0.999) / 1e6, h.max() / 1e6);
     return b;
 }
-std::string map_json(const std::map<std::string, std::uint64_t>& m) {
+template <class Map>
+std::string map_json(const Map& m) {
     std::string j = "{";
     bool first = true;
     for (const auto& [k, v] : m) {
@@ -151,12 +152,12 @@ std::string map_json(const std::map<std::string, std::uint64_t>& m) {
     return j + "}";
 }
 // [[sekundė, reikšmė], …] — lateness_s / commit_lateness_s (µs), loss_s (skaičius)
-std::string seconds_json(const std::map<std::uint64_t, std::uint64_t>& m) {
+std::string seconds_json(const SecondRing& m) {
     std::string j = "[";
-    for (const auto& [k, v] : m) {
+    m.for_each([&](std::uint64_t k, std::uint64_t v) {
         if (j.size() > 1) j += ",";
         j += "[" + std::to_string(k) + "," + std::to_string(v) + "]";
-    }
+    });
     return j + "]";
 }
 }  // namespace

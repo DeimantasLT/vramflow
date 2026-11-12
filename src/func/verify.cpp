@@ -286,6 +286,7 @@ int run_verify(const Opts& o_in) {
     Opts o = o_in;  // load_logo gali nustatyti numatytąją logotipo vietą
     Stats st;
     st.flows.resize(o.flows);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     auto finish = [&](int rc) {
         st.exit_code = rc;

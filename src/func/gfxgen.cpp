@@ -184,6 +184,7 @@ int run_gfxgen(const Opts& o) {
     Stats st;
     const std::uint32_t K = o.layers, N = o.flows, total = N * K;
     st.flows.resize(total);
+    st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     auto finish = [&](int rc, const std::string& extra = {}) {
         st.exit_code = rc;

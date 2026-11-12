@@ -10,10 +10,12 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
 #include "common/histogram.hpp"
+#include "common/second_ring.hpp"
 #include "func/flows.hpp"
 #include "func/thread_pool.hpp"
 #include "common/format.hpp"
@@ -44,6 +46,9 @@ struct Opts {
     // Exit kodas (D8): auto — griežtas, kai --duration > 0 (bet kuris praradimas → 4, sugedęs vienetas → 2), švelnus tarnybos
     // režime (tvarkingas sustabdymas → 0; praradimai — tik santraukoje / statistikoje); on / off — priverstinai.
     std::string strict_exit = "auto";
+    // Sekundžių eilių (lateness_s, loss_s, commit_lateness_s) gylis: paskutinės N sekundžių (žiedas; tarnybos režime
+    // atmintis nebeauga). Numatyta 3600.
+    std::uint32_t seconds_kept = 3600;
     std::uint32_t drain_ms = 500;  // sustabdant: darbininkų eilių (enc) išleidimo riba; antras signalas — nutraukia iškart
     int rt_priority = 0;           // SCHED_FIFO variklio gijai (0 — ne); be teisių — įspėjimas, darbas tęsiamas
     std::string cpu_affinity;      // variklio gijos CPU sąrašas „0,2-3“ (tuščia — nekeisti)
@@ -134,30 +139,40 @@ struct KeepWarmOpts {
 };
 int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
 
-// Vieno flow'o skaitikliai. Vardai — ataskaitoje.
+// Vieno flow'o skaitikliai. Vardai — ataskaitoje. Tick'o kelyje be alokacijų: raktas (std::string) sukuriamas tik pirmą kartą
+// (std::less<> — paieška pagal const char*, be laikino std::string; anksčiau > 15 simbolių raktas alokuodavo kiekvieną kartą),
+// sekundžių eilės — fiksuoto dydžio žiedai (SecondRing, numatyta paskutinės 3600 s; --lateness-seconds).
 struct FlowStats {
-    std::map<std::string, std::uint64_t> c;
-    void inc(const char* k, std::uint64_t v = 1) { c[k] += v; }
+    std::map<std::string, std::uint64_t, std::less<>> c;
+    std::uint64_t& at(const char* k) {
+        auto it = c.find(std::string_view(k));
+        if (it == c.end()) it = c.emplace(k, 0).first;
+        return it->second;
+    }
+    void inc(const char* k, std::uint64_t v = 1) { at(k) += v; }
     // lateness_max_us: šio flow'o didžiausias commit'o (enc — eilės) vėlavimas nuo T(i), µs, tik po įšilimo (t ≥ warm).
     // Proceso histograma (out_lateness) apima visą tick'ą; šis — kiekvienam flow'ui atskirai (izoliacijos vartai).
     // lateness_s: tas pats maksimumas kiekvienai indekso laiko T(i) sekundei (TAI s → µs) — izoliacijos vartai lygina
     // to paties paleidimo langą prieš gedimą su gedimo langu (savikontrolė, ne atskiras kontrolinis paleidimas).
-    std::map<std::uint64_t, std::uint64_t> lateness_s;
+    SecondRing lateness_s;
     void note_lateness(std::uint64_t t, std::uint64_t t_index, double warm) {
         if (static_cast<double>(t) < warm || t < t_index) return;
         const std::uint64_t us = (t - t_index) / 1000;
-        std::uint64_t& m = c["lateness_max_us"];
+        std::uint64_t& m = at("lateness_max_us");
         m = std::max<std::uint64_t>(m, us);
-        std::uint64_t& s = lateness_s[t_index / 1'000'000'000];
-        s = std::max<std::uint64_t>(s, us);
+        lateness_s.max(t_index / 1'000'000'000, us);
     }
     // loss_s: šio flow'o praradimų (spragų, lap'ų, praleidimų) skaičius kiekvienai indekso laiko T(i) sekundei (TAI s) —
     // izoliacijos vartai lygina funkcijos praradimus GEDIMO LANGE su aukštupio biudžetu tame pačiame lange (ne viso
     // gyvenimo skaitiklius); paleidimo spragos į gedimo langą nepatenka.
-    std::map<std::uint64_t, std::uint64_t> loss_s;
+    SecondRing loss_s;
     void loss(const char* k, std::uint64_t t_index) {
         inc(k);
-        ++loss_s[t_index / 1'000'000'000];
+        loss_s.add(t_index / 1'000'000'000);
+    }
+    void set_seconds(std::size_t n) {
+        lateness_s.set_capacity(n);
+        loss_s.set_capacity(n);
     }
 };
 
@@ -167,13 +182,18 @@ struct Stats {
     std::map<std::string, Histogram> hist;      // ns
     // gen: commit'o vėlavimo maksimumas kiekvienai indekso laiko T(i) sekundei (TAI s → µs; santraukoje
     // commit_lateness_s) — izoliacijos vartams sveiko aukštupio vėlavimą priskirti gedimo langui.
-    std::map<std::uint64_t, std::uint64_t> commit_lateness_s;
+    SecondRing commit_lateness_s;
     std::uint64_t first_index = ~0ull, last_index = 0;
     std::string fatal;
     int exit_code = 0;
     int strict = -1;        // exit_code_for: 1 — griežtas, 0 — švelnus; < 0 — nerašoma (ne variklio funkcija)
     bool any_loss = false;  // exit_code_for: bent vienas praradimas
     void add_hist(const char* k, std::uint64_t ns) { hist[k].add(ns); }
+    // Sekundžių žiedų dydis (--lateness-seconds): kviečiama po flows.resize, prieš run (alokuoja).
+    void set_seconds(std::size_t n) {
+        for (FlowStats& f : flows) f.set_seconds(n);
+        commit_lateness_s.set_capacity(n);
+    }
 };
 
 // Sluoksnių argumentai, bendri gfxgen / composite / verify --mode composite (apibrėžta gfxgen.cpp / composite.cpp).

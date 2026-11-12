@@ -159,7 +159,7 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
     const engine::EngineCounters& e = hub.engine();
     if (scope == SkipScope::Process) st.proc["clock_steps"] = e.clock_steps;  // gen visada turėjo; logo ir kt. — ne (raktų aibė)
     if (e.clock_backward) st.proc["clock_backward"] += e.clock_backward;
-    auto put = [](std::map<std::string, std::uint64_t>& m, const char* k, std::uint64_t v) {
+    auto put = [](auto& m, const char* k, std::uint64_t v) {
         if (v) m[k] += v;
     };
     if (scope == SkipScope::Process) {
