@@ -12,6 +12,10 @@ fiso_stall     — tas pats, bet B sustabdomas (SIGSTOP) 5 s ir tęsiamas (SIGCO
 fiso_composite — gen (N bazių) + gfxgen A (N − 1) + gfxgen B (1 — vieno išėjimo sluoksnio šaltinis) → composite N → verify N;
                  B nužudomas.
 fiso_enc       — gen A (N − 1) + gen B (1) → enc N (+ ts_sink); B nužudomas.
+fiso_enc_audio — gen A (N − 1, video + garsas) + gen Bv (1, tik video) + gen Ba (1, tik garsas — to paties flow'o garsas) →
+                 enc N (+ ts_sink); nužudomas TIK Ba (srautas praranda tik garsą). Sveikiems — kaip fiso_enc (jų
+                 frame_lateness ir late_frames nepakinta); paveiktam — video nenukenčia (frames_encoded kaip sveikų),
+                 audio_underrun_frames > 0. Prieš pataisą garsas buvo skaitomas laukiant variklio gijoje iki T + 30 ms.
 Variantai: C (cpu + host, x264) ir G (gpu + cuda-linear, nvenc); FISO_VARIANTS=C,G, FISO_N=8.
 
 Kiekvienas zondas paleidžiamas du kartus: kontrolinis (be gedimo) ir su gedimu — kitaip tokie patys (ta pati trukmė ir `--warmup`,
@@ -279,18 +283,24 @@ def run_composite(out, tag, impl, storage, fault):
 
 # --- enc -----------------------------------------------------------------------------------------------------------------
 
-def run_enc(out, tag, impl, storage, enc, fault):
-    sub = f"fiso-enc-{tag}-{fault}"
+def run_enc(out, tag, impl, storage, enc, fault, audio_only=False):
+    sub = f"fiso-enc{'a' if audio_only else ''}-{tag}-{fault}"
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     sink_json = pathlib.Path(out) / sub / "sink.json"
     ga = F.FProc(out, f"{sub}/genA", "gen", d, "--flows", N - 1, "--audio", 1, "--duration", RUN_S + 60, *v)
-    gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", N - 1, "--audio", 1, "--duration", RUN_S + 60, *v)
+    gbv = None
+    if audio_only:  # paveiktas srautas: video ir garsas — skirtingi procesai, gedimas — tik garso gamintojui
+        gbv = F.FProc(out, f"{sub}/genBv", "gen", d, "--flows", 1, "--flow-base", N - 1, "--duration", RUN_S + 60, *v)
+        gb = F.FProc(out, f"{sub}/genBa", "gen", d, "--flows", 1, "--flow-base", N - 1, "--video", 0, "--audio", 1,
+                     "--duration", RUN_S + 60, *v)
+    else:
+        gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", N - 1, "--audio", 1, "--duration", RUN_S + 60, *v)
     e = sink = None
     re_ = None
     t_fault = None
     try:
-        if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)]):
+        if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)] + [F.role_flow_id(3, n) for n in range(N)]):
             return {"err": "gen flow'ai neatsirado"}
         sink = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "perf/ts_sink.py"),
                                  "--port-base", str(ENC_PORT), "--flows", str(N), "--seconds", str(RUN_S + 4), "--out",
@@ -304,7 +314,7 @@ def run_enc(out, tag, impl, storage, enc, fault):
     finally:
         if sink is not None and sink.poll() is None:
             sink.kill()
-        stop_all([e, gb, ga])
+        stop_all([e, gb, gbv, ga])
     se = F.vsummary(e, "enc")
     if se is None:
         return {"err": "nėra enc santraukos"}
@@ -437,12 +447,27 @@ def enc_gate(fault, ctrl, r):
     return bad
 
 
+def enc_audio_gate(fault, ctrl, r):
+    """fiso_enc_audio: sveikiems — enc_gate taisyklės (be paveikto missing_frames); paveiktam — video nenukentėjo
+    (frames_encoded ≥ 25 · RUN_S − 1 − biudžetas, video praradimų nėra), audio_underrun_frames > 0."""
+    bad = [b for b in enc_gate(fault, ctrl, r) if not b.startswith("paveikto missing_frames")]
+    fa, budget = r["fn"]["affected"], upstream_budget(r)
+    if not fa.get("audio_underrun_frames", 0):
+        bad.append("paveikto audio_underrun_frames == 0 (garsas nebuvo prarastas?)")
+    if fa.get("frames_encoded", 0) < 25 * RUN_S - 1 - budget:
+        bad.append(f"paveikto video frames_encoded={fa.get('frames_encoded', 0)} < {25 * RUN_S - 1 - budget}")
+    vlost = {k: fa[k] for k in ENC_LOSS if k != "audio_underrun_frames" and fa.get(k)}
+    if sum(vlost.values()) > budget:
+        bad.append(f"paveikto video praradimai {vlost} > {budget}")
+    return bad
+
+
 def probe(out, name, runner, faults):
     """Kiekvienam variantui: kontrolinis (be gedimo) + su gedimu. logo (run_logo) — vartai (logo_gate), kiti — INFO."""
     res = []
     for tag, impl, storage, enc in variants():
         tid = f"{name}[{tag}]"
-        args = (out, tag, impl, storage) + ((enc,) if runner is run_enc else ())
+        args = (out, tag, impl, storage) + ((enc,) if runner in (run_enc, run_enc_audio) else ())
         key = (runner.__name__, tag)
         if key not in _CONTROL:
             _CONTROL[key] = runner(*args, "none")
@@ -459,8 +484,9 @@ def probe(out, name, runner, faults):
                 res.append(F.result(f"{tid}:upstream", "INFO", why=f"sveikas aukštupis (gen A): be gedimo {brief(ctrl.get('upstream'))} | "
                                                                   f"su gedimu {brief(u)}; biudžetas gedimo lange {r.get('budget')} "
                                                                   f"(visam gyvenimui {u.get('late_skips', 0) + u.get('late_commits', 0)})"))
-            if runner in (run_logo, run_composite, run_enc):
-                bad = enc_gate(fault, ctrl, r) if runner is run_enc else logo_gate(fault, ctrl, r)
+            if runner in (run_logo, run_composite, run_enc, run_enc_audio):
+                gate = {run_enc: enc_gate, run_enc_audio: enc_audio_gate}.get(runner, logo_gate)
+                bad = gate(fault, ctrl, r)
                 if r.get("post"):
                     why += f" | po SIGCONT: {r['post']}"
                 res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") + why,
@@ -486,4 +512,13 @@ def fiso_enc(out):
     return probe(out, "fiso_enc", run_enc, ["kill"])
 
 
-TESTS = {"fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite, "fiso_enc": fiso_enc}
+def run_enc_audio(out, tag, impl, storage, enc, fault):
+    return run_enc(out, tag, impl, storage, enc, fault, audio_only=True)
+
+
+def fiso_enc_audio(out):
+    return probe(out, "fiso_enc_audio", run_enc_audio, ["kill"])
+
+
+TESTS = {"fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite, "fiso_enc": fiso_enc,
+         "fiso_enc_audio": fiso_enc_audio}

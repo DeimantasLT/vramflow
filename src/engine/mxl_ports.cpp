@@ -88,6 +88,99 @@ bool MxlVideoInput::lapped(Index j, Index now_idx) {
 
 void MxlVideoInput::detach() { slot_.detach_now(); }
 
+// --- MxlAudioInput --------------------------------------------------------------------------------------------------
+MxlAudioInput::MxlAudioInput(mxlInstance inst, std::string flow_id, AudioFrames frames, mxlFlowReader adopt)
+    : inst_(inst), id_(std::move(flow_id)), fr_(frames), rd_(adopt) {
+    // didžiausias kadras mėginiais (29,97: 1602) — buferiai paruošiami iš anksto (tick'e nealokuojama)
+    const std::uint32_t cap = vramflow::max_samples_per_grain(fr_.frame_rate) + 1;
+    lb_.resize(cap);
+    rb_.resize(cap);
+}
+
+MxlAudioInput::MxlAudioInput(MxlAudioInput&& o) noexcept
+    : inst_(o.inst_), id_(std::move(o.id_)), fr_(o.fr_), rd_(o.rd_), lb_(std::move(o.lb_)), rb_(std::move(o.rb_)), last_(o.last_),
+      n_(o.n_), attaches_(o.attaches_) {
+    o.rd_ = nullptr;
+}
+
+MxlAudioInput::~MxlAudioInput() { detach(); }
+
+bool MxlAudioInput::attach_poll(std::uint64_t) {
+    if (rd_ != nullptr) return true;
+    bool active = false;
+    if (mxlIsFlowActive(inst_, id_.c_str(), &active) != MXL_STATUS_OK || !active) return false;  // tik gyvas rašytojas
+    if (mxlCreateFlowReader(inst_, id_.c_str(), "", &rd_) != MXL_STATUS_OK) {
+        rd_ = nullptr;
+        return false;
+    }
+    ++attaches_;
+    return true;
+}
+
+Index MxlAudioInput::head() {
+    if (rd_ == nullptr) return kNoIndex;
+    mxlFlowRuntimeInfo rt{};
+    if (mxlFlowReaderGetRuntimeInfo(rd_, &rt) != MXL_STATUS_OK || rt.headIndex == MXL_UNDEFINED_INDEX) return kNoIndex;
+    return fr_.last_ready(rt.headIndex);
+}
+
+std::uint64_t MxlAudioInput::last_write_tai() {
+    if (rd_ == nullptr) return 0;
+    mxlFlowRuntimeInfo rt{};
+    return mxlFlowReaderGetRuntimeInfo(rd_, &rt) == MXL_STATUS_OK ? rt.lastWriteTime : 0;
+}
+
+Probe MxlAudioInput::get(Index j, std::uint64_t timeout_ns, GrainRef& out) {
+    out = GrainRef{};
+    if (rd_ == nullptr) return Probe::Gone;
+    const std::uint64_t end = fr_.end(j);
+    const std::uint32_t count = fr_.count(j);
+    if (count > lb_.size()) return Probe::Error;
+    mxlWrappedMultiBufferSlice sl{};
+    const mxlStatus st = timeout_ns == 0 ? mxlFlowReaderGetSamplesNonBlocking(rd_, end, count, &sl)
+                                         : mxlFlowReaderGetSamples(rd_, end, count, timeout_ns, &sl);
+    switch (st) {
+        case MXL_STATUS_OK: break;
+        case MXL_ERR_OUT_OF_RANGE_TOO_EARLY:
+        case MXL_ERR_TIMEOUT: return Probe::NotYet;
+        case MXL_ERR_OUT_OF_RANGE_TOO_LATE: return Probe::TooLate;
+        case MXL_ERR_FLOW_INVALID:
+        case MXL_ERR_FLOW_NOT_FOUND: return Probe::Gone;
+        default: return Probe::Error;
+    }
+    if (sl.count < 2) return Probe::Error;  // stereo (gen audio_def)
+    std::size_t off = 0;
+    for (int f = 0; f < 2; ++f) {  // žiedo dvi dalys (fragmentai)
+        const auto& frag = sl.base.fragments[f];
+        const std::size_t n = frag.size / sizeof(float);
+        if (off + n > count) return Probe::Error;
+        if (n) {
+            std::memcpy(lb_.data() + off, frag.pointer, n * sizeof(float));
+            std::memcpy(rb_.data() + off, static_cast<const std::uint8_t*>(frag.pointer) + sl.stride, n * sizeof(float));
+        }
+        off += n;
+    }
+    if (off != count) return Probe::Error;
+    last_ = j;
+    n_ = count;
+    out.ptr = lb_.data();
+    return Probe::Ready;
+}
+
+Probe MxlAudioInput::probe(Index j, GrainRef& out) { return get(j, 0, out); }
+
+Probe MxlAudioInput::wait(Index j, std::uint64_t timeout_ns, GrainRef& out) { return get(j, std::max<std::uint64_t>(1, timeout_ns), out); }
+
+bool MxlAudioInput::writer_alive() {
+    bool active = false;
+    return mxlIsFlowActive(inst_, id_.c_str(), &active) == MXL_STATUS_OK && active;
+}
+
+void MxlAudioInput::detach() {
+    if (rd_ != nullptr) mxlReleaseFlowReader(inst_, rd_);
+    rd_ = nullptr;
+}
+
 // --- MxlVideoOutput -------------------------------------------------------------------------------------------------
 GrainCopy host_copy() {
     return [](void* dst, const void* src, std::size_t n) {

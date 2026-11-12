@@ -6,10 +6,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
+#include "engine/audio_frames.hpp"
 #include "fakes.hpp"
 
 using namespace mxlv::engine;
@@ -151,4 +153,79 @@ TEST_CASE("review3: any_loss — laikrodžio spragos ir šaltinio „nėra turin
         const RunResult res = r.run();
         CHECK(res.any_loss);
     }
+}
+
+namespace {
+// Įrašo kiekvieno Ready vieneto Wanted (antrojo) įėjimo GrainRef end_unit metu; apdorojimas „trunka“ proc_ns virtualaus laiko.
+struct WantedProbeFn final : TickFunction {
+    VirtualClock& clk;
+    std::int64_t proc_ns;
+    std::map<Index, bool> audio_at_end;  // indeksas → ar end_unit matė garso grain'ą
+    std::function<void(Index)> on_end;
+    WantedProbeFn(VirtualClock& c, std::int64_t p) : clk(c), proc_ns(p) {}
+    bool process(const Batch&, TickContext&) override {
+        clk.advance(static_cast<std::uint64_t>(proc_ns));
+        return true;
+    }
+    void end_unit(const UnitTick& u, Outcome o, TickContext&) override {
+        if (o == Outcome::Ready && u.in.size() == 3) audio_at_end[u.index] = u.in[2].ptr != nullptr;
+    }
+    void end_tick(Index i, TickContext&) override {
+        if (on_end) on_end(i);
+    }
+};
+}  // namespace
+
+TEST_CASE("review3: Wanted grain'as, atėjęs apdorojimo metu, pasiekia end_unit ir nėra lost", "[engine][review3][wanted]") {
+    // enc forma: video (2 grain'ai, Required) + garsas (Wanted), stride 2. Garsas indeksui 1031 ateina T + 6 ms (po a = T + 5,5),
+    // apdorojimas trunka 1 ms (A paleidžiama ties a, baigiama T + 6,5) → po apdorojimo garsas jau yra.
+    VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    ScriptedInput video(clk), audio(clk);
+    audio.arrival = [](Index j) { return j == 1031 ? std::int64_t{6'000'000} : std::int64_t{1'300'000}; };
+    WantedProbeFn fn(clk, 1'000'000);
+    fn.on_end = [&](Index i) {
+        if (i >= 1041) stop = true;
+    };
+    TickEngine eng(Rig::test_config(), clk, hub, stop);
+    UnitSpec s;
+    s.name = "enc";
+    s.in.push_back(InputSpec{&video, {}, 2, Need::Required, InMode::Exact});
+    s.in.push_back(InputSpec{&audio, {}, 1, Need::Wanted, InMode::Exact});
+    s.stride = 2;
+    s.residue = 1;
+    std::uint32_t id = 0;
+    std::string why;
+    REQUIRE(eng.add_unit(s, id, why));
+    const RunResult res = eng.run(fn);
+    REQUIRE(fn.audio_at_end.count(1031) == 1);
+    CHECK(fn.audio_at_end.at(1031));
+    CHECK(fn.audio_at_end.at(1033));
+    const InCounters& a = hub.in(eng.in_id(0, 1));
+    CHECK(a.lost == 0);
+    CHECK(a.late == 1);  // po a(c) — vėlus, bet ne prarastas
+    CHECK_FALSE(res.any_loss);
+}
+
+TEST_CASE("review3: AudioFrames — kadro mėginiai ir head atvaizdavimas", "[engine][review3][audio]") {
+    const AudioFrames i50{{25, 1}, 2};
+    CHECK(i50.end(1) == 1920);  // kadras 0 — laukai 0, 1
+    CHECK(i50.count(1) == 1920);
+    CHECK(i50.end(2001) == 1001 * 1920);
+    CHECK(i50.last_ready(1919) == kNoIndex);
+    CHECK(i50.last_ready(1920) == 1);
+    CHECK(i50.last_ready(1001 * 1920) == 2001);
+    CHECK(i50.last_ready(1001 * 1920 + 1919) == 2001);
+    CHECK(i50.last_ready(1002 * 1920) == 2003);
+    const AudioFrames p2997{{30000, 1001}, 1};  // 1601 / 1602 mėginių kadrui
+    std::uint64_t total = 0;
+    for (Index j = 0; j < 5; ++j) total += p2997.count(j);
+    CHECK(total == 8008);  // 5 kadrai 29,97 Hz = 8008 mėginiai tiksliai
+    for (Index j = 1; j < 3000; j += 7) {
+        CHECK(p2997.last_ready(p2997.end(j)) == j);
+        CHECK(p2997.last_ready(p2997.end(j) - 1) == j - 1);
+    }
+    const std::uint64_t big = 1'000'000'007ull * 1920;  // ilgas TAI: be slankaus kablelio paklaidos
+    CHECK(i50.last_ready(big) == 1'000'000'006ull * 2 + 1);
 }

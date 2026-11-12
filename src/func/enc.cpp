@@ -406,7 +406,7 @@ int run_enc(const Opts& o) {
     for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
     const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
     std::vector<AudioIn> ain(o.audio ? o.flows : 0);
-    std::vector<std::uint64_t> audio_reopen_at(ain.size(), 0), seen_reattach(o.flows, 0);
+    std::vector<std::uint64_t> seen_reattach(o.flows, 0);
     std::string err;
     int rc = attach_inputs(in_ptr, inst, o, "enc", st.fatal);  // 4 — neatsirado per ribą; kStoppedWaiting — sustabdyta (exit 0)
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
@@ -414,6 +414,16 @@ int run_enc(const Opts& o) {
             if (stop.load()) rc = kStoppedWaiting;
             else { st.fatal = err; rc = kExitInputs; }
         }
+    // Garsas — variklio Wanted įėjimas (MxlAudioInput): laukiamas tik iki a(i), vieneto klasės nelemia, variklio gijos
+    // niekada nemigdo (anksčiau read_audio(wait) laukdavo iki T + --deadline-ms — vienas srautas be garso vėlindavo visus).
+    // Pradinis laukimas — kaip anksčiau (AudioIn::open pagal --input-wait-ms); reader'is perduodamas prievadui.
+    const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};
+    std::vector<engine::MxlAudioInput> ports_audio;
+    ports_audio.reserve(ain.size());
+    for (std::uint32_t n = 0; n < ain.size(); ++n) {
+        ports_audio.emplace_back(inst, flow_id(kRoleAudio, o.flow_base + n), afr, ain[n].r);
+        ain[n].r = nullptr;
+    }
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
@@ -447,24 +457,30 @@ int run_enc(const Opts& o) {
     const double warm = warm_tai_after(o.warmup_s);
     const std::uint64_t test_drop_from = now_tai() + static_cast<std::uint64_t>(o.test_drop_after_s * 1e9);
     std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
-    // Kadro F garsas į item.l / item.r (true — perskaitytas). wait — kartoti iki termino: gen garsą rašo iškart po video
-    // commit'o (trumpas pakartojimas — ne underrun dėl lenktynių).
-    auto read_audio = [&](std::uint32_t n, Item& item, std::uint64_t deadline, bool wait) {
-        // kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602
-        const std::uint64_t a_end = vramflow::sample_begin(o.fmt.frame_rate, F + 1);
-        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(o.fmt.frame_rate, F));
+    // Kadro (vieneto indeksas i_bot) garsas į item.l / item.r (true — yra). Niekada nelaukia. engine — variklio Wanted
+    // įėjimo rezultatas šiam indeksui (nullptr — nesulaukta iki a(i) ir po apdorojimo); be jo (kadras atmestas) — vienas
+    // neblokuojantis bandymas. Kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602.
+    auto take_audio = [&](std::uint32_t n, engine::Index i_bot, Item& item, const engine::GrainRef* engine_ref) {
+        engine::MxlAudioInput& p = ports_audio[n];
+        bool have = false;
+        if (engine_ref != nullptr) {
+            have = engine_ref->ptr != nullptr && p.last() == i_bot;
+        } else {
+            engine::GrainRef g;
+            have = p.probe(i_bot, g) == engine::Probe::Ready;
+        }
+        const std::uint32_t a_count = afr.count(i_bot);
         item.l = std::move(al[n]);
         item.r = std::move(ar[n]);
         item.l.resize(a_count);
         item.r.resize(a_count);
-        mxlStatus as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
-        while (wait && as != MXL_STATUS_OK && now_tai() < deadline && !stop.load()) {
-            mxlSleepForNs(500'000);
-            as = ain[n].read(a_end, a_count, item.l.data(), item.r.data());
+        if (have) {
+            std::copy(p.left(), p.left() + a_count, item.l.begin());
+            std::copy(p.right(), p.right() + a_count, item.r.begin());
         }
         al[n].clear();
         ar[n].clear();
-        return as == MXL_STATUS_OK;
+        return have;
     };
     // Kadro video atmestas — jo garsas vis tiek koduojamas (radinys 2: kitaip garso laiko juosta trumpėja ir lūpų
     // sinchronas slenka). Garso neperskaičius ar eilei perpildžius — praleidžiama: darbininkas spragą užpildys tyla.
@@ -480,24 +496,23 @@ int run_enc(const Opts& o) {
         s.cv.notify_one();
         st.flows[n].inc("audio_only_frames");
     };
-    auto audio_of_dropped = [&](std::uint32_t n) {
-        if (ain.empty()) return;
+    auto audio_of_dropped = [&](std::uint32_t n, engine::Index i_bot) {
+        if (ports_audio.empty()) return;
         Item item;
-        item.frame = static_cast<std::int64_t>(F);
-        if (read_audio(n, item, 0, false)) push_audio_only(n, std::move(item));
+        item.frame = static_cast<std::int64_t>(i_bot / gpf);
+        if (take_audio(n, i_bot, item, nullptr)) push_audio_only(n, std::move(item));
     };
 
     // Bendras tick variklis (planas V12): N sink vienetų — video įėjimas (grains = laukų kadre, stride = gpf, tick'as
     // ties apatiniu lauku), išėjimų nėra; process — weave visiems paruoštiems vienu batch'u, end_unit — Item į darbininko
-    // eilę (arba tik garsas, kai kadras atmestas). Garsas skaitomas kaip anksčiau (AudioIn, laukiama iki termino).
+    // eilę (arba tik garsas, kai kadras atmestas). Garsas — Wanted įėjimas (ports_audio), UnitTick.in[gpf].
     struct EncFn final : engine::TickFunction {
         const Opts& o;
         Stats& st;
         const engine::StatsHub& hub;
         const engine::TickEngine* eng = nullptr;
         std::vector<runtime::InputSlot>& in;
-        std::vector<AudioIn>& ain;
-        std::vector<std::uint64_t>& audio_reopen_at;
+        std::vector<engine::MxlAudioInput>& ports_audio;
         std::vector<std::uint64_t>& seen_reattach;
         std::vector<std::unique_ptr<Stream>>& streams;
         Ctx& cx;
@@ -512,9 +527,9 @@ int run_enc(const Opts& o) {
         std::uint64_t test_drop_from;
         std::uint64_t& F;
         const std::atomic<bool>& stop;
-        std::function<bool(std::uint32_t, Item&, std::uint64_t, bool)> read_audio;
+        std::function<bool(std::uint32_t, engine::Index, Item&, const engine::GrainRef*)> take_audio;
         std::function<void(std::uint32_t, Item&&)> push_audio_only;
-        std::function<void(std::uint32_t)> audio_of_dropped;
+        std::function<void(std::uint32_t, engine::Index)> audio_of_dropped;
         std::vector<media::WeaveJob> jobs;
         std::vector<std::uint32_t> job_flow;
         std::vector<AVFrame*> frame_of;           // vieneto kadras (nvenc) po process
@@ -523,11 +538,11 @@ int run_enc(const Opts& o) {
         std::vector<engine::InCounters> seen;
         std::uint64_t t_ready = 0, t_done = 0;
 
-        EncFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, std::vector<runtime::InputSlot>& in_, std::vector<AudioIn>& ain_,
-              std::vector<std::uint64_t>& aro_, std::vector<std::uint64_t>& sr_, std::vector<std::unique_ptr<Stream>>& streams_, Ctx& cx_,
+        EncFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, std::vector<runtime::InputSlot>& in_,
+              std::vector<engine::MxlAudioInput>& pa_, std::vector<std::uint64_t>& sr_, std::vector<std::unique_ptr<Stream>>& streams_, Ctx& cx_,
               mxlInstance inst_, bool cpu_, bool nvenc_, bool inter_, media::Dim dim_, std::size_t nv12_, std::size_t ysz_, std::uint64_t gpf_,
               ThreadPool& pool_, cudaStream_t stream_, double warm_, std::uint64_t tdf_, std::uint64_t& F_, const std::atomic<bool>& stop_)
-            : o(o_), st(st_), hub(hub_), in(in_), ain(ain_), audio_reopen_at(aro_), seen_reattach(sr_), streams(streams_), cx(cx_), inst(inst_),
+            : o(o_), st(st_), hub(hub_), in(in_), ports_audio(pa_), seen_reattach(sr_), streams(streams_), cx(cx_), inst(inst_),
               cpu(cpu_), nvenc(nvenc_), inter(inter_), dim(dim_), nv12(nv12_), ysz(ysz_), gpf(gpf_), pool(pool_), stream(stream_), warm(warm_),
               test_drop_from(tdf_), F(F_), stop(stop_), frame_of(o_.flows, nullptr), buf_of(o_.flows, nullptr), alloc_failed(o_.flows, 0),
               seen(o_.flows) {
@@ -535,28 +550,16 @@ int run_enc(const Opts& o) {
             job_flow.reserve(o.flows);
         }
 
-        std::uint64_t deadline_of(engine::Index i_bot) const {
-            const mxlRational r = mxl_rate(o.fmt.grain_rate());
-            return mxlIndexToTimestamp(&r, i_bot) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
-        }
-
         void begin_tick(engine::Index i, engine::TickContext&) override {
             if (i % gpf != gpf - 1) return;
             F = i / gpf;
-            // [§P6] po video re-attach — ir garso reader'is
-            for (std::uint32_t n = 0; n < ain.size(); ++n) {
+            // [§P6] po video re-attach (tas pats gamintojas paleistas iš naujo) — ir garso reader'is: prievadas atjungiamas,
+            // variklis jį mato kaip Gone ir prijungia prie naujo flow'o (attach_poll, kas 100 ms)
+            for (std::uint32_t n = 0; n < ports_audio.size(); ++n)
                 if (in[n].reattached() != seen_reattach[n]) {
                     seen_reattach[n] = in[n].reattached();
-                    ain[n].release(inst);
-                    audio_reopen_at[n] = 0;
+                    ports_audio[n].detach();
                 }
-                if (!ain[n].r && now_tai() >= audio_reopen_at[n]) {
-                    audio_reopen_at[n] = now_tai() + runtime::InputSlot::kRetryNs;
-                    std::string e;
-                    if (ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), runtime::OpenPolicy{0, 0}, stop, e))
-                        st.flows[n].inc("audio_reattached");
-                }
-            }
         }
 
         bool process(const engine::Batch& b, engine::TickContext& ctx) override {
@@ -657,21 +660,21 @@ int run_enc(const Opts& o) {
                 case engine::Outcome::Lapped:
                     fs.inc("lapped");
                     release_unit(n);
-                    audio_of_dropped(n);
+                    audio_of_dropped(n, ut.index);
                     return;
-                case engine::Outcome::GapBlocked: fs.inc("missing_frames"); audio_of_dropped(n); return;
-                case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n); return;
-                case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n); return;
-                case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n); return;  // sink: neturėtų būti
-                case engine::Outcome::GapNoContent: audio_of_dropped(n); return;
+                case engine::Outcome::GapBlocked: fs.inc("missing_frames"); audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti
+                case engine::Outcome::GapNoContent: audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapLate:
                     fs.inc(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames");
-                    audio_of_dropped(n);
+                    audio_of_dropped(n, ut.index);
                     return;
             }
             if (alloc_failed[n]) {
                 fs.inc("frame_alloc_errors");
-                audio_of_dropped(n);
+                audio_of_dropped(n, ut.index);
                 return;
             }
             AVFrame* f = frame_of[n];
@@ -679,7 +682,7 @@ int run_enc(const Opts& o) {
             if (!nvenc) {
                 if (!buf_of[n]) {
                     fs.inc("frames_dropped_queue");
-                    audio_of_dropped(n);
+                    audio_of_dropped(n, ut.index);
                     return;
                 }
                 f = wrap_pinned(cx, *streams[n], buf_of[n]);
@@ -690,7 +693,7 @@ int run_enc(const Opts& o) {
             item.video = f;
             item.frame = static_cast<std::int64_t>(F);
             item.t_ready = t_ready;
-            if (!ain.empty() && !read_audio(n, item, deadline_of(ut.index), true)) {
+            if (!ports_audio.empty() && !take_audio(n, ut.index, item, ut.in.size() > gpf ? &ut.in[gpf] : nullptr)) {
                 fs.inc("audio_underrun_frames");
                 std::fill(item.l.begin(), item.l.end(), 0.f);
                 std::fill(item.r.begin(), item.r.end(), 0.f);
@@ -734,15 +737,17 @@ int run_enc(const Opts& o) {
         engine::UnitSpec u;
         u.name = flow_id(o.in_role, o.flow_base + n);
         u.in.push_back(engine::InputSpec{&ports_in[n], {}, static_cast<std::uint8_t>(gpf), engine::Need::Required, engine::InMode::Exact});
+        if (n < ports_audio.size())  // garsas: Wanted — vieneto klasės nelemia, laukiamas tik iki a(i)
+            u.in.push_back(engine::InputSpec{&ports_audio[n], {}, 1, engine::Need::Wanted, engine::InMode::Exact});
         u.stride = static_cast<std::uint32_t>(gpf);
         u.residue = static_cast<std::uint32_t>(gpf - 1);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
     }
-    EncFn fn(o, st, hub, in, ain, audio_reopen_at, seen_reattach, streams, cx, inst, cpu, nvenc, inter, dim, nv12, ysz, gpf, pool, stream,
+    EncFn fn(o, st, hub, in, ports_audio, seen_reattach, streams, cx, inst, cpu, nvenc, inter, dim, nv12, ysz, gpf, pool, stream,
              warm, test_drop_from, F, stop);
     fn.eng = &eng;
-    fn.read_audio = read_audio;
+    fn.take_audio = take_audio;
     fn.push_audio_only = push_audio_only;
     fn.audio_of_dropped = audio_of_dropped;
     bool engine_loss = false;
@@ -794,6 +799,10 @@ int run_enc(const Opts& o) {
     for (std::uint32_t n = 0; n < o.flows; ++n) {
         st.flows[n].c["reattached"] = in[n].reattached();
         in[n].release();
+    }
+    for (std::uint32_t n = 0; n < ports_audio.size(); ++n) {
+        if (ports_audio[n].attaches() > 0) st.flows[n].inc("audio_reattached", ports_audio[n].attaches());  // prisijungimai po starto
+        ports_audio[n].detach();
     }
     for (auto& a : ain) a.release(inst);
     mxlDestroyInstance(inst);

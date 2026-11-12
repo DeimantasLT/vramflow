@@ -480,6 +480,16 @@ struct TickEngine::Impl {
             end_fatal(EndReason::Fatal, 2, "TickFunction::process grąžino false");
             return;
         }
+        // Wanted įėjimai, nesulaukti paleidimo metu: vienas neblokuojantis bandymas po apdorojimo (dar prieš apskaitą ir
+        // end_unit). Grain'as, atėjęs kol funkcija apdorojo (enc: garsas iškart po video), pasiekia end_unit per tą patį
+        // UnitTick::in ir skaičiuojamas ok / late, ne lost. Laukimo nėra — Wanted vis tiek laukiama tik iki a(c).
+        for (const UnitTick& ut : batch) {
+            Unit& u = units[ut.unit];
+            for (std::uint32_t k = 0; k < u.nin; ++k) {
+                In& in = ins[u.in0 + k];
+                if (in.spec.need == Need::Wanted && !in.done && in.st.live()) try_resolve(u, in);
+            }
+        }
         const Index now_idx = due_index(clk.now_tai(), cfg.cuts);
         const std::int64_t done_at = now();
         for (const UnitTick& ut : batch) {

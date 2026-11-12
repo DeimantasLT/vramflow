@@ -13,8 +13,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
+#include "engine/audio_frames.hpp"
 #include "engine/clock.hpp"
 #include "engine/ports.hpp"
 #include "func/flows.hpp"
@@ -49,6 +51,51 @@ private:
     Probe get(Index j, std::uint64_t timeout_ns, GrainRef& out);
     runtime::InputSlot& slot_;
     mxlInstance inst_;
+};
+
+// Garso (tęstinio flow'o, 2 kanalai float) įėjimas (planas §5 MxlAudioInput): vieneto indekso j kadro mėginiai
+// (AudioFrames) nukopijuojami į prievado buferius left() / right() (galioja iki kito probe / wait); GrainRef.ptr — left().
+// head() — paskutinis kadras, kurio garsas visas (runtime info — bendra atmintis, be sisteminio kvietimo); wait —
+// blokuojantis mxlFlowReaderGetSamples (futex). Prisijungimas — tik prie flow'o su gyvu rašytoju (mxlIsFlowActive); be
+// reader'io probe — Gone (variklis atjungia ir vėl bando kas 100 ms). Lap'o nėra (mėginiai nukopijuoti probe metu).
+class MxlAudioInput final : public InputPort {
+public:
+    MxlAudioInput(mxlInstance inst, std::string flow_id, AudioFrames frames, mxlFlowReader adopt = nullptr);
+    ~MxlAudioInput() override;
+    MxlAudioInput(const MxlAudioInput&) = delete;
+    MxlAudioInput& operator=(const MxlAudioInput&) = delete;
+    MxlAudioInput(MxlAudioInput&&) noexcept;
+    MxlAudioInput& operator=(MxlAudioInput&&) = delete;
+
+    bool attach_poll(std::uint64_t now_tai) override;
+    bool mismatch(std::string&) const override { return false; }
+    Index head() override;
+    std::uint64_t last_write_tai() override;
+    Probe probe(Index j, GrainRef& out) override;
+    Probe wait(Index j, std::uint64_t timeout_ns, GrainRef& out) override;
+    bool writer_alive() override;
+    bool lapped(Index, Index) override { return false; }
+    void detach() override;
+    void retarget(const FlowRef&) override {}
+
+    // Paskutinio sėkmingo probe / wait indeksas ir jo mėginiai (count() kiekvienam kanalui).
+    Index last() const { return last_; }
+    const float* left() const { return lb_.data(); }
+    const float* right() const { return rb_.data(); }
+    std::uint32_t count() const { return n_; }
+    std::uint64_t attaches() const { return attaches_; }
+    bool attached() const { return rd_ != nullptr; }
+
+private:
+    Probe get(Index j, std::uint64_t timeout_ns, GrainRef& out);
+    mxlInstance inst_;
+    std::string id_;
+    AudioFrames fr_;
+    mxlFlowReader rd_ = nullptr;
+    std::vector<float> lb_, rb_;
+    Index last_ = kNoIndex;
+    std::uint32_t n_ = 0;
+    std::uint64_t attaches_ = 0;
 };
 
 // Kopija į grain'o slot'ą: host — memcpy; cuda-linear — D2D į funkcijos stream'ą (tada flush — to stream'o sync).
