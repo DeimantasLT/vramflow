@@ -76,6 +76,8 @@ if(MXLV_BUILD_TESTS)
   endif()
   # scripts/linux/lib/tools.sh ir scripts/wsl/ nukreipimai (GPU nereikia)
   add_test(NAME scripts_tools COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/test_tools.sh ${CMAKE_SOURCE_DIR})
+  # Vienas ritmo ciklas (planas V16): funkcijos ir libvramflow-gfx be savo wait_until / mxlSleepForNs ciklų
+  add_test(NAME arch_single_loop COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/check_single_loop.sh ${CMAKE_SOURCE_DIR})
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
   add_executable(vramflow-v210a-gpu-tests tests/gpu/test_v210a_cuda_linear.cpp)

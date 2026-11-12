@@ -42,10 +42,9 @@ constexpr std::uint32_t kAudioPerField = 960;  // 48000 / 50
 constexpr mxlRational mxl_rate(vramflow::Rational r) { return mxlRational{r.num, r.den}; }
 
 // Laukia iki indekso laiko + offset pagal grain'o dažnį `rate` (niekada ne anksčiau; laikrodžio šuolis atgal → laukiam).
-// true — buvo šuolis (laukti liko daugiau nei 2 grain'ai).
+// true — buvo šuolis (laukti liko daugiau nei 2 grain'ai). Tik ne-funkcijų kodui (verify, testų kabliukai): funkcijos ir
+// libvramflow-gfx ritmą gauna iš engine::TickEngine (CTest arch_single_loop).
 bool wait_until(mxlRational rate, std::uint64_t index, std::int64_t offset_ns, const std::atomic<bool>& stop);
-// Tas pats 1080i50 ritmu (kFieldRate).
-bool wait_until(std::uint64_t index, std::int64_t offset_ns, const std::atomic<bool>& stop);
 std::uint64_t now_tai();
 
 // Laikrodžio šuolių detektorius: (TAI − monotoninis) pokytis tarp tick'ų > 5 ms = šuolis (WSL2 sinchronizuoja laiką

@@ -203,7 +203,7 @@ int run_gen(const Opts& o) {
             scratch.push_back(p);
         }
     // Bendras tick variklis (planas V8): N šaltinio vienetų (be įėjimų), išėjimas — video flow'as (jei yra), garsas —
-    // end_unit. Laikas — legacy (gen niekada nelaukia įėjimų; ro = 0, kaip anksčiau wait_until(i, 0)).
+    // end_unit. Laikas — legacy (gen niekada nelaukia įėjimų; ro = 0 — commit'as ties T(i), kaip prieš migraciją).
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(vout.size());
     for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);

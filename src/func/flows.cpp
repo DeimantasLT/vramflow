@@ -95,19 +95,16 @@ bool ClockWatch::stepped() {
     return step;
 }
 
-bool wait_until(std::uint64_t index, std::int64_t offset_ns, const std::atomic<bool>& stop) {
-    return wait_until(kFieldRate, index, offset_ns, stop);
-}
-
 bool wait_until(mxlRational rate, std::uint64_t index, std::int64_t offset_ns, const std::atomic<bool>& stop) {
     const std::uint64_t target = mxlIndexToTimestamp(&rate, index) + offset_ns;
     std::uint64_t now = now_tai();
     // > 2 grain'ai iki tikslo — laikrodis šoko atgal (1080i50: 40 ms, kaip anksčiau)
     const std::uint64_t two = 2 * static_cast<std::uint64_t>(mxlv::timing::time_of(1, {rate.numerator, rate.denominator}));
     const bool stepped = target > now && target - now > two;
+    // Absoliutus miegas (A27, M14) ne ilgesniais kaip 50 ms gabalais — kaip engine::SystemClock: santykinis miegas
+    // kiekviename gabale pridėdavo kvietimo vėlavimą prie tikslo.
     while (now < target && !stop.load()) {
-        const std::uint64_t d = target - now;
-        mxlSleepForNs(d < 50'000'000ull ? d : 50'000'000ull);
+        mxlSleepUntil(std::min<std::uint64_t>(target, now + 50'000'000ull));
         now = now_tai();
     }
     return stepped;
