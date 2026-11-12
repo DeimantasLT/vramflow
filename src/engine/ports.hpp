@@ -61,6 +61,9 @@ public:
     // Sugedusio vieneto (K17, K-T11) išėjimas atlaisvinamas: žemupys mato flow dingusį (Gone / Detached), ne amžiną INVALID.
     // Po release() variklis prievado nebekviečia.
     virtual void release() {}
+    // Sugedusio vieneto atkūrimas (D8: bandoma su atidėjimu 1, 2, 4 … ≤ 30 s): išėjimas sukuriamas iš naujo. Kviečia variklio
+    // atkūrimo gija (ne tick'as), kol variklis šio prievado nekviečia. true — vėl veikia (variklis tęsia); false — nepavyko.
+    virtual bool reopen() { return false; }
 };
 
 }  // namespace mxlv::engine

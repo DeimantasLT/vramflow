@@ -45,7 +45,11 @@
 
 #include <algorithm>
 #include <climits>
+#include <condition_variable>
+#include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <thread>
 
 namespace mxlv::engine {
 
@@ -95,6 +99,7 @@ struct TickEngine::Impl {
         std::int64_t ewma = 0;
         bool ewma_set = false, ever = false;
         std::int64_t next_attach = INT64_MIN, next_alive = INT64_MIN;  // monotoninis laikas
+        InState seen = InState::Waiting;  // paskutinė pranešta būsena (įvykiai operatoriui)
         bool done = false, ok = false;  // einamojo vieneto indekso būsena
         std::int64_t ready_at = 0;
         Index observe = kNoIndex;  // vienetas buvo Blocked dėl kito įėjimo — šio grain'as patikrinamas kitame tick'e
@@ -113,8 +118,11 @@ struct TickEngine::Impl {
         std::uint32_t in0 = 0, nin = 0, out0 = 0, nout = 0, g0 = 0, ng = 0, hub = 0;
         Index cur = kNoIndex, join = kNoIndex;
         Stage stage = Stage::None;
-        bool failed = false, no_content = false;
+        bool failed = false, no_content = false, ever_failed = false;
         std::int64_t ready_at = 0;
+        // Atkūrimas (D8): kitas bandymas (monotoninis laikas), dabartinis atidėjimas, paskutinio atsigavimo momentas.
+        std::int64_t retry_at = 0, recovered_at = INT64_MIN;
+        double backoff_s = 0;
     };
     struct Rec {
         Index idx = kNoIndex;
@@ -146,6 +154,13 @@ struct TickEngine::Impl {
     Rec recs[2];
 
     StepDetector sd;
+    // Atkūrimo gija (retry_async): vieneto būsena rst[k] — 0 laukia, 1 paprašyta, 2 vykdoma, 3 pavyko, 4 nepavyko.
+    enum : int { kRetryIdle = 0, kRetryAsked = 1, kRetryRunning = 2, kRetryOk = 3, kRetryFail = 4 };
+    std::unique_ptr<std::atomic<int>[]> rst;
+    std::thread rworker;
+    std::mutex rm;
+    std::condition_variable rcv;
+    bool rquit = false;
     bool step_in_tick = false;
     bool skip_loss = false;  // on_skip metu: praleidimas — praradimas (TickContext::skip_is_loss)
     std::int64_t last_step_mono = INT64_MIN;
@@ -169,6 +184,11 @@ struct TickEngine::Impl {
     }
     // Laukiamas įėjimas: Required ir Wanted (Wanted — iki vieneto paskutinės ribos), kol Live ir neišspręstas.
     static bool waitable(const In& in) { return !in.done && in.spec.need != Need::Optional && in.st.live(); }
+
+    // Įvykis operatoriui (be alokacijų: tekstas — steko buferis).
+    void emit(EventKind k, std::uint32_t id, Index idx, std::int64_t value, const char* text) {
+        hub.event(k, id, clk.now_tai(), idx, value, text);
+    }
 
     void end_fatal(EndReason r, int code, std::string why) {
         if (ended) return;
@@ -298,8 +318,10 @@ struct TickEngine::Impl {
         const std::uint64_t t = clk.now_tai();
         if (hub.due(t)) {
             for (const In& in : ins) hub.set_in_state(in.hub, in.st.state());
-            for (const Unit& u : units)
+            for (const Unit& u : units) {
+                hub.set_unit_failed(u.hub, u.failed);
                 for (std::uint32_t m = 0; m < u.nout; ++m) hub.set_out_enabled(outs[u.out0 + m].hub, !u.failed);
+            }
         }
         hub.end_tick(t);
     }
@@ -536,6 +558,7 @@ struct TickEngine::Impl {
                     if (o.port->commit()) {
                         ++(phase == 0 ? c.ok : c.late);
                         o.gs.on_content(idx, T(idx));
+                        if (o.fail_run != 0) emit(EventKind::OutputRecovered, o.hub, idx, 0, "išėjimas vėl commit'ina");
                         o.fail_run = 0;
                         hub.out_commit(o.hub).add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, done_at - T(idx))));
                     } else {
@@ -562,7 +585,7 @@ struct TickEngine::Impl {
 
     // Išėjimo open / commit klaida: true — cfg.out_fail_fatal kartų iš eilės (ilgalaikė; vienetas sugenda — fail_broken).
     bool out_failed(Out& o) {
-        ++o.fail_run;
+        if (++o.fail_run == 1) emit(EventKind::OutputError, o.hub, ctx_index, 0, "išėjimo open / commit klaida");
         return cfg.out_fail_fatal != 0 && o.fail_run >= cfg.out_fail_fatal && !ended;
     }
     void fail_broken(Unit& u, const Out& o, const char* what) {
@@ -573,9 +596,20 @@ struct TickEngine::Impl {
     // visi vienetai — fatalu (exit 2) su paskutinio priežastimi. Vykdomas vienetas (stage != None) baigiamas OutputError.
     void fail_unit(Unit& u, std::string why) {
         if (u.failed) return;
-        u.failed = true;
+        u.failed = u.ever_failed = true;
         ++failed_n;
+        ++hub.unit(u.hub).failures;
         if (res.failed_why.empty()) res.failed_why = why;
+        // Atkūrimo atidėjimas: pirmas — retry_min_s; sugedęs netrukus (< 60 s) po atsigavimo — dvigubai ilgesnis nei buvęs.
+        const std::int64_t mono = clk.now_mono_raw();
+        if (cfg.retry_min_s > 0) {
+            const bool flap = u.recovered_at != INT64_MIN && mono - u.recovered_at < 60'000'000'000LL && u.backoff_s > 0;
+            u.backoff_s = flap ? std::min(cfg.retry_max_s, 2 * u.backoff_s) : cfg.retry_min_s;
+            u.retry_at = mono + static_cast<std::int64_t>(u.backoff_s * 1e9);
+        }
+        char t[160];
+        std::snprintf(t, sizeof t, "%s; bandymas po %.0f s", why.c_str(), cfg.retry_min_s > 0 ? u.backoff_s : 0.0);
+        emit(EventKind::UnitFailed, u.hub, u.cur, static_cast<std::int64_t>(u.backoff_s * 1000), t);
         for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->release();
         if (u.stage != Stage::None) {
             ++hub.unit(u.hub).gaps;
@@ -584,6 +618,97 @@ struct TickEngine::Impl {
             resolve_unit(u);
         }
         if (failed_n == units.size()) end_fatal(EndReason::Fatal, 2, "visi vienetai sugedo; " + why);
+    }
+
+    // --- atkūrimas (D8) -------------------------------------------------------------------------------------------
+    bool reopen_unit(const Unit& u) {
+        for (std::uint32_t m = 0; m < u.nout; ++m)
+            if (!outs[u.out0 + m].port->reopen()) return false;
+        return true;
+    }
+    void retry_worker() {
+        std::unique_lock<std::mutex> lk(rm);
+        while (!rquit) {
+            rcv.wait_for(lk, std::chrono::milliseconds(50));
+            for (std::size_t k = 0; k < units.size() && !rquit; ++k) {
+                int want = kRetryAsked;
+                if (!rst[k].compare_exchange_strong(want, kRetryRunning)) continue;
+                lk.unlock();
+                const bool ok = reopen_unit(units[k]);
+                rst[k].store(ok ? kRetryOk : kRetryFail, std::memory_order_release);
+                lk.lock();
+            }
+        }
+    }
+    // Tick'o atidarymas: sugedusiems vienetams — atkūrimo bandymas (laikas atėjo), rezultatas (atsigavo / atidėjimas ×2).
+    void service_retries() {
+        if (cfg.retry_min_s <= 0 || failed_n == 0) return;
+        const std::int64_t mono = clk.now_mono_raw();
+        for (std::size_t k = 0; k < units.size(); ++k) {
+            Unit& u = units[k];
+            if (!u.failed) continue;
+            int s = rst[k].load(std::memory_order_acquire);
+            if (s == kRetryIdle && mono >= u.retry_at) {
+                if (cfg.retry_async) {
+                    // gija — tik prireikus (pirmas gedimas): įprastame darbe papildomų gijų nėra (bibliotekos ritmo vykdytojas —
+                    // viena gija visiems rašytojams); kūrimas alokuoja — gedimo kelyje, ne kiekviename tick'e
+                    if (!rworker.joinable()) rworker = std::thread([this] { retry_worker(); });
+                    rst[k].store(kRetryAsked, std::memory_order_release);
+                    rcv.notify_one();
+                    continue;
+                }
+                s = reopen_unit(u) ? kRetryOk : kRetryFail;
+            }
+            if (s == kRetryOk) {
+                u.failed = false;
+                --failed_n;
+                u.recovered_at = mono;
+                ++hub.unit(u.hub).recoveries;
+                ++res.unit_recoveries;
+                for (std::uint32_t m = 0; m < u.nout; ++m) {
+                    Out& o = outs[u.out0 + m];
+                    o.fail_run = 0;
+                    o.flush = false;
+                    const GapState fresh_gs{};
+                    o.gs = fresh_gs;  // ankstesnis turinys atkurtame ring'e nebegalioja (freeze — nuo naujo)
+                    o.gs.policy = cfg.on_loss;
+                    o.gs.hold_ns = cfg.hold_ns;
+                }
+                emit(EventKind::UnitRecovered, u.hub, kNoIndex, 0, "išėjimas sukurtas iš naujo, vienetas vėl dirba");
+                rst[k].store(kRetryIdle, std::memory_order_release);
+            } else if (s == kRetryFail) {
+                ++hub.unit(u.hub).retries;
+                ++res.unit_retries;
+                u.backoff_s = std::min(cfg.retry_max_s, 2 * std::max(u.backoff_s, cfg.retry_min_s));
+                u.retry_at = mono + static_cast<std::int64_t>(u.backoff_s * 1e9);
+                char t[96];
+                std::snprintf(t, sizeof t, "atkurti nepavyko; kitas bandymas po %.0f s", u.backoff_s);
+                emit(EventKind::UnitRetryFailed, u.hub, kNoIndex, static_cast<std::int64_t>(u.backoff_s * 1000), t);
+                rst[k].store(kRetryIdle, std::memory_order_release);
+            }
+        }
+    }
+
+    // Įėjimų būsenų pokyčiai operatoriui (kartą per tick'ą; pokytis įvyksta bet kur variklyje — pranešama ≤ 1 periodu).
+    void report_inputs() {
+        for (In& in : ins) {
+            const InState s = in.st.state();
+            if (s == in.seen) continue;
+            const InState was = in.seen;
+            in.seen = s;
+            switch (s) {
+                case InState::Live:
+                    if (was == InState::Stalled) emit(EventKind::InputResumed, in.hub, kNoIndex, 0, "rašytojas vėl rašo");
+                    else if (was == InState::Detached) emit(EventKind::InputReattached, in.hub, kNoIndex, 0, "prisijungta iš naujo");
+                    else emit(EventKind::InputAttached, in.hub, kNoIndex, 0, "prisijungta");
+                    break;
+                case InState::Stalled: emit(EventKind::InputStalled, in.hub, kNoIndex, 0, "užstrigo: grain'ų nėra (rašytojas gyvas)"); break;
+                case InState::Detached: emit(EventKind::InputDetached, in.hub, kNoIndex, 0, "atsijungta: rašytojo nėra arba flow perkurtas"); break;
+                case InState::Mismatch: emit(EventKind::FormatChange, in.hub, kNoIndex, 0, "grįžo kitu formatu"); break;
+                case InState::Waiting:
+                case InState::Disabled: break;
+            }
+        }
     }
 
     void count_inputs(Unit& u, const Rec& r) {
@@ -774,6 +899,9 @@ struct TickEngine::Impl {
         }
         step_in_tick = true;
         last_step_mono = clk.now_mono_raw();
+        char t[64];
+        std::snprintf(t, sizeof t, "laikrodžio žingsnis %+.3f ms", static_cast<double>(d) / 1e6);
+        emit(EventKind::ClockStep, 0, kNoIndex, d, t);
         // Atviri tick'ai uždaromi: priežastis — laikrodis. Antras ratas — prisijungę po pernešimo (jų indeksas
         // irgi turi baigtis spraga, ne tyla).
         for (int pass = 0; pass < 2; ++pass)
@@ -988,7 +1116,9 @@ struct TickEngine::Impl {
         ctx_index = c;
         ctx_held = 0;
         maintain_inputs();
+        report_inputs();
         if (ended) return;
+        service_retries();
         for (Unit& u : units) u.no_content = false;
         fn->begin_tick(c, ctx);
         if (ended) return;
@@ -1039,6 +1169,7 @@ struct TickEngine::Impl {
         for (;;) {
             if (stop.load()) return false;
             maintain_inputs();
+            report_inputs();
             if (ended) return false;
             bool all = true;
             for (const In& in : ins)
@@ -1056,15 +1187,30 @@ struct TickEngine::Impl {
             CPU_ZERO(&set);
             for (int c : cfg.cpu_affinity)
                 if (c >= 0 && c < CPU_SETSIZE) CPU_SET(c, &set);
-            if (const int e = pthread_setaffinity_np(pthread_self(), sizeof set, &set))
+            if (const int e = pthread_setaffinity_np(pthread_self(), sizeof set, &set)) {
                 res.warn += std::string("--cpu-affinity: ") + std::strerror(e) + "; ";
+                emit(EventKind::Warning, 0, kNoIndex, e, ("--cpu-affinity: " + std::string(std::strerror(e))).c_str());
+            }
         }
         if (cfg.rt_priority > 0) {
             sched_param sp{};
             sp.sched_priority = cfg.rt_priority;
-            if (const int e = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp))
+            if (const int e = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)) {
                 res.warn += std::string("--rt-priority: ") + std::strerror(e) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO); ";
+                emit(EventKind::Warning, 0, kNoIndex, e,
+                     ("--rt-priority: " + std::string(std::strerror(e)) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO)").c_str());
+            }
         }
+    }
+
+    void stop_worker() {
+        if (!rworker.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lk(rm);
+            rquit = true;
+        }
+        rcv.notify_one();
+        rworker.join();
     }
 
     RunResult run(TickFunction& f) {
@@ -1074,6 +1220,8 @@ struct TickEngine::Impl {
             return res;
         }
         hub.prepare();
+        rst = std::make_unique<std::atomic<int>[]>(units.size());
+        for (std::size_t k = 0; k < units.size(); ++k) rst[k].store(kRetryIdle);
         apply_rt();
         batch.reserve(units.size());
         sd.check(clk);
@@ -1081,6 +1229,7 @@ struct TickEngine::Impl {
         if (cfg.start == StartMode::WaitAll && !wait_all()) {
             if (!ended) res.reason = EndReason::Stopped;
             fn->finish(ctx);
+            stop_worker();
             return res;
         }
         step_in_tick = false;
@@ -1130,7 +1279,9 @@ struct TickEngine::Impl {
         }
         pending = 0;
         fn->finish(ctx);
+        stop_worker();
         res.failed_units = failed_n;
+        for (const Unit& u : units) res.unit_failures += hub.unit(u.hub).failures;
         // Praradimai — vieneto lygiu (kiekvienas indeksas baigiasi lygiai vienu rezultatu); išėjimų spragų skaitikliai —
         // tų pačių vieneto spragų pasekmė. Laikrodžio įvykiai ir šaltinio „nėra turinio“ — ne praradimas.
         for (std::size_t k = 0; k < hub.inputs(); ++k)
@@ -1198,6 +1349,7 @@ bool TickEngine::add_unit(const UnitSpec& s, std::uint32_t& unit, std::string& w
     u.stride = s.stride;
     u.residue = s.residue;
     const auto id = static_cast<std::uint32_t>(d.units.size());
+    u.hub = d.hub.add_unit(s.name);  // pirma vienetas — jo įėjimai ir išėjimai priskiriami jam (StatsHub)
     u.in0 = static_cast<std::uint32_t>(d.ins.size());
     u.nin = static_cast<std::uint32_t>(s.in.size());
     for (std::size_t k = 0; k < s.in.size(); ++k) {
@@ -1220,7 +1372,6 @@ bool TickEngine::add_unit(const UnitSpec& s, std::uint32_t& unit, std::string& w
         d.outs.push_back(Impl::Out{s.out[m], g, d.hub.add_output(oname), oname, id});
     }
     d.slots.resize(d.outs.size(), nullptr);
-    u.hub = d.hub.add_unit(s.name);
     d.units.push_back(u);
     unit = id;
     return true;
@@ -1239,6 +1390,7 @@ InState TickEngine::in_state(std::uint32_t unit, std::uint32_t input) const {
     return d_->ins[d_->units[unit].in0 + input].st.state();
 }
 bool TickEngine::unit_failed(std::uint32_t unit) const { return d_->units[unit].failed; }
+bool TickEngine::unit_ever_failed(std::uint32_t unit) const { return d_->units[unit].ever_failed; }
 bool TickEngine::in_late(std::uint32_t unit, std::uint32_t input) const {
     return d_->ins[d_->units[unit].in0 + input].st.late();
 }

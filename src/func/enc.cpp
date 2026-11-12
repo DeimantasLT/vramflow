@@ -761,7 +761,8 @@ int run_enc(const Opts& o) {
     ports_in.reserve(o.flows);
     for (auto& slot : in) ports_in.emplace_back(slot, inst);
     engine::SystemClock clk;
-    engine::StatsHub hub;
+    EngineStats es(o, "enc");
+    engine::StatsHub& hub = es.hub;
     engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
@@ -784,6 +785,7 @@ int run_enc(const Opts& o) {
     std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {

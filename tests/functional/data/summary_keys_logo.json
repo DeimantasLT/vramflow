@@ -30,7 +30,12 @@
  },
  "optional": {
   "top": [],
-  "proc": [],
+  "proc": [
+   "failed_units",
+   "unit_failures",
+   "unit_recoveries",
+   "unit_retries"
+  ],
   "hist": [
    "held_ms"
   ],
@@ -39,7 +44,10 @@
    "lateness_max_us",
    "lateness_s",
    "loss_s",
-   "output_errors"
+   "output_errors",
+   "unit_failed",
+   "unit_failures",
+   "unit_recoveries"
   ]
  }
 }

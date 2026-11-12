@@ -40,6 +40,8 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--drain-ms", o.drain_ms, "sustabdant: eilių išleidimo riba, ms (numatyta 500; antras signalas — iškart)");
     c->add_option("--rt-priority", o.rt_priority, "variklio gijai SCHED_FIFO prioritetas 1…99 (0 — ne; numatyta)")
         ->check(CLI::Range(0, 99));
+    c->add_option("--stats-file", o.stats_file, "gyva statistika: JSON eilutė kas --stats-interval (- — stderr; numatyta — nėra)");
+    c->add_option("--stats-interval", o.stats_interval_s, "statistikos eilutės intervalas, s (numatyta 1)")->check(CLI::Range(0.05, 3600.0));
     c->add_option("--cpu-affinity", o.cpu_affinity, "variklio gijos CPU sąrašas, pvz. 2 arba 0,2-3 (numatyta — nekeisti)")
         ->check([](const std::string& s) {
             std::vector<int> v;

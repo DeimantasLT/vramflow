@@ -13,7 +13,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/engine_mxl.cmake)  # variklio MXL prievadai (V
 
 # gfxgen naudoja TIK viešą libvramflow-gfx (include/vramflow/gfx.h): įrodo, kad biblioteka pakankama.
 add_executable(vramflow-func
-  src/func/main_func.cpp src/func/func_common.cpp src/func/engine_glue.cpp
+  src/func/main_func.cpp src/func/func_common.cpp src/func/engine_glue.cpp src/func/stats_lines.cpp
   src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/dec.cpp src/func/keepwarm.cpp
   src/mxlio/common_io.cpp)
 vramflow_warnings(vramflow-func)
@@ -29,6 +29,16 @@ if(MXLV_BUILD_TESTS)
   target_link_libraries(vramflow-flows-tests PRIVATE mxlv_flows CUDA::cudart_static Catch2::Catch2WithMain)
   set_target_properties(vramflow-flows-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
   catch_discover_tests(vramflow-flows-tests)
+
+  # Gyvos stebėsenos JSON eilutės ir exit kodo politika (B1): StatsLines + engine_glue be likusios funkcijos.
+  add_executable(vramflow-glue-tests tests/func/test_stats_lines.cpp src/func/engine_glue.cpp src/func/stats_lines.cpp
+                 src/mxlio/common_io.cpp)
+  vramflow_warnings(vramflow-glue-tests)
+  target_include_directories(vramflow-glue-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(vramflow-glue-tests PRIVATE mxlv_engine_mxl mxlv_runtime mxlv_flows mxlv_common mxl::mxl
+                        CUDA::cudart_static Threads::Threads Catch2::Catch2WithMain)
+  set_target_properties(vramflow-glue-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
+  catch_discover_tests(vramflow-glue-tests)
 endif()
 
 if(MXLV_BUILD_TESTS)

@@ -4,12 +4,14 @@
 // Funkcijų ↔ bendro tick variklio jungtis (planas docs/planai/2026-11-12-tick-variklis.md §7 „mxlv::func“, V8+):
 // parinktys → EngineConfig (viena vieta) ir variklio skaitikliai → santraukos raktai (tie patys kaip prieš migraciją).
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "engine/engine.hpp"
 #include "engine/mxl_ports.hpp"
 #include "engine/stats.hpp"
 #include "func/func_common.hpp"
+#include "func/stats_lines.hpp"
 
 namespace mxlv::func {
 
@@ -26,15 +28,31 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
 bool parse_cpu_list(const std::string& s, std::vector<int>& out);
 
 // Exit kodas (planas D8, --strict-exit). rc — jau nustatytas fatalus kodas (1, 2, 5, 6, kExitInputs, kStoppedWaiting) arba 0;
-// loss — bent vienas praradimas; failed_units — sugedę vienetai (visi — variklis jau grąžino Fatal → rc 2).
-//   griežtas (on; auto ir --duration > 0): sugedęs vienetas → 2, praradimas → 4, kitaip 0;
-//   švelnus (off; auto ir --duration 0): 0 (praradimai — santraukoje: any_loss, skaitikliai).
+// loss — bent vienas praradimas; failed_units — vienetai, sugedę sustabdymo metu (neatsigavę; visi — variklis jau grąžino
+// Fatal → rc 2).
+//   abiem režimais: vienetas vis dar sugedęs → 2 (tarnyboje sugedęs flow'as nėra „tvarkinga pabaiga“);
+//   griežtas (on; auto ir --duration > 0): praradimas → 4, kitaip 0;
+//   švelnus (off; auto ir --duration 0): 0 (praradimai — santraukoje: any_loss, skaitikliai, gyva statistika).
 // Įrašo st.strict ir st.any_loss (santraukos laukai strict_exit, any_loss).
 bool strict_exit(const Opts& o);
 int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, Stats& st);
 
-// Sugedusio vieneto išėjimų atlaisvinimas (K-T11): MxlVideoOutput::release_fn → VideoOut::release(inst).
-void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst);
+// Sugedusio vieneto išėjimų atlaisvinimas (K-T11): MxlVideoOutput::release_fn → VideoOut::release(inst); atkūrimas (D8):
+// reopen(n) — flow'as n sukuriamas iš naujo (kviečia variklio atkūrimo gija; tuščias — neatkuriama).
+void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst,
+                 std::function<bool(std::size_t)> reopen = {});
+
+// Variklio statistika funkcijai: StatsLines (--stats-file, įvykiai į stderr) + StatsHub. finish() — po run(): paskutinė
+// (nepilno intervalo) eilutė ir publikavimo gijos sustabdymas.
+struct EngineStats {
+    EngineStats(const Opts& o, const char* role);
+    void finish();
+    StatsLines lines;
+    engine::StatsHub hub;
+};
+
+// Variklio pabaigos priežastis → funkcijos rc (Fatal — kodas, FormatChange — 6, InputsTimeout — 4; Stopped / Duration — 0).
+int engine_rc(const engine::RunResult& r, Stats& st);
 
 // Kur santraukoje rašyti variklio praleidimus: proceso lygiu (gen) ar kiekvienam flow'ui (logo, composite…).
 enum class SkipScope { Process, PerFlow, PerFlowFrames };  // PerFlowFrames — enc: *_skips_frames
@@ -116,6 +134,7 @@ public:
     bool interlaced() const override { return in_.interlaced(); }
     std::uint32_t slot_count() const override { return in_.slot_count(); }
     void release() override { in_.release(); }
+    bool reopen() override { return in_.reopen(); }
 
 private:
     bool active(engine::Index i);

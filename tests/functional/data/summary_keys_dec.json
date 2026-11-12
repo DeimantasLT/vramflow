@@ -42,13 +42,20 @@
  "optional": {
   "top": [],
   "proc": [
-   "clock_backward"
+   "clock_backward",
+   "failed_units",
+   "unit_failures",
+   "unit_recoveries",
+   "unit_retries"
   ],
   "hist": [],
   "flows": [
    "fields_ok",
    "output_errors",
    "startup_discard",
+   "unit_failed",
+   "unit_failures",
+   "unit_recoveries",
    "waiting_buffer",
    "warmup_underrun_fields"
   ]

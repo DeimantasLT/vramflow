@@ -184,6 +184,15 @@ public:
     std::uint32_t slot_count() const override { return slots_; }
     bool released = false;  // fail_unit: išėjimas atlaisvintas (po to variklis jo nebekviečia)
     void release() override { released = true; }
+    // Atkūrimas (D8): reopen_ok — ar pavyksta (numatyta — taip); laikai — TAI.
+    std::function<bool()> reopen_ok;
+    std::vector<std::uint64_t> reopen_tai;
+    bool reopen() override {
+        reopen_tai.push_back(clk_.now_tai());
+        const bool ok = !reopen_ok || reopen_ok();
+        if (ok) released = false;
+        return ok;
+    }
 
     const Event* find(Index i) const {
         for (const Event& e : events)

@@ -117,9 +117,16 @@ public:
     void release() override {
         if (release_fn) release_fn();
     }
+    bool reopen() override {
+        if (!reopen_fn || !reopen_fn()) return false;
+        last_ = kNoIndex;  // naujas flow'as — ankstesni indeksai jame neįrašyti
+        return true;
+    }
 
-    // Funkcija nustato: išėjimo flow atlaisvinimas (VideoOut::release su savo mxlInstance) sugedus vienetui.
+    // Funkcija nustato: išėjimo flow atlaisvinimas (VideoOut::release su savo mxlInstance) sugedus vienetui ir atkūrimas
+    // (flow'as sukuriamas iš naujo; kviečia variklio atkūrimo gija).
     std::function<void()> release_fn;
+    std::function<bool()> reopen_fn;
     // open → INVALID_ARG indeksui, didesniam už paskutinį šio prievado įrašytą (ne laikrodis atgal): skaičius (santraukai).
     std::uint64_t invalid_arg_errors = 0;
 

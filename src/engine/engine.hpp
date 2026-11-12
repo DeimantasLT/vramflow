@@ -43,7 +43,8 @@ struct UnitSpec {
 // Skipped — išėjimo indeksas jau commit'intas (laikrodis atgal, M11): ne klaida ir ne praradimas.
 // OutputError — išėjimo open / commit klaida: indeksas be įrašo, commit_errors++ (praradimas); out_fail_fatal kartų iš
 // eilės tam pačiam išėjimui — sugenda TIK tas vienetas (fail_unit: jo išėjimai atlaisvinami, kiti N − 1 tęsia); kai sugenda
-// visi vienetai — fatalu (exit 2).
+// visi vienetai — fatalu (exit 2). Sugedęs vienetas atkuriamas su atidėjimu (EngineConfig::retry_*): OutputPort::reopen
+// atkūrimo gijoje, sėkmė — vienetas vėl dalyvauja nuo kito tick'o.
 enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError };
 const char* to_string(Outcome);
 
@@ -116,6 +117,12 @@ struct EngineConfig {
     double duration_s = 0, warmup_s = 5;
     std::uint32_t skip_align = 1;    // dec interlaced: 2 (po praleidimo tęsti nuo viršutinio lauko)
     std::uint32_t out_fail_fatal = 3;  // tiek open / commit klaidų iš eilės vienam išėjimui → vienetas sugenda; 0 — niekada
+    // Sugedusio vieneto atkūrimas (D8): pirmas bandymas po retry_min_s, kiekvienas nepavykęs — atidėjimas ×2 iki retry_max_s;
+    // vienetas, sugedęs < 60 s po atsigavimo, tęsia ankstesnį atidėjimą (ne nuo pradžios). retry_min_s 0 — nebandoma.
+    // retry_async: OutputPort::reopen atskiroje gijoje (flow kūrimas — dešimtys ms, tick'as nelaukia; gija sukuriama tik
+    // pirmam bandymui); false — variklio gijoje (testai virtualiu laiku).
+    double retry_min_s = 1, retry_max_s = 30;
+    bool retry_async = true;
     // Variklio gija (planas A19, D8): SCHED_FIFO prioritetas (0 — nekeisti) ir CPU rinkinys (tuščias — nekeisti). Taikoma
     // run() pradžioje PO statistikos gijos paleidimo — ji (ir kitos jau sukurtos gijos) RT nepaveldi. Nepavykus (nėra
     // teisių) — įspėjimas RunResult::warn, darbas tęsiamas.
@@ -138,7 +145,10 @@ struct RunResult {
     // įėjimo lost, išėjimo commit_errors. Laikrodžio įvykiai (clock_skips, GapClock, AlreadyCommitted) — ne praradimas.
     // Funkcijos jį naudoja exit kodui 4 griežtame režime (--strict-exit).
     bool any_loss = false;
-    std::uint32_t failed_units = 0;  // fail_unit (ilgalaikė išėjimo klaida arba funkcijos sprendimas); visi — Fatal, exit 2
+    // Vienetai, sugedę sustabdymo metu (fail_unit ir neatsigavę); visi vienu metu — Fatal, exit 2. Funkcijos: > 0 — exit 2
+    // abiem režimais (D8).
+    std::uint32_t failed_units = 0;
+    std::uint64_t unit_failures = 0, unit_recoveries = 0, unit_retries = 0;  // per visą paleidimą (įvykiai)
     std::string failed_why;          // pirmo sugedusio vieneto priežastis (santraukai)
     std::string warn;                // ne fatalūs įspėjimai (pvz. --rt-priority be teisių)
 };
@@ -158,7 +168,8 @@ public:
     std::uint32_t out_id(std::uint32_t unit, std::uint32_t output) const;
     std::uint32_t unit_id(std::uint32_t unit) const;
     InState in_state(std::uint32_t unit, std::uint32_t input) const;
-    bool unit_failed(std::uint32_t unit) const;
+    bool unit_failed(std::uint32_t unit) const;  // sugedęs dabar (po atsigavimo — false)
+    bool unit_ever_failed(std::uint32_t unit) const;
     bool in_late(std::uint32_t unit, std::uint32_t input) const;
 
 private:

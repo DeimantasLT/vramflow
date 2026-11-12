@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cstring>
 
 namespace mxlv::engine {
 
@@ -14,6 +15,25 @@ const char* to_string(Health h) {
         case Health::PartiallyHealthy: return "PartiallyHealthy";
         case Health::Unhealthy: return "Unhealthy";
         case Health::Inactive: return "Inactive";
+    }
+    return "?";
+}
+
+const char* to_string(EventKind k) {
+    switch (k) {
+        case EventKind::UnitFailed: return "unit_failed";
+        case EventKind::UnitRetryFailed: return "unit_retry_failed";
+        case EventKind::UnitRecovered: return "unit_recovered";
+        case EventKind::InputAttached: return "input_attached";
+        case EventKind::InputReattached: return "input_reattached";
+        case EventKind::InputDetached: return "input_detached";
+        case EventKind::InputStalled: return "input_stalled";
+        case EventKind::InputResumed: return "input_resumed";
+        case EventKind::OutputError: return "output_error";
+        case EventKind::OutputRecovered: return "output_recovered";
+        case EventKind::FormatChange: return "format_change";
+        case EventKind::ClockStep: return "clock_step";
+        case EventKind::Warning: return "warning";
     }
     return "?";
 }
@@ -52,6 +72,29 @@ Health process_health(std::span<const Health> in, std::span<const Health> out) {
     if (active == 0) return Health::Inactive;
     if (healthy == active) return Health::Healthy;
     if (out_active != 0 ? out_bad == out_active : in_bad == in_active) return Health::Unhealthy;
+    return Health::PartiallyHealthy;
+}
+
+Health unit_health(const UnitCounters& d, bool failed) {
+    if (failed) return Health::Unhealthy;
+    const std::uint64_t lost = d.gaps - d.gaps_clock - d.gaps_no_content + d.lapped + d.late_skips;
+    const std::uint64_t any = d.ok + d.late + d.gaps + d.startup + d.lapped + d.late_skips + d.clock_skips + d.warmup_skips;
+    if (any == 0) return Health::Inactive;
+    if (d.ok + d.late == 0) return Health::Unhealthy;
+    return lost != 0 ? Health::PartiallyHealthy : Health::Healthy;
+}
+
+Health units_health(std::span<const Health> units) {
+    std::size_t active = 0, healthy = 0, bad = 0;
+    for (Health h : units) {
+        if (h == Health::Inactive) continue;
+        ++active;
+        healthy += h == Health::Healthy;
+        bad += h == Health::Unhealthy;
+    }
+    if (active == 0) return Health::Inactive;
+    if (healthy == active) return Health::Healthy;
+    if (bad == active) return Health::Unhealthy;
     return Health::PartiallyHealthy;
 }
 
@@ -110,12 +153,14 @@ std::uint32_t StatsHub::add_unit(std::string name) {
 std::uint32_t StatsHub::add_input(std::string name) {
     in_names_.push_back(std::move(name));
     in_.emplace_back();
+    in_owner_.push_back(unit_names_.empty() ? 0 : static_cast<std::uint32_t>(unit_names_.size() - 1));
     return static_cast<std::uint32_t>(in_.size() - 1);
 }
 
 std::uint32_t StatsHub::add_output(std::string name) {
     out_names_.push_back(std::move(name));
     out_.emplace_back();
+    out_owner_.push_back(unit_names_.empty() ? 0 : static_cast<std::uint32_t>(unit_names_.size() - 1));
     return static_cast<std::uint32_t>(out_.size() - 1);
 }
 
@@ -123,17 +168,23 @@ void StatsHub::prepare() {
     fn_.assign(unit_names_.size() * counter_names_.size(), 0);
     in_prev_ = in_;
     out_prev_ = out_;
+    unit_prev_ = unit_;
     fn_prev_ = fn_;
     eng_prev_ = eng_;
     in_hist_.assign(in_.size(), Hist64{});
     out_hist_.assign(out_.size(), Hist64{});
     in_state_.assign(in_.size(), InState::Waiting);
     out_on_.assign(out_.size(), 1);
+    unit_failed_.assign(unit_.size(), 0);
     in_h_.assign(in_.size(), Health::Unhealthy);
     out_h_.assign(out_.size(), Health::Unhealthy);
+    unit_h_.assign(unit_.size(), Health::Inactive);
     for (Snapshot& s : buf_) {
         s.in.assign(in_.size(), InSnap{});
         s.out.assign(out_.size(), OutSnap{});
+        s.unit.assign(unit_.size(), UnitSnap{});
+        for (std::size_t k = 0; k < in_.size(); ++k) s.in[k].unit = in_owner_[k];
+        for (std::size_t k = 0; k < out_.size(); ++k) s.out[k].unit = out_owner_[k];
         s.fn.assign(fn_.size(), 0);
         s.hist.assign(hist_.size(), HistSnap{});
         s.in_names = &in_names_;
@@ -165,6 +216,24 @@ OutCounters minus(const OutCounters& a, const OutCounters& b) {
     r.clock_skips = a.clock_skips - b.clock_skips;
     r.warmup_skips = a.warmup_skips - b.warmup_skips;
     r.commit_errors = a.commit_errors - b.commit_errors;
+    r.already_committed = a.already_committed - b.already_committed;
+    return r;
+}
+UnitCounters minus(const UnitCounters& a, const UnitCounters& b) {
+    UnitCounters r;
+    r.ok = a.ok - b.ok;
+    r.late = a.late - b.late;
+    r.gaps = a.gaps - b.gaps;
+    r.startup = a.startup - b.startup;
+    r.lapped = a.lapped - b.lapped;
+    r.late_skips = a.late_skips - b.late_skips;
+    r.clock_skips = a.clock_skips - b.clock_skips;
+    r.warmup_skips = a.warmup_skips - b.warmup_skips;
+    r.gaps_clock = a.gaps_clock - b.gaps_clock;
+    r.gaps_no_content = a.gaps_no_content - b.gaps_no_content;
+    r.failures = a.failures - b.failures;
+    r.retries = a.retries - b.retries;
+    r.recoveries = a.recoveries - b.recoveries;
     return r;
 }
 }  // namespace
@@ -183,6 +252,25 @@ void StatsHub::end_tick(std::uint64_t now) {
         ++dropped_;
         return;
     }
+    snapshot(now);
+}
+
+void StatsHub::flush(std::uint64_t now) {
+    if (!started_ || buf_[0].unit.size() != unit_.size() || buf_[0].in.size() != in_.size()) return;  // be prepare()
+    const auto t0 = std::chrono::steady_clock::now();
+    while (sink_ != nullptr && th_.joinable() && full_.load(std::memory_order_acquire) != 0 &&
+           std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) {
+        cv_.notify_one();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (full_.load(std::memory_order_acquire) != 0) {
+        ++dropped_;
+        return;
+    }
+    snapshot(now);
+}
+
+void StatsHub::snapshot(std::uint64_t now) {
     Snapshot& s = buf_[w_.load(std::memory_order_acquire)];
     s.seq = ++seq_;
     s.t_begin_tai = t_begin_;
@@ -195,6 +283,7 @@ void StatsHub::end_tick(std::uint64_t now) {
         x.health = in_h_[k] = input_health(x.state, x.d);
         x.arrival_p50_ns = in_hist_[k].quantile(0.5);
         x.arrival_p99_ns = in_hist_[k].quantile(0.99);
+        x.arrival_max_ns = in_hist_[k].max();
         in_hist_[k].reset();
         in_prev_[k] = in_[k];
     }
@@ -205,8 +294,16 @@ void StatsHub::end_tick(std::uint64_t now) {
         x.health = out_h_[k] = output_health(x.d, x.enabled);
         x.commit_p50_ns = out_hist_[k].quantile(0.5);
         x.commit_p99_ns = out_hist_[k].quantile(0.99);
+        x.commit_max_ns = out_hist_[k].max();
         out_hist_[k].reset();
         out_prev_[k] = out_[k];
+    }
+    for (std::size_t k = 0; k < unit_.size(); ++k) {
+        UnitSnap& x = s.unit[k];
+        x.d = minus(unit_[k], unit_prev_[k]);
+        x.failed = unit_failed_[k] != 0;
+        x.health = unit_h_[k] = unit_health(x.d, x.failed);
+        unit_prev_[k] = unit_[k];
     }
     for (std::size_t k = 0; k < fn_.size(); ++k) {
         s.fn[k] = fn_[k] - fn_prev_[k];
@@ -227,11 +324,44 @@ void StatsHub::end_tick(std::uint64_t now) {
     e.step_gaps = eng_.step_gaps - eng_prev_.step_gaps;
     e.held_ns_max = eng_.held_ns_max;
     eng_prev_ = eng_;
-    s.health = health_ = process_health(in_h_, out_h_);
+    // Proceso būsena: iš vienetų (flow'ų); be vienetų — iš įėjimų / išėjimų (§6 D6 lentelė).
+    s.health = health_ = unit_.empty() ? process_health(in_h_, out_h_) : units_health(unit_h_);
     t_begin_ = now;
     if (sink_ == nullptr) return;
     full_.store(1, std::memory_order_release);
     cv_.notify_one();  // neblokuoja; publikavimo gija dar tikrina kas 50 ms (pažadinimas be užrakto gali pasimesti)
+}
+
+void StatsHub::event(EventKind k, std::uint32_t id, std::uint64_t tai, std::uint64_t index, std::int64_t value, const char* text) {
+    const std::uint32_t w = ev_w_.load(std::memory_order_relaxed);
+    if (w - ev_r_.load(std::memory_order_acquire) >= kEvents) {
+        ++ev_dropped_;
+        return;
+    }
+    Event& e = ev_[w % kEvents];
+    e.tai = tai;
+    e.index = index;
+    e.value = value;
+    e.id = id;
+    e.kind = k;
+    e.text[0] = '\0';
+    if (text != nullptr) {
+        std::strncpy(e.text, text, sizeof e.text - 1);
+        e.text[sizeof e.text - 1] = '\0';
+    }
+    ev_w_.store(w + 1, std::memory_order_release);
+    cv_.notify_one();
+}
+
+void StatsHub::drain_events() {
+    const StatsNames names{&unit_names_, &in_names_, &out_names_};
+    for (;;) {
+        const std::uint32_t r = ev_r_.load(std::memory_order_relaxed);
+        if (r == ev_w_.load(std::memory_order_acquire)) return;
+        const Event e = ev_[r % kEvents];
+        ev_r_.store(r + 1, std::memory_order_release);
+        sink_->event(e, names);
+    }
 }
 
 void StatsHub::publisher() {
@@ -239,9 +369,11 @@ void StatsHub::publisher() {
         {
             std::unique_lock<std::mutex> lk(m_);
             cv_.wait_for(lk, std::chrono::milliseconds(50), [&] {
-                return full_.load(std::memory_order_acquire) != 0 || quit_.load(std::memory_order_acquire);
+                return full_.load(std::memory_order_acquire) != 0 || quit_.load(std::memory_order_acquire) ||
+                       ev_r_.load(std::memory_order_relaxed) != ev_w_.load(std::memory_order_acquire);
             });
         }
+        drain_events();  // įvykiai — prieš to intervalo eilutę
         if (full_.load(std::memory_order_acquire) != 0) {
             const int r = w_.load(std::memory_order_acquire);
             w_.store(1 - r, std::memory_order_release);
@@ -249,7 +381,10 @@ void StatsHub::publisher() {
             sink_->publish(buf_[r]);
             continue;
         }
-        if (quit_.load(std::memory_order_acquire)) return;
+        if (quit_.load(std::memory_order_acquire)) {
+            drain_events();
+            return;
+        }
     }
 }
 

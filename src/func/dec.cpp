@@ -456,9 +456,18 @@ int run_dec(const Opts& o) {
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(o.flows);
     for (auto& v : out) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
-    set_release(ports, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
+    // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
+    set_release(ports, out, inst, [&](std::size_t n) {
+        if (!cpu) cudaSetDevice(dev);
+        std::string e;
+        const bool ok = create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt),
+                                      opts, o.fmt, o, e);
+        if (!ok) log_line("dec", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
+        return ok;
+    });
     engine::SystemClock clk;
-    engine::StatsHub hub;
+    EngineStats es(o, "dec");
+    engine::StatsHub& hub = es.hub;
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
@@ -472,6 +481,7 @@ int run_dec(const Opts& o) {
     std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {

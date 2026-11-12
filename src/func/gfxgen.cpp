@@ -327,7 +327,8 @@ int run_gfxgen(const Opts& o) {
             rc = 2;
         }
         engine::SystemClock clk;
-        engine::StatsHub hub;
+        EngineStats es(o, "gfxgen");
+        engine::StatsHub& hub = es.hub;
         engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
         for (std::uint32_t j = 0; j < total && !rc; ++j) {
             engine::UnitSpec u;
@@ -338,6 +339,7 @@ int run_gfxgen(const Opts& o) {
         GfxgenFn fn(src, st, pool, prepare, count_err, inter, upload, rate, warm_tai_after(o.warmup_s));
         if (!rc) {
             const engine::RunResult res = eng.run(fn);
+            es.finish();  // paskutinė statistikos eilutė
             if (res.reason == engine::EndReason::Fatal) {
                 if (st.fatal.empty()) st.fatal = res.fatal;
                 rc = res.exit_code ? res.exit_code : 2;

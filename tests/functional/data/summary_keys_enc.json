@@ -41,12 +41,20 @@
  },
  "optional": {
   "top": [],
-  "proc": [],
+  "proc": [
+   "failed_units",
+   "unit_failures",
+   "unit_recoveries",
+   "unit_retries"
+  ],
   "hist": [],
   "flows": [
    "frames_queued",
    "lateness_s",
-   "loss_s"
+   "loss_s",
+   "unit_failed",
+   "unit_failures",
+   "unit_recoveries"
   ]
  }
 }

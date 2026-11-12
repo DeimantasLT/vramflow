@@ -330,9 +330,18 @@ int run_logo(const Opts& o_in) {
         ports_in.emplace_back(in[n], inst);
         ports_out.emplace_back(out[n], engine::host_copy(), nullptr, nullptr);
     }
-    set_release(ports_out, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
+    // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
+    set_release(ports_out, out, inst, [&](std::size_t n) {
+        if (!cpu) cudaSetDevice(dev);
+        std::string e;
+        const bool ok = create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt),
+                                      opts, o.fmt, o, e);
+        if (!ok) log_line("logo", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
+        return ok;
+    });
     engine::SystemClock clk;
-    engine::StatsHub hub;
+    EngineStats es(o, "logo");
+    engine::StatsHub& hub = es.hub;
     engine::TickEngine eng(engine_config(o, kLogoTiming, o.read_offset_us * 1000), clk, hub, stop);
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
@@ -352,6 +361,7 @@ int run_logo(const Opts& o_in) {
     std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {

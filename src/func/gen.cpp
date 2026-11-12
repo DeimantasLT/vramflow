@@ -231,13 +231,22 @@ int run_gen(const Opts& o) {
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(vout.size());
     for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
-    set_release(ports, vout, inst);  // sugedęs vienetas — jo video flow'as atlaisvinamas (K-T11)
+    // Sugedęs vienetas — jo video flow'as atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
+    set_release(ports, vout, inst, [&](std::size_t n) {
+        if (!cpu) cudaSetDevice(dev);
+        std::string e;
+        const bool ok = create_output(inst, vout[n], flow_id(kRoleGen, o.flow_base + n), video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt),
+                                      opts, o.fmt, o, e);
+        if (!ok) log_line("gen", "video " + std::to_string(n) + " atkurti nepavyko: " + e);
+        return ok;
+    });
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
     for (auto& p : ports) optr.push_back(&p);
     optr = output_ports(optr, o, faulty);
     engine::SystemClock clk;
-    engine::StatsHub hub;
+    EngineStats es(o, "gen");
+    engine::StatsHub& hub = es.hub;
     engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
@@ -251,6 +260,7 @@ int run_gen(const Opts& o) {
     std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        es.finish();  // paskutinė statistikos eilutė
         loss = res.any_loss;  // praleisti indeksai, išėjimo klaidos — gen taip pat (anksčiau gen exit jų nerodė)
         failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {

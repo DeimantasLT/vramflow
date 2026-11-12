@@ -25,9 +25,12 @@ struct OutCounters {
 // startup — spragos, kol būtinas įėjimas dar niekada nebuvo prijungtas (ne praradimas).
 // gaps_clock, gaps_no_content — gaps poaibiai (laikrodžio žingsnis / jau commit'intas indeksas; šaltinis pranešė „nėra
 // turinio“): ne praradimas.
+// failures — kiek kartų vienetas sugedo (fail_unit); retries — nepavykę atkūrimo bandymai; recoveries — sėkmingi (vienetas
+// vėl dirba). Tai įvykių skaitikliai, ne indeksų rezultatai.
 struct UnitCounters {
     std::uint64_t ok = 0, late = 0, gaps = 0, startup = 0, lapped = 0, late_skips = 0, clock_skips = 0, warmup_skips = 0;
     std::uint64_t gaps_clock = 0, gaps_no_content = 0;
+    std::uint64_t failures = 0, retries = 0, recoveries = 0;
 };
 
 }  // namespace mxlv::engine

@@ -61,13 +61,40 @@ int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, 
     st.strict = strict ? 1 : 0;
     st.any_loss = loss;
     if (rc != 0) return exit_code(rc);
+    if (failed_units) return 2;  // abiem režimais (D8): sustabdant dar sugedęs vienetas
     if (!strict) return 0;
-    if (failed_units) return 2;
     return loss ? 4 : 0;
 }
 
-void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst) {
-    for (std::size_t n = 0; n < ports.size() && n < outs.size(); ++n) ports[n].release_fn = [&outs, n, inst] { outs[n].release(inst); };
+void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst,
+                 std::function<bool(std::size_t)> reopen) {
+    for (std::size_t n = 0; n < ports.size() && n < outs.size(); ++n) {
+        ports[n].release_fn = [&outs, n, inst] { outs[n].release(inst); };
+        if (reopen) ports[n].reopen_fn = [reopen, n] { return reopen(n); };
+    }
+}
+
+EngineStats::EngineStats(const Opts& o, const char* role)
+    : lines(o, role), hub(o.stats_interval_s > 0 ? o.stats_interval_s : 1.0, &lines) {}
+
+void EngineStats::finish() {
+    hub.flush(mxlGetTime());
+    hub.stop();
+}
+
+int engine_rc(const engine::RunResult& r, Stats& st) {
+    switch (r.reason) {
+        case engine::EndReason::Fatal:
+            if (st.fatal.empty()) st.fatal = r.fatal;
+            return r.exit_code ? r.exit_code : 2;
+        case engine::EndReason::FormatChange:
+            st.fatal = r.fatal;
+            return kExitFormatChange;
+        case engine::EndReason::InputsTimeout:
+        case engine::EndReason::Stopped:
+        case engine::EndReason::Duration: return 0;
+    }
+    return 0;
 }
 
 FaultyOutput::FaultyOutput(engine::OutputPort& inner, const Opts& o)
@@ -113,12 +140,21 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
                 SkipScope scope, Stats& st) {
     if (r.first_index != engine::kNoIndex) st.first_index = r.first_index;
     if (r.last_index != engine::kNoIndex) st.last_index = r.last_index;
-    if (!r.warn.empty()) std::fprintf(stderr, "[vramflow] įspėjimas: %s\n", r.warn.c_str());
-    if (r.failed_units) {  // K17: sugedę vienetai (kiti tęsė) — skaičius ir priežastis (įvykio raktai)
-        st.proc["failed_units"] = r.failed_units;
-        std::fprintf(stderr, "[vramflow] sugedo vienetų: %u (pirmas: %s)\n", r.failed_units, r.failed_why.c_str());
-        for (std::uint32_t n = 0; n < units && n < st.flows.size(); ++n)
+    // Įspėjimai ir vienetų gedimai — jau pranešti iš karto (variklio įvykiai, StatsLines); čia — santraukos raktai.
+    if (r.unit_failures) {  // K17: sugedę vienetai (kiti tęsė) — gedimai, atkūrimai, likę sugedę (įvykio raktai)
+        st.proc["unit_failures"] = r.unit_failures;
+        if (r.unit_recoveries) st.proc["unit_recoveries"] = r.unit_recoveries;
+        if (r.unit_retries) st.proc["unit_retries"] = r.unit_retries;
+        if (r.failed_units) {
+            st.proc["failed_units"] = r.failed_units;
+            std::fprintf(stderr, "[vramflow] sustabdant sugedusių vienetų: %u (pirmas gedimas: %s)\n", r.failed_units, r.failed_why.c_str());
+        }
+        for (std::uint32_t n = 0; n < units && n < st.flows.size(); ++n) {
+            const engine::UnitCounters& u = hub.unit(eng.unit_id(n));
+            if (u.failures) st.flows[n].c["unit_failures"] = u.failures;
+            if (u.recoveries) st.flows[n].c["unit_recoveries"] = u.recoveries;
             if (eng.unit_failed(n)) st.flows[n].c["unit_failed"] = 1;
+        }
     }
     const engine::EngineCounters& e = hub.engine();
     if (scope == SkipScope::Process) st.proc["clock_steps"] = e.clock_steps;  // gen visada turėjo; logo ir kt. — ne (raktų aibė)

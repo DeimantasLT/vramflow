@@ -383,9 +383,19 @@ int run_composite(const Opts& o) {
     ports_out.reserve(N);
     for (auto& slot : in) ports_in.emplace_back(slot, inst);
     for (auto& v : out) ports_out.emplace_back(v, engine::host_copy(), nullptr, nullptr);
-    set_release(ports_out, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
+    // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
+    set_release(ports_out, out, inst, [&](std::size_t n) {
+        if (!cpu) cudaSetDevice(dev);
+        const vramflow::VideoFormat of{out_r[n], o.fmt.frame_rate};
+        std::string e;
+        const bool ok = create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed), opts, of,
+                                      o, e);
+        if (!ok) log_line("composite", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
+        return ok;
+    });
     engine::SystemClock clk;
-    engine::StatsHub hub;
+    EngineStats es(o, "composite");
+    engine::StatsHub& hub = es.hub;
     engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
         engine::UnitSpec u;
@@ -402,6 +412,7 @@ int run_composite(const Opts& o) {
     std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {

@@ -32,12 +32,19 @@
    "commit_lateness_s"
   ],
   "proc": [
+   "failed_units",
    "late_commits",
-   "late_skips"
+   "late_skips",
+   "unit_failures",
+   "unit_recoveries",
+   "unit_retries"
   ],
   "hist": [],
   "flows": [
-   "fields_written"
+   "fields_written",
+   "unit_failed",
+   "unit_failures",
+   "unit_recoveries"
   ]
  }
 }

@@ -47,6 +47,10 @@ struct Opts {
     std::uint32_t drain_ms = 500;  // sustabdant: darbininkų eilių (enc) išleidimo riba; antras signalas — nutraukia iškart
     int rt_priority = 0;           // SCHED_FIFO variklio gijai (0 — ne); be teisių — įspėjimas, darbas tęsiamas
     std::string cpu_affinity;      // variklio gijos CPU sąrašas „0,2-3“ (tuščia — nekeisti)
+    // Gyva stebėsena (planas §P7, K9): JSON eilutė kas stats_interval_s į stats_file (`-` — stderr; tuščia — eilučių nėra).
+    // Įvykiai (vienetas sugedo / atsigavo, įėjimų būsenos, išėjimo klaidos) — į stderr visada, iš karto.
+    std::string stats_file;
+    double stats_interval_s = 1.0;
     std::string out = ".";
     std::string device_uuid;
     // Paleidimas ir sustabdymas (planas §P6). run_id — šio paleidimo nuoma `<domain>.vramflow/<run_id>.lease` (tuščia —

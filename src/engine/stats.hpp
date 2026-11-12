@@ -5,6 +5,8 @@
 // rašo tik variklio gija. end_tick(now): kai praėjo intervalas, variklio gija į iš anksto paruoštą buferį nukopijuoja
 // intervalo skirtumus ir būsenas ir pažadina savo publikavimo giją, kuri kviečia StatsSink::publish. Tick'as niekada
 // nedaro I/O ir nelaukia: jei ankstesnė kopija dar nepaimta — dropped_lines++ (skirtumai pereina į kitą eilutę).
+// Įvykiai (vienetas sugedo / atsigavo, įėjimas atsijungė / prisijungė / užstrigo, išėjimo klaida, formato pokytis, laikrodžio
+// žingsnis) — iš anksto paruoštame žiede (be alokacijų); publikavimo gija juos perduoda StatsSink::event per ≤ 50 ms.
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -31,6 +33,12 @@ const char* to_string(Health);
 Health input_health(InState, const InCounters&);
 Health output_health(const OutCounters&, bool enabled);
 Health process_health(std::span<const Health> inputs, std::span<const Health> outputs);
+// Vienetas (flow): sugedęs — Unhealthy; per intervalą nė vieno pateikto indekso (ok + late == 0) — Unhealthy, nebent
+// vienetas nedalyvavo (stride / sustabdytas) — Inactive; praradimų (spragos be laikrodžio / „nėra turinio“, lap'ai,
+// late_skips) — PartiallyHealthy; kitaip Healthy. Vėlavimas B / C fazėje (late) — ne praradimas.
+Health unit_health(const UnitCounters& d, bool failed);
+// Proceso būsena eilutėje — iš vienetų: visi Healthy → Healthy; visi aktyvūs Unhealthy → Unhealthy; kitaip PartiallyHealthy.
+Health units_health(std::span<const Health> units);
 
 struct EngineCounters {
     std::uint64_t ticks = 0, process_calls = 0, guard_overrun = 0, carry_overrun = 0;
@@ -52,27 +60,58 @@ public:
     void add(std::uint64_t ns) {
         ++c_[static_cast<std::size_t>(bucket_of(ns))];
         ++n_;
+        if (ns > max_) max_ = ns;
     }
     std::uint64_t quantile(double q) const;
+    std::uint64_t max() const { return max_; }  // tikslus maksimumas (ne kibiro riba)
     std::uint32_t count() const { return n_; }
     void reset() { *this = Hist64{}; }
 
 private:
     std::array<std::uint32_t, 64> c_{};
     std::uint32_t n_ = 0;
+    std::uint64_t max_ = 0;
+};
+
+// Įvykis operatoriui (stderr eilutė su laiku iš karto, ne intervalo gale). id — hub'o numeris pagal rūšį (vienetas /
+// įėjimas / išėjimas; ClockStep, Warning — nenaudojamas). text — nukopijuojamas (be alokacijų), ilgesnis — nukerpamas.
+enum class EventKind : std::uint8_t {
+    UnitFailed, UnitRetryFailed, UnitRecovered, InputAttached, InputReattached, InputDetached, InputStalled, InputResumed,
+    OutputError, OutputRecovered, FormatChange, ClockStep, Warning
+};
+const char* to_string(EventKind);
+struct Event {
+    std::uint64_t tai = 0;
+    std::uint64_t index = ~std::uint64_t{0};
+    std::int64_t value = 0;  // ClockStep — Δ ns; UnitRetryFailed — kitas bandymas po ms; kitur 0
+    std::uint32_t id = 0;
+    EventKind kind = EventKind::Warning;
+    char text[160]{};
+};
+struct StatsNames {
+    const std::vector<std::string>* unit = nullptr;
+    const std::vector<std::string>* in = nullptr;
+    const std::vector<std::string>* out = nullptr;
 };
 
 struct InSnap {
     InCounters d;  // intervalo skirtumai
     InState state = InState::Waiting;
     Health health = Health::Unhealthy;
-    std::uint64_t arrival_p50_ns = 0, arrival_p99_ns = 0;
+    std::uint64_t arrival_p50_ns = 0, arrival_p99_ns = 0, arrival_max_ns = 0;
+    std::uint32_t unit = 0;  // vieneto hub numeris
 };
 struct OutSnap {
     OutCounters d;
     bool enabled = true;
     Health health = Health::Unhealthy;
-    std::uint64_t commit_p50_ns = 0, commit_p99_ns = 0;
+    std::uint64_t commit_p50_ns = 0, commit_p99_ns = 0, commit_max_ns = 0;
+    std::uint32_t unit = 0;
+};
+struct UnitSnap {
+    UnitCounters d;  // intervalo skirtumai
+    bool failed = false;
+    Health health = Health::Inactive;
 };
 struct HistSnap {
     std::uint64_t count = 0, p50_ns = 0, p99_ns = 0;
@@ -84,6 +123,7 @@ struct Snapshot {
     EngineCounters engine;  // skirtumai (held_ns_max — kaupiamasis maksimumas)
     std::vector<InSnap> in;
     std::vector<OutSnap> out;
+    std::vector<UnitSnap> unit;
     std::vector<std::uint64_t> fn;  // units × counters, skirtumai
     std::vector<HistSnap> hist;
     const std::vector<std::string>* in_names = nullptr;
@@ -97,6 +137,7 @@ class StatsSink {
 public:
     virtual ~StatsSink() = default;
     virtual void publish(const Snapshot&) = 0;  // kviečia hub'o publikavimo gija; gali užtrukti
+    virtual void event(const Event&, const StatsNames&) {}  // ta pati gija; prieš to intervalo eilutę
 };
 
 class StatsHub {
@@ -110,7 +151,8 @@ public:
     CounterId register_counter(std::string name);
     HistId register_hist(std::string name);
 
-    // Variklis registruoja vienetus / įėjimus / išėjimus add_unit metu.
+    // Variklis registruoja vienetus / įėjimus / išėjimus add_unit metu: pirma vienetą, tada jo įėjimus ir išėjimus (jie
+    // priskiriami paskutiniam užregistruotam vienetui).
     std::uint32_t add_unit(std::string name);
     std::uint32_t add_input(std::string name);
     std::uint32_t add_output(std::string name);
@@ -134,11 +176,18 @@ public:
     // Variklio gija: būsenos, kurių skaitikliai neturi (nustatomos prieš end_tick, kai due()).
     void set_in_state(std::uint32_t id, InState s) { in_state_[id] = s; }
     void set_out_enabled(std::uint32_t id, bool on) { out_on_[id] = on ? 1 : 0; }
+    void set_unit_failed(std::uint32_t id, bool f) { unit_failed_[id] = f ? 1 : 0; }
     bool due(std::uint64_t now_tai) const { return !started_ || now_tai >= next_due_; }
     void end_tick(std::uint64_t now_tai);  // variklio gija; neblokuoja
+    // Po run() (ne tick'e): paskutinė, nepilno intervalo eilutė — kad Σ eilučių skirtumų == santraukos skaitikliai. Laukia
+    // ≤ 2 s, kol publikavimo gija paims ankstesnę kopiją (kitaip — dropped_lines++, skirtumai lieka neišleisti).
+    void flush(std::uint64_t now_tai);
+    // Variklio gija: įvykis į žiedą (neblokuoja, nealokuoja; pilnas — events_dropped++).
+    void event(EventKind k, std::uint32_t id, std::uint64_t tai, std::uint64_t index, std::int64_t value, const char* text);
+    std::uint64_t events_dropped() const { return ev_dropped_; }
     Health health() const { return health_; }  // paskutinio intervalo proceso būsena (variklio gija)
     std::uint64_t dropped_lines() const { return dropped_; }
-    void stop();  // išleidžia laukiančią kopiją ir sustabdo publikavimo giją (po run())
+    void stop();  // išleidžia laukiančią kopiją ir įvykius, sustabdo publikavimo giją (po run())
 
     std::size_t inputs() const { return in_.size(); }
     std::size_t outputs() const { return out_.size(); }
@@ -146,13 +195,18 @@ public:
 
 private:
     void publisher();
+    void drain_events();
+    void snapshot(std::uint64_t now);
 
     std::uint64_t interval_ns_;
     StatsSink* sink_;
     std::vector<std::string> counter_names_, hist_names_, unit_names_, in_names_, out_names_;
+    std::vector<std::uint32_t> in_owner_, out_owner_;
     std::vector<InCounters> in_, in_prev_;
     std::vector<OutCounters> out_, out_prev_;
-    std::vector<UnitCounters> unit_;
+    std::vector<UnitCounters> unit_, unit_prev_;
+    std::vector<std::uint8_t> unit_failed_;
+    std::vector<Health> unit_h_;
     std::vector<std::uint64_t> fn_, fn_prev_;
     std::vector<Hist64> in_hist_, out_hist_, hist_;
     std::vector<InState> in_state_;
@@ -170,6 +224,11 @@ private:
     std::mutex m_;
     std::condition_variable cv_;
     std::thread th_;
+
+    static constexpr std::uint32_t kEvents = 256;
+    std::array<Event, kEvents> ev_{};
+    std::atomic<std::uint32_t> ev_w_{0}, ev_r_{0};  // SPSC: rašo variklio gija, skaito publikavimo gija
+    std::uint64_t ev_dropped_ = 0;
 };
 
 }  // namespace mxlv::engine
