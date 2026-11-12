@@ -55,6 +55,23 @@ def fn_loss(f):
     return sum(f.get(k, 0) for k in LOSS)
 
 
+def unexplained_losses(f, up):
+    """Funkcijos praradimai, kurių sveikas aukštupis tuo pačiu laiku nepaaiškina: Σ per sekundes max(0, funkcijos praradimai
+    sekundę s (loss_s) − aukštupio vėlūs / praleisti indeksai, kurių T(i) toje sekundėje). Indeksų atitikimas — sekundės
+    tikslumu (anksčiau — viso gyvenimo sumos: aukštupio praradimas bet kada „paaiškindavo“ funkcijos praradimą bet kada).
+    output_errors — aukštupis nepaaiškina niekada."""
+    ups = {}
+    for i in up.get("late_index") or []:
+        s = i * I.FIELD_NS // 1_000_000_000
+        ups[s] = ups.get(s, 0) + 1
+    for a, b in up.get("skipped") or []:
+        for i in range(a, b + 1):
+            s = i * I.FIELD_NS // 1_000_000_000
+            ups[s] = ups.get(s, 0) + 1
+    fn = {int(k): v for k, v in (f.get("loss_s") or [])}
+    return sum(max(0, v - ups.get(s, 0)) for s, v in fn.items()) + f.get("output_errors", 0)
+
+
 def proc_mem(pid):
     """(fd skaičius, VmRSS kB) arba (None, None)."""
     try:
@@ -233,7 +250,6 @@ def check_split(r, func):
     # Sveiko aukštupio (gen A…) paties praradimai (eilutės „vėlus commit“ > --deadline-ms ir „praleista“) — ne funkcijos;
     # kitų procesų GPU įvykiai (pvz. perkrauto gen CUDA kontekstas H variante) gali pavėlinti ir sveiką gamintoją.
     up = r.get("upstream") or {}
-    budget = len(up.get("late_index") or []) + sum(b - a + 1 for a, b in up.get("skipped") or [])
     for n in range(N):
         f, vv = (ff[n] if n < len(ff) else {}), (vfl[n] if n < len(vfl) else {})
         if vv.get("mismatch_fields", 0):
@@ -243,8 +259,9 @@ def check_split(r, func):
         vl = vv.get("missing", 0) + vv.get("invalid", 0)
         if vl > fn_loss(f) + (0 if n not in r["special"] else 0):
             bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai {fn_loss(f)}")
-        if n not in r["special"] and fn_loss(f) > budget:
-            bad.append(f"sveiko #{n} praradimai { {k: f[k] for k in LOSS if f.get(k)} } > aukštupio {budget}")
+        if n not in r["special"] and unexplained_losses(f, up) > 0:
+            bad.append(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
+                       f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})")
     held = ((sf.get("hist") or {}).get("held_ms") or {}).get("count", 0)
     if not held:
         bad.append("held_ms tuščia — fazės neskilo (scenarijus nepatikrino skilusio indekso)")
@@ -355,8 +372,9 @@ def fcrashloop(out):
         bad = []
         for n in range(N - 1):
             f = ff[n] if n < len(ff) else {}
-            if fn_loss(f) > budget:
-                bad.append(f"sveiko #{n} praradimai { {k: f[k] for k in LOSS if f.get(k)} } > aukštupio {budget}")
+            if unexplained_losses(f, up) > 0:
+                bad.append(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
+                           f"({ {k: f[k] for k in LOSS if f.get(k)} })")
         fa = ff[N - 1] if len(ff) >= N else {}
         if fa.get("reattached", 0) < 8:
             bad.append(f"paveiktas reattached={fa.get('reattached', 0)} < 8")

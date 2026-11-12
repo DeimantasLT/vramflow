@@ -170,6 +170,7 @@ public:
     InState in_state(std::uint32_t unit, std::uint32_t input) const;
     bool unit_failed(std::uint32_t unit) const;  // sugedęs dabar (po atsigavimo — false)
     bool unit_ever_failed(std::uint32_t unit) const;
+    Index unit_fail_index(std::uint32_t unit) const;  // pirmo gedimo indeksas (kNoIndex — nesugedo); testų apskaitai
     bool in_late(std::uint32_t unit, std::uint32_t input) const;
 
 private:

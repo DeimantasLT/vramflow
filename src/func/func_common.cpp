@@ -8,6 +8,7 @@
 #include <mxl/time.h>
 
 #include <cinttypes>
+#include <csignal>
 #include <cstdio>
 #include <filesystem>
 #include <future>
@@ -27,13 +28,19 @@ std::atomic<bool>& fast_stop_flag() {
     return s;
 }
 
-// Signalai — tik sigwait atskiroje gijoje cikle (A25): pirmas SIGINT / SIGTERM — tvarkingas sustabdymas (stop_flag), antras —
-// greitas (fast_stop_flag: eilių išleidimas nutraukiamas). Variklio gija signalų negauna (užblokuoti visose gijose).
+// Signalai — tik sigwait atskiroje gijoje cikle (A25): pirmas SIGINT / SIGTERM / SIGHUP / SIGQUIT — tvarkingas sustabdymas
+// (stop_flag; flow'ai atlaisvinami, santrauka parašoma), antras — greitas (fast_stop_flag: eilių išleidimas nutraukiamas).
+// SIGHUP (terminalas uždarytas, supervizorius) ir SIGQUIT anksčiau nužudydavo procesą be flow'ų atlaisvinimo. SIGPIPE
+// ignoruojamas: uždarytas --stats-file skaitytuvas (FIFO, `| head`) ar UDP gavėjas — rašymo klaida, ne proceso mirtis.
+// Variklio gija signalų negauna (užblokuoti visose gijose).
 void install_signals() {
+    std::signal(SIGPIPE, SIG_IGN);
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGINT);
     sigaddset(&set, SIGTERM);
+    sigaddset(&set, SIGHUP);
+    sigaddset(&set, SIGQUIT);
     pthread_sigmask(SIG_BLOCK, &set, nullptr);
     std::thread([set] {
         for (int n = 0; n < 2; ++n) {

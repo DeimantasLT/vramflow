@@ -416,12 +416,8 @@ int run_composite(const Opts& o) {
         es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
-        if (res.reason == engine::EndReason::Fatal) {
-            if (st.fatal.empty()) st.fatal = res.fatal;
-            rc = res.exit_code ? res.exit_code : 2;
-        } else if (res.reason == engine::EndReason::FormatChange) {
-            st.fatal = res.fatal;
-            rc = kExitFormatChange;
+        rc = engine_rc(res, st);  // Fatal → kodas, FormatChange → 6, InputsTimeout → 4
+        if (res.reason == engine::EndReason::FormatChange) {
             // variklis baigė iškart (attach_poll → mismatch), begin_tick jau nebekviečiamas: kuris įėjimas grįžo kitu formatu
             for (std::size_t a = 0; a < in.size(); ++a)
                 if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");

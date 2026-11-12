@@ -390,8 +390,11 @@ struct Rig {
             CHECK(o.strictly_increasing());
             CHECK_FALSE(o.open_now);
             CHECK(o.opens == o.commits + o.cancels + o.failed);
-            // sugedęs vienetas (fail_unit) po gedimo indeksuose nebedalyvauja — per-indeksinė apskaita jam netaikoma
-            if (!eng->unit_failed(u)) check_run(fn, result, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
+            // Sugedęs vienetas (fail_unit) po gedimo nebedalyvauja (iki atkūrimo): per-indeksinė apskaita tikrinama iki pirmo
+            // gedimo indekso (anksčiau sugedusiam — visai netikrinta); išėjimo įrašų ↔ end_unit atitikimas — visam paleidimui.
+            RunResult upto = result;
+            if (eng->unit_ever_failed(u) && upto.last_index != kNoIndex) upto.last_index = std::min(upto.last_index, eng->unit_fail_index(u));
+            check_run(fn, upto, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
         }
         CHECK(fn.at_most_four_per_index());
     }

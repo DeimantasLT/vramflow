@@ -385,6 +385,7 @@ int run_dec(const Opts& o) {
                     if (anchor[n] == INT64_MIN) {
                         if (static_cast<int>(s.q.size()) < o.playout_frames) {
                             st.flows[n].inc("waiting_buffer");
+                            cq[n].expire();  // negroja — laikrodžio paaiškinti kadrai nesikaupia
                             ctx.no_content(n);
                             continue;
                         }
@@ -549,10 +550,7 @@ int run_dec(const Opts& o) {
         es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
-        if (res.reason == engine::EndReason::Fatal) {
-            if (st.fatal.empty()) st.fatal = res.fatal;
-            rc = res.exit_code ? res.exit_code : 2;
-        }
+        rc = engine_rc(res, st);  // Fatal → kodas, InputsTimeout → 4
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlow, st);
     }
     stop = true;  // darbininkai baigia per ≤ ~100 ms: libavformat pertraukimo kabliukas tikrina stop kiekviename laukime

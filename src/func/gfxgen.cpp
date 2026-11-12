@@ -341,10 +341,7 @@ int run_gfxgen(const Opts& o) {
         if (!rc) {
             const engine::RunResult res = eng.run(fn);
             es.finish();  // paskutinė statistikos eilutė
-            if (res.reason == engine::EndReason::Fatal) {
-                if (st.fatal.empty()) st.fatal = res.fatal;
-                rc = res.exit_code ? res.exit_code : 2;
-            }
+            rc = engine_rc(res, st);  // Fatal → kodas, InputsTimeout → 4
             to_summary(hub, eng, res, total, SkipScope::Process, st);
             if (fn.first != ~0ull) {  // first / last — iš įvykdytų tick'ų (kaip anksčiau)
                 st.first_index = fn.first;

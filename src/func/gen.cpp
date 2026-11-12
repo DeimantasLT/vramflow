@@ -263,10 +263,7 @@ int run_gen(const Opts& o) {
         es.finish();  // paskutinė statistikos eilutė
         loss = res.any_loss;  // praleisti indeksai, išėjimo klaidos — gen taip pat (anksčiau gen exit jų nerodė)
         failed = res.failed_units;
-        if (res.reason == engine::EndReason::Fatal) {
-            if (st.fatal.empty()) st.fatal = res.fatal;
-            rc = res.exit_code ? res.exit_code : 2;
-        }
+        rc = engine_rc(res, st);  // Fatal → kodas, InputsTimeout → 4
         to_summary(hub, eng, res, o.flows, SkipScope::Process, st);
         if (fn.first != ~0ull) {  // first / last — iš įvykdytų tick'ų (kaip anksčiau)
             st.first_index = fn.first;

@@ -365,13 +365,7 @@ int run_logo(const Opts& o_in) {
         es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
-        if (res.reason == engine::EndReason::Fatal) {
-            if (st.fatal.empty()) st.fatal = res.fatal;
-            rc = res.exit_code ? res.exit_code : 2;
-        } else if (res.reason == engine::EndReason::FormatChange) {
-            st.fatal = res.fatal;
-            rc = kExitFormatChange;
-        }
+        rc = engine_rc(res, st);  // Fatal → kodas, FormatChange → 6, InputsTimeout → 4
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlow, st);
     }
     if (!cpu) {

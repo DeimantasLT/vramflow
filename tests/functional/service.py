@@ -10,6 +10,11 @@ fsvc_loss          — tarnyboje (be --duration) aukštupis nužudomas kill -9: 
                      missing_fields > 0; tas pats su --duration 20 (griežtas, auto) → exit 4.
 fsvc_second_signal — du SIGTERM 20 ms atstumu: logo C / G, enc C (x264) / G (nvenc), composite C ir dec C (įėjimas tylus 3 s) baigiasi per
                      ≤ 200 ms po antrojo, exit 0 (tarnyba; anksčiau priimta ir 4), funkcijos išėjimo flow'ų domene nelieka.
+fsvc_signals       — SIGHUP ir SIGQUIT kaip SIGTERM: logo baigiasi tvarkingai (exit 0 per ≤ P + 600 ms, santrauka parašyta,
+                     išėjimų flow'ų domene nelieka; anksčiau — nužudomas be atlaisvinimo); SIGPIPE ignoruojamas (procesas gyvas).
+fenc_drain         — enc C (x264 faster, lookahead): įprasta pabaiga (--duration) su --drain-ms 1 — koderis išleidžiamas visas
+                     (packets_video == frames_encoded; anksčiau --drain-ms nukirsdavo ir įprastą pabaigą, nesuskaičiuojant);
+                     SIGTERM su --drain-ms 1 — nukirpti kadrai suskaičiuoti (encoder_flush_dropped_frames == frames − packets).
 fdec_reconnect     — gen | enc | dec C: enc nužudomas (kill -9) 22 s (> buvęs UDP timeout 20 s), tada paleidžiamas iš naujo:
                      dec įvykis „jungiamasi iš naujo“ (stderr, su laiku), input_reconnects ≥ 1, gyvoje statistikoje flow'as
                      Unhealthy tylos metu ir Healthy po grįžimo, fields_ok po grįžimo auga; du SIGTERM → exit 0 per ≤ 200 ms.
@@ -206,6 +211,88 @@ def fsvc_second_signal(out):
         ok = ms <= 200 and not left and rc == 0
         res.append(F.result(tid, "PASS" if ok else "FAIL",
                             why=f"exit={rc} (laukta 0) antras SIGTERM → pabaiga {ms} ms (riba 200); likę išėjimų flow'ai {left}"))
+    return res
+
+
+def fsvc_signals(out):
+    res = []
+    for name, sig in (("SIGHUP", signal.SIGHUP), ("SIGQUIT", signal.SIGQUIT), ("SIGPIPE", signal.SIGPIPE)):
+        v = F.vcommon(*V)
+        sub = f"fsvc-sig-{name.lower()}"
+        d = F.fresh_domain(sub)
+        g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", 1, *v)
+        lg = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, 0)]):
+                res.append(F.result(f"fsvc_signals[{name}]", "FAIL", why="gen flow'as neatsirado"))
+                continue
+            lg = F.FProc(out, sub, "logo", d, "--flows", 1, "--warmup", 1, *v)
+            F.wait_flows(d, [F.role_flow_id(2, 0)], 30)
+            time.sleep(4)
+            if sig == signal.SIGPIPE:
+                lg.p.send_signal(sig)
+                time.sleep(1)
+                alive = lg.p.poll() is None
+                rc, ms = term_timed(lg)
+            else:
+                alive = None
+                rc, ms = term_timed(lg, sig=sig)
+            left = flow_dir(d, 2, 0).exists()
+        finally:
+            g.term()
+            if lg is not None and lg.p.poll() is None:
+                lg.term()
+        s = lg.summary() or {}
+        ok = rc == 0 and ms <= P_MS + 600 and not left and s.get("exit_code") == 0 and (alive is None or alive)
+        res.append(F.result(f"fsvc_signals[{name}]", "PASS" if ok else "FAIL",
+                            why=f"exit={rc} pabaiga {ms} ms (riba {P_MS + 600:.0f}) santrauka={'yra' if s else 'nėra'} "
+                                f"išėjimas liko={left}{'' if alive is None else f' gyvas po SIGPIPE={alive}'}"))
+    return res
+
+
+def enc_streams(pr):
+    s = pr.summary() or {}
+    return s, (s.get("streams") or [{}])[0], (s.get("flows") or [{}])[0]
+
+
+def fenc_drain(out):
+    res = []
+    v = F.vcommon(*V)
+    for name, extra in (("pabaiga", ["--duration", 8]), ("SIGTERM", [])):
+        sub = f"fenc-drain-{'end' if extra else 'term'}"
+        d = F.fresh_domain(sub)
+        port = SIG_PORT + 300 + (0 if extra else 10)
+        g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", 1, "--audio", 1, *v)
+        sink = en = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, 0), F.role_flow_id(3, 0)]):
+                res.append(F.result(f"fenc_drain[{name}]", "FAIL", why="gen flow'ai neatsirado"))
+                continue
+            sink = ts_sink(out, sub, port, 1, 16)
+            en = F.FProc(out, sub, "enc", d, "--flows", 1, "--audio", 1, "--encoder", "x264", "--x264-preset", "faster",
+                         "--port-base", port, "--drain-ms", 1, "--warmup", 1, *extra, *v)
+            if extra:
+                rc = en.wait(timeout=60)
+            else:
+                time.sleep(8)
+                rc, _ = term_timed(en)
+        finally:
+            if sink is not None and sink.poll() is None:
+                sink.kill()
+            g.term()
+            if en is not None and en.p.poll() is None:
+                en.term()
+        s, st, f0 = enc_streams(en)
+        fe, pv, cut = st.get("frames_encoded", 0), st.get("packets_video", 0), f0.get("encoder_flush_dropped_frames", 0)
+        if extra:
+            ok = rc == 0 and fe > 150 and pv == fe and not cut
+            want = "packets_video == frames_encoded, nukirpta 0"
+        else:
+            ok = rc == 0 and fe > 150 and cut > 0 and cut == fe - pv
+            want = "encoder_flush_dropped_frames == frames_encoded − packets_video > 0"
+        res.append(F.result(f"fenc_drain[{name}]", "PASS" if ok else "FAIL",
+                            why=f"exit={rc} frames_encoded={fe} packets_video={pv} encoder_flush_dropped_frames={cut} "
+                                f"(laukta {want})"))
     return res
 
 
@@ -478,4 +565,4 @@ def fsvc_stats(out):
 
 
 TESTS = {"fsvc_run": fsvc_run, "fsvc_loss": fsvc_loss, "fsvc_second_signal": fsvc_second_signal, "fsvc_fail_unit": fsvc_fail_unit,
-         "fsvc_stats": fsvc_stats, "fdec_reconnect": fdec_reconnect}
+         "fsvc_stats": fsvc_stats, "fdec_reconnect": fdec_reconnect, "fsvc_signals": fsvc_signals, "fenc_drain": fenc_drain}

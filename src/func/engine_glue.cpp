@@ -90,7 +90,9 @@ int engine_rc(const engine::RunResult& r, Stats& st) {
         case engine::EndReason::FormatChange:
             st.fatal = r.fatal;
             return kExitFormatChange;
-        case engine::EndReason::InputsTimeout:
+        case engine::EndReason::InputsTimeout:  // būtinas įėjimas neprisijungė per --input-wait-ms (exit 4, kaip dokumentuota)
+            st.fatal = r.fatal;
+            return kExitInputs;
         case engine::EndReason::Stopped:
         case engine::EndReason::Duration: return 0;
     }

@@ -150,3 +150,17 @@ TEST_CASE("clock_queue: paaiškinti kadrai panaudojami vieną kartą, sub-kadro 
     b.on_step(-20'000'000);  // 20 + 20 = 40 ms
     CHECK(b.pending() == 1);
 }
+
+TEST_CASE("clock_queue: kol negroja (buferis pildomas), paaiškinti kadrai nesikaupia (B6)", "[timing][clock_queue]") {
+    ClockQueueBudget b(kFrame);
+    b.on_step(-200'000'000);  // 5 kadrai — žingsnis, kol srautas pildo buferį
+    CHECK(b.pending() == 5);
+    b.expire();  // dec: kadro tick'as be atkūrimo (waiting_buffer)
+    CHECK(b.pending() == 0);
+    // paleidus atkūrimą tikri kadrai nebeišmetami kaip „laikrodžio pasekmė“
+    CHECK(b.on_frame_tick(kDepth + 5, kDepth, kCap, 0).clock_drop == 0);
+    b.on_step(-30'000'000);  // sub-kadro likutis išlieka: 0 + 30 ms < kadras
+    b.expire();
+    b.on_step(-10'000'000);  // 30 + 10 = 40 ms
+    CHECK(b.pending() == 1);
+}

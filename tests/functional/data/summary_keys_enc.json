@@ -49,6 +49,7 @@
   ],
   "hist": [],
   "flows": [
+   "encoder_flush_dropped_frames",
    "frames_queued",
    "lateness_s",
    "loss_s",

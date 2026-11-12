@@ -74,7 +74,8 @@ struct Stream {
     std::string error;
     // statistika (rašo darbininkas; skaitoma po join)
     std::uint64_t frames_encoded = 0, packets_video = 0, packets_audio = 0, bytes_video = 0, mux_errors = 0, encode_errors = 0;
-    std::uint64_t drain_until = 0, drain_dropped = 0;  // sustabdant: išleidimo riba (TAI), neišleisti kadrai
+    std::uint64_t drain_until = 0, drain_dropped = 0;  // sustabdant: išleidimo riba (TAI, 0 — neribota), neišleisti kadrai
+    std::uint64_t flush_dropped = 0;  // koderio išleidimas nutrauktas (--drain-ms / antras signalas): koderyje likę kadrai
     Histogram encode_ms;
     // Garso laiko juosta (PTS iš kadro indekso): srauto būsena, ne funkcijos static — keli srautai vienoje gijoje nesusimaišo.
     mxlv::timing::AudioTimeline audio_tl;
@@ -262,7 +263,8 @@ void worker(Ctx& cx, Stream& s) {
             std::unique_lock lk(s.m);
             s.cv.wait(lk, [&] { return !s.q.empty() || s.done; });
             if (s.q.empty()) break;
-            if (s.done && (fast_stop_flag().load() || now_tai() > s.drain_until)) {  // --drain-ms praėjo / antras signalas
+            // --drain-ms praėjo (tik sustabdant signalu; įprasta pabaiga — neribota) / antras signalas
+            if (s.done && (fast_stop_flag().load() || (s.drain_until != 0 && now_tai() > s.drain_until))) {
                 s.drain_dropped += s.q.size();
                 break;  // likusius atlaisvina out: blokas
             }
@@ -310,10 +312,14 @@ void worker(Ctx& cx, Stream& s) {
     // signalu (kiekvienas receive_packet koduoja kadrą)
     while (!fast_stop_flag().load() && (s.drain_until == 0 || now_tai() <= s.drain_until) &&
            avcodec_receive_packet(vc, pkt) == 0) {
+        ++s.packets_video;
+        s.bytes_video += pkt->size;
         pkt->stream_index = 0;
         av_packet_rescale_ts(pkt, vc->time_base, oc->streams[0]->time_base);
         av_interleaved_write_frame(oc, pkt);
     }
+    // kiekvienas koderiui perduotas kadras — lygiai vienas video paketas; trūkstami — išleidimas nutrauktas (skaičiuojama)
+    if (s.frames_encoded > s.packets_video) s.flush_dropped = s.frames_encoded - s.packets_video;
     if (ac) {  // AAC flush
         avcodec_send_frame(ac, nullptr);
         while (avcodec_receive_packet(ac, pkt) == 0) {
@@ -798,21 +804,17 @@ int run_enc(const Opts& o) {
         es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
         failed = res.failed_units;
-        if (res.reason == engine::EndReason::Fatal) {
-            if (st.fatal.empty()) st.fatal = res.fatal;
-            rc = res.exit_code ? res.exit_code : 2;
-        } else if (res.reason == engine::EndReason::FormatChange) {
-            st.fatal = res.fatal;
-            rc = kExitFormatChange;
-        }
+        rc = engine_rc(res, st);  // Fatal → kodas, FormatChange → 6, InputsTimeout → 4
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlowFrames, st);
         if (res.first_index != engine::kNoIndex) {
             st.first_index = res.first_index - (res.first_index % gpf);
             st.last_index = res.last_index - ((res.last_index + 1) % gpf);  // kadro paskutinis (apatinis) laukas, ne viršutinis
         }
     }
-    // Sustabdymas (D8): darbininkai išleidžia eilę ne ilgiau kaip --drain-ms (antras signalas — iškart); kas liko — atmetama.
-    const std::uint64_t drain_until = now_tai() + std::uint64_t{o.drain_ms} * 1'000'000;
+    // Sustabdymas (D8): signalu — darbininkai išleidžia eilę ir koderį ne ilgiau kaip --drain-ms (antras signalas — iškart);
+    // kas liko — atmetama ir suskaičiuojama (drain_dropped_frames, encoder_flush_dropped_frames). Įprasta pabaiga
+    // (--duration, fatalus) — išleidžiama viskas (anksčiau --drain-ms nukirsdavo ir ją, nesuskaičiuojant).
+    const std::uint64_t drain_until = stop.load() ? now_tai() + std::uint64_t{o.drain_ms} * 1'000'000 : 0;
     for (auto& s : streams) {
         {
             std::lock_guard g(s->m);
@@ -834,6 +836,7 @@ int run_enc(const Opts& o) {
         }
         st.flows[n].inc("encode_errors", s.encode_errors);
         if (s.drain_dropped) st.flows[n].inc("drain_dropped_frames", s.drain_dropped);  // įvykio raktas: sustabdant neišleista
+        if (s.flush_dropped) st.flows[n].inc("encoder_flush_dropped_frames", s.flush_dropped);  // įvykio raktas
         st.flows[n].inc("mux_errors", s.mux_errors);
         st.hist["encode_ms"].merge(s.encode_ms);
         if (!s.error.empty() && !rc) { st.fatal = "srautas " + std::to_string(n) + ": " + s.error; rc = 2; }

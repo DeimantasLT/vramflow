@@ -30,6 +30,10 @@ public:
     }
     // Paaiškinti, dar nepanaudoti kadrai: floor(suma / kadras).
     std::uint64_t pending() const { return back_ns_ / static_cast<std::uint64_t>(frame_ns_); }
+    // Kadro tick'as, kai srautas negroja (pildomas buferis): paaiškinti kadrai nebegalioja — eilė pildoma iš naujo, todėl
+    // žingsnis jos nebepailgins. Pernešamas tik sub-kadro likutis (kaip po on_frame_tick). Anksčiau jie kaupėsi ir paleidus
+    // atkūrimą išmesdavo tikrus kadrus kaip „laikrodžio pasekmę“.
+    void expire() { back_ns_ %= static_cast<std::uint64_t>(frame_ns_); }
 
     struct Tick {
         std::uint64_t clock_drop = 0;    // išmesti dabar: laikrodžio pasekmė

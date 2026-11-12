@@ -126,6 +126,7 @@ struct TickEngine::Impl {
         // Atkūrimas (D8): kitas bandymas (monotoninis laikas), dabartinis atidėjimas, paskutinio atsigavimo momentas.
         std::int64_t retry_at = 0, recovered_at = INT64_MIN;
         double backoff_s = 0;
+        Index fail_index = kNoIndex;  // pirmo gedimo indeksas (tick'o, kuriame sugedo)
     };
     struct Rec {
         Index idx = kNoIndex;
@@ -620,6 +621,7 @@ struct TickEngine::Impl {
     void fail_unit(Unit& u, std::string why) {
         if (u.failed) return;
         u.failed = u.ever_failed = true;
+        if (u.fail_index == kNoIndex) u.fail_index = ctx_index;
         ++failed_n;
         ++hub.unit(u.hub).failures;
         if (res.failed_why.empty()) res.failed_why = why;
@@ -1422,6 +1424,7 @@ InState TickEngine::in_state(std::uint32_t unit, std::uint32_t input) const {
 }
 bool TickEngine::unit_failed(std::uint32_t unit) const { return d_->units[unit].failed; }
 bool TickEngine::unit_ever_failed(std::uint32_t unit) const { return d_->units[unit].ever_failed; }
+Index TickEngine::unit_fail_index(std::uint32_t unit) const { return d_->units[unit].fail_index; }
 bool TickEngine::in_late(std::uint32_t unit, std::uint32_t input) const {
     return d_->ins[d_->units[unit].in0 + input].st.late();
 }
