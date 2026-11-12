@@ -10,7 +10,12 @@ fgold_logo      — gen | logo | verify --mode logo --every 1, N = 2, 10 s, vari
                   (last_index − first_index + 1) · N ir visi praradimų skaitikliai 0; santraukų raktų aibės == įrašytoms.
 fgold_composite — gen + gfxgen (pace, 2 sluoksniai) | composite | verify --mode composite --every 1, tos pačios lygybės.
 fgold_dec       — klipas (ffmpeg -re → UDP) | dec | verify --mode dec --ref, N = 1: samples > 0, CRC neatitikimų 0,
-                  parity_mismatch == 0, dec be praradimų po paleidimo.
+                  parity_mismatch == 0, dec be praradimų po paleidimo; laikrodžiui priskirti išmetimai ≤ ką paaiškina žingsniai
+                  atgal (dec_clock_rule).
+fgold_enc       — gen (video + garsas) | enc --audio 1 → ts_sink, N = 2 (C — x264, G — nvenc): exit 0, kiekvienam srautui
+                  frames_queued == kadrų span (last_index − first_index + 1) / 2 ir frames_encoded == frames_queued, praradimų
+                  skaitikliai 0 (ir garso), packets_audio > 0, last_index — kadro paskutinis (apatinis) laukas, TS be CC / sync
+                  klaidų; santraukos raktai == summary_keys_enc.json.
 
 Raktų sąrašai: tests/functional/data/summary_keys_<rolė>.json — įrašyti iš dabartinių binarų (`golden.py record <out>`).
 `required` — raktai, kurie yra visuose įrašymo paleidimuose; `optional` — kurie pasitaiko ne visuose (skaitikliai, kuriuos funkcija
@@ -37,6 +42,9 @@ DUR = int(os.environ.get("FGOLD_DURATION", "10"))
 CLIP = os.environ.get("FGOLD_CLIP", str(pathlib.Path.home() / "media-test" / "clip.ts"))
 REF = os.environ.get("FGOLD_REF", str(pathlib.Path.home() / "media-test" / "ref_crc.json"))
 DEC_PORT = int(os.environ.get("FGOLD_DEC_PORT", "21500"))
+ENC_PORT = int(os.environ.get("FGOLD_ENC_PORT", "21600"))
+ENC_LOSS = ("late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
+            "clock_skips_frames", "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors", "output_errors")
 COMPOSITE_EVERY = int(os.environ.get("FGOLD_COMPOSITE_EVERY", "1"))  # planas: 1; diagnostikai (verify apkrova)
 COMPOSITE_MIN_CHECKED = float(os.environ.get("FGOLD_COMPOSITE_MIN_CHECKED", "0.5"))
 SECTIONS = ("top", "proc", "hist", "flows")
@@ -93,7 +101,8 @@ def keys_check(role, s):
 
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src" / "func"
-ROLE_SRC = {"gen": "gen.cpp", "logo": "logo.cpp", "composite": "composite.cpp", "gfxgen": "gfxgen.cpp", "dec": "dec.cpp"}
+ROLE_SRC = {"gen": "gen.cpp", "logo": "logo.cpp", "composite": "composite.cpp", "gfxgen": "gfxgen.cpp", "dec": "dec.cpp",
+            "enc": "enc.cpp"}
 
 
 def lazy_keys(role):
@@ -221,6 +230,76 @@ def run_dec(out, tag, impl, storage):
     return {"N": N, "rc": {"dec": rd, "verify": rv}, "dec": F.vsummary(dc, "dec"), "verify-dec": F.vsummary(vf, "verify-dec")}
 
 
+def run_enc(out, tag, impl, storage):
+    N = 2
+    sub = f"fgold-enc-{tag}"
+    d = F.fresh_domain(sub)
+    v = F.vcommon(impl, storage)
+    sink_json = pathlib.Path(out) / sub / "sink.json"
+    g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", N, "--audio", 1, "--duration", DUR + 40, *v)
+    e = sink = None
+    re_ = None
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)] + [F.role_flow_id(3, n) for n in range(N)]):
+            return {"err": "gen flow'ai neatsirado"}
+        sink = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "perf/ts_sink.py"), "--port-base",
+                                 str(ENC_PORT), "--flows", str(N), "--seconds", str(DUR + 6), "--out", str(sink_json)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ea = ["--encoder", "x264", "--x264-preset", "ultrafast"] if impl == "cpu" else ["--encoder", "nvenc"]
+        e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--port-base", ENC_PORT, "--duration", DUR, "--warmup", 2, *ea, *v)
+        re_ = e.wait(timeout=DUR + 60)
+        sink.wait(timeout=60)
+    finally:
+        if sink is not None and sink.poll() is None:
+            sink.kill()
+        for pr in (e, g):
+            if pr is not None:
+                pr.term()
+    try:
+        sk = json.loads(sink_json.read_text())
+    except (OSError, ValueError):
+        sk = {}
+    return {"N": N, "rc": {"enc": re_}, "enc": F.vsummary(e, "enc"), "sink": sk}
+
+
+def fgold_enc(out):
+    res = []
+    for tag, impl, storage in variants():
+        tid = f"fgold_enc[{tag}]"
+        r = run_enc(out, tag, impl, storage)
+        if r.get("err"):
+            res.append(F.result(tid, "FAIL", why=r["err"]))
+            continue
+        se, N = r["enc"], r["N"]
+        fl = flows_of(se)
+        span = ((se or {}).get("last_index", 0) - (se or {}).get("first_index", 0) + 1) // 2 if se else 0
+        bad = []
+        if len(fl) != N or span <= 0:
+            bad.append(f"flow'ų {len(fl)} / span {span}")
+        if se and se.get("last_index", 0) % 2 != 1:
+            bad.append(f"last_index {se.get('last_index')} — ne kadro paskutinis (apatinis) laukas")
+        for n, f in enumerate(fl):
+            lost = {k: f[k] for k in ENC_LOSS if f.get(k)}
+            if lost:
+                bad.append(f"#{n} praradimai {lost}")
+            if f.get("frames_queued", 0) != span:
+                bad.append(f"#{n} frames_queued={f.get('frames_queued', 0)} != span {span}")
+            if f.get("frames_encoded", 0) != f.get("frames_queued", 0):
+                bad.append(f"#{n} frames_encoded={f.get('frames_encoded', 0)} != frames_queued={f.get('frames_queued', 0)}")
+            if not f.get("packets_audio", 0):
+                bad.append(f"#{n} packets_audio == 0")
+        tot = (r.get("sink") or {}).get("totals") or {}
+        if tot.get("cc_errors", 0) or tot.get("sync_errors", 0) or not tot.get("video_pes", 0):
+            bad.append(f"TS: {tot}")
+        kc = keys_check("enc", se)
+        if not kc[0]:
+            bad.append(kc[1])
+        ok = r["rc"]["enc"] == 0 and not bad
+        res.append(F.result(tid, "PASS" if ok else "FAIL", why=f"exit={r['rc']} span={span} kadrų {'; '.join(bad) or '-'}; {kc[1]}",
+                            enc=se))
+    return res
+
+
 # --- tvirtinimai ----------------------------------------------------------------------------------------------------------
 
 def verify_lines(sv, N, min_checked=1.0):
@@ -320,27 +399,29 @@ def fgold_dec(out):
     return res
 
 
-TESTS = {"fgold_logo": fgold_logo, "fgold_composite": fgold_composite, "fgold_dec": fgold_dec}
+TESTS = {"fgold_logo": fgold_logo, "fgold_composite": fgold_composite, "fgold_dec": fgold_dec, "fgold_enc": fgold_enc}
 
 
 def rebuild(out):
     """Perskaičiuoja summary_keys_*.json iš jau įrašytų paleidimų (rec*/…/summary-<rolė>.json) be naujų paleidimų."""
     out = pathlib.Path(out)
-    for role in ("gen", "logo", "verify-logo", "gfxgen", "composite", "verify-composite", "dec", "verify-dec"):
+    for role in ("gen", "logo", "verify-logo", "gfxgen", "composite", "verify-composite", "dec", "verify-dec", "enc"):
         files = sorted(out.glob(f"rec*/**/summary-{role}.json"))
         record_keys(role, [json.loads(f.read_text()) for f in files])
         print(f"[rebuild] {data_file(role).name}: {len(files)} santraukų", flush=True)
 
 
-def record(out, runs):
-    """Įrašo summary_keys_<rolė>.json: kiekvienas scenarijus (C ir G) `runs` kartų, raktai — sankirta / sąjunga."""
+def record(out, runs, only=""):
+    """Įrašo summary_keys_<rolė>.json: kiekvienas scenarijus (C ir G) `runs` kartų, raktai — sankirta / sąjunga. only —
+    tik šie scenarijai (pvz. „enc“)."""
     out = pathlib.Path(out)
     acc = {}
+    scen = ((run_logo, ("gen", "logo", "verify-logo")), (run_composite, ("gen", "gfxgen", "composite", "verify-composite")),
+            (run_dec, ("dec", "verify-dec")), (run_enc, ("enc",)))
+    scen = [x for x in scen if not only or x[0].__name__ == f"run_{only}"]
     for it in range(runs):
         for tag, impl, storage in variants():
-            for fn, roles in ((run_logo, ("gen", "logo", "verify-logo")),
-                              (run_composite, ("gen", "gfxgen", "composite", "verify-composite")),
-                              (run_dec, ("dec", "verify-dec"))):
+            for fn, roles in scen:
                 r = fn(out / f"rec{it}", f"{tag}", impl, storage)
                 if r.get("err"):
                     print(f"[record] {fn.__name__}[{tag}] #{it}: {r['err']}", flush=True)
@@ -358,6 +439,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "rebuild":
         rebuild(sys.argv[2])
     elif len(sys.argv) >= 3 and sys.argv[1] == "record":
-        record(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 3)
+        record(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "")
     else:
-        sys.exit("naudojimas: golden.py record <out_dir> [paleidimų_skaičius] | rebuild <out_dir>  (testai — per functional.py --only fgold_*)")
+        sys.exit("naudojimas: golden.py record <out_dir> [paleidimų_skaičius] [scenarijus] | rebuild <out_dir>  "
+                 "(testai — per functional.py --only fgold_*)")

@@ -1,0 +1,48 @@
+{
+ "role": "enc",
+ "runs": 6,
+ "required": {
+  "top": [
+   "duration_s",
+   "encoder",
+   "exit_code",
+   "first_index",
+   "flows",
+   "flows_n",
+   "format",
+   "hist",
+   "last_index",
+   "preset",
+   "proc",
+   "role",
+   "run_id",
+   "streams",
+   "versions"
+  ],
+  "proc": [],
+  "hist": [
+   "encode_ms",
+   "frame_lateness",
+   "weave_ms"
+  ],
+  "flows": [
+   "audio_reanchors",
+   "audio_silence_samples",
+   "audio_skipped_samples",
+   "encode_errors",
+   "frames_encoded",
+   "lateness_max_us",
+   "mux_errors",
+   "packets_audio",
+   "reattached"
+  ]
+ },
+ "optional": {
+  "top": [],
+  "proc": [],
+  "hist": [],
+  "flows": [
+   "frames_queued"
+  ]
+ }
+}

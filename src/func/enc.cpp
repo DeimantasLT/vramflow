@@ -768,7 +768,7 @@ int run_enc(const Opts& o) {
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlowFrames, st);
         if (res.first_index != engine::kNoIndex) {
             st.first_index = res.first_index - (res.first_index % gpf);
-            st.last_index = res.last_index;
+            st.last_index = res.last_index - ((res.last_index + 1) % gpf);  // kadro paskutinis (apatinis) laukas, ne viršutinis
         }
     }
     for (auto& s : streams) {

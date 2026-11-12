@@ -272,3 +272,35 @@ TEST_CASE("review3: C fazė — du paruošti per Wr vienas nuo kito — vienas p
     CHECK(calls[0]->units.size() == 2);
     CHECK(static_cast<std::int64_t>(calls[0]->tai) - T(kI) <= 27'000'000);
 }
+
+TEST_CASE("review3: Blocked vieneto gyvo brolio stebėjimas — Gone atjungia įėjimą", "[engine][review3][observe]") {
+    // composite forma: 2 būtini įėjimai; in1 niekada neprisijungia (vienetas Blocked), in0 gyvas — jo grain'as tik stebimas
+    // (observe). Nuo T(1010) in0 flow'as „atkurtas“ (probe → Gone): anksčiau stebėjimas tai ignoruodavo (in0 likdavo Live).
+    VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    ScriptedInput a(clk), b(clk);
+    RecordingOutput out(clk);
+    RecordingFunction fn(clk);
+    b.attachable = [](std::uint64_t) { return false; };
+    a.gone = [](std::uint64_t now) { return static_cast<std::int64_t>(now) >= T(1010); };
+    a.attachable = [](std::uint64_t now) { return static_cast<std::int64_t>(now) < T(1010); };
+    InState at_end = InState::Waiting;
+    fn.on_end_tick = [&](Index i, TickContext&) {
+        if (i >= 1015) stop = true;
+    };
+    EngineConfig cfg = Rig::test_config();
+    TickEngine eng(cfg, clk, hub, stop);
+    UnitSpec s;
+    s.name = "comp";
+    s.in.push_back(InputSpec{&a, {}, 1, Need::Required, InMode::Exact});
+    s.in.push_back(InputSpec{&b, {}, 1, Need::Required, InMode::Exact});
+    s.out.push_back(&out);
+    std::uint32_t id = 0;
+    std::string why;
+    REQUIRE(eng.add_unit(s, id, why));
+    eng.run(fn);
+    at_end = eng.in_state(0, 0);
+    CHECK(at_end != InState::Live);
+    CHECK(hub.in(eng.in_id(0, 0)).detaches >= 1);
+}

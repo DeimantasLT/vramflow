@@ -29,7 +29,9 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--flows", o.flows)->check(CLI::Range(1u, 128u));
     c->add_option("--flow-base", o.flow_base);
     c->add_option("--run-seed", o.run_seed);
-    c->add_option("--duration", o.duration_s);
+    c->add_option("--duration", o.duration_s,
+                  "trukmė, s (numatyta 30). gen, logo, composite, enc, dec: 0 — veikti iki sustabdymo (SIGINT / SIGTERM; "
+                  "tarnybos režimas, K-T8); verify, gfxgen: 0 — baigti iškart");
     c->add_option("--warmup", o.warmup_s);
     c->add_option("--out", o.out);
     c->add_option("--device-uuid", o.device_uuid);

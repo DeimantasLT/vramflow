@@ -370,3 +370,34 @@ def fout_error(out):
 
 
 TESTS["fout_error"] = fout_error
+
+
+def fduration0(out):
+    """--duration 0 — veikti iki sustabdymo (planas D8 / K-T8; prieš migraciją — 0 tick'ų): gen ir logo po 3 s gyvi, SIGTERM →
+    exit 0, santraukoje ≥ 100 laukų; `--help` tai sako. C variantas."""
+    res = []
+    hl = subprocess.run([F.FUNC_BIN, "logo", "--help"], capture_output=True, text=True, env=F.ENV)
+    res.append(F.result("fduration0[--help]", "PASS" if "0 — veikti iki sustabdymo" in " ".join(hl.stdout.split()) else "FAIL",
+                        why=f"exit {hl.returncode}"))
+    v = F.vcommon("cpu", "host")
+    d = F.fresh_domain("fdur0")
+    g = F.FProc(out, "fdur0/gen", "gen", d, "--flows", 1, "--duration", 0, *v)
+    lg = None
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, 0)]):
+            return res + [F.result("fduration0", "FAIL", why="gen flow'as neatsirado")]
+        lg = F.FProc(out, "fdur0", "logo", d, "--flows", 1, "--duration", 0, "--warmup", 1, *v)
+        time.sleep(4)
+        alive = g.p.poll() is None and lg.p.poll() is None
+    finally:
+        rl = lg.term() if lg is not None else None
+        rg = g.term()
+    for name, pr, rc in (("gen", g, rg), ("logo", lg, rl)):
+        s = (pr.summary() if pr is not None else None) or {}
+        span = s.get("last_index", 0) - s.get("first_index", 0) + 1 if s.get("first_index") is not None else 0
+        ok = alive and rc == 0 and span >= 100
+        res.append(F.result(f"fduration0[{name}]", "PASS" if ok else "FAIL", why=f"gyvi po 4 s={alive} exit={rc} span={span}"))
+    return res
+
+
+TESTS["fduration0"] = fduration0

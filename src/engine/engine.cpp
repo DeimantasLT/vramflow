@@ -896,6 +896,9 @@ struct TickEngine::Impl {
                     in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a);
                 } else if (p == Probe::Invalid) {
                     in.st.on_invalid_grain(c);
+                } else if (p == Probe::Gone) {  // flow atkurtas / ištrintas — kaip ir kitur: Detached, prisijungs iš naujo
+                    in.st.on_gone(c);
+                    detach(in);
                 }
             } else if (s == InState::Stalled) {
                 const Index h = in.spec.port->head();
