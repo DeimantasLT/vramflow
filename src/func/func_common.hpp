@@ -184,6 +184,10 @@ void install_signals();
 int cuda_device(const std::string& uuid);  // -1 nerasta
 std::string cuda_options(int dev);         // cuda-linear writer'io opcijos
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json = "");
+// CPU variantas (--impl cpu): santraukos „versions“ skaičiuojamos fone paleidžiant (libcuda įkėlimas ~85 ms WSL2 — anksčiau
+// santraukos rašyme, t. y. sustabdymo kelyje po antro signalo). GPU variantams — santraukos metu (CUDA jau inicializuota;
+// fone — negalima: FFmpeg turi pirmas sukurti pirminį kontekstą, enc.cpp).
+void prefetch_versions(const Opts& o);
 double warm_tai_after(double warmup_s);    // TAI ns, nuo kada skaičiuoti latencijas
 
 // --- Paleidimas ir sustabdymas (planas §P6) ---------------------------------------------------------------------------

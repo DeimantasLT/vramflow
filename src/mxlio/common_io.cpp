@@ -74,7 +74,7 @@ void json_escape_into(std::string& out, const std::string& s) {
     out.push_back('"');
 }
 
-std::string versions_json() {
+std::string versions_json(bool device) {
     std::string j = "{";
     mxlVersionType v{};
     if (mxlGetVersion(&v) == MXL_STATUS_OK) {
@@ -87,7 +87,9 @@ std::string versions_json() {
     cudaDriverGetVersion(&drv);
     j += "\"cuda_runtime\":" + std::to_string(rt) + ",\"cuda_driver\":" + std::to_string(drv);
     cudaDeviceProp p{};
-    if (cudaGetDeviceProperties(&p, 0) == cudaSuccess) {
+    if (!device) {
+        j += ",\"gpu\":null";
+    } else if (cudaGetDeviceProperties(&p, 0) == cudaSuccess) {
         j += ",\"gpu\":";
         json_escape_into(j, p.name);
         j += ",\"gpu_uuid\":\"" + cuda_uuid_string(0) + "\"";

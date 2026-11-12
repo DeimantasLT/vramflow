@@ -155,7 +155,10 @@ private:
     std::uint64_t start_mono_ = 0;
 };
 
-std::string versions_json();
+// device == false — be įrenginio laukų (gpu, gpu_uuid, gpu_cc): cudaGetDeviceProperties inicializuoja CUDA, o CPU varianto
+// procesas CUDA nenaudoja. Ir be jų cudaDriverGetVersion įkelia libcuda (WSL2 — ~85 ms): CPU variantui versijos
+// skaičiuojamos fone paleidžiant (func::prefetch_versions), ne sustabdymo kelyje (A3).
+std::string versions_json(bool device = true);
 void json_escape_into(std::string& out, const std::string& s);
 
 }  // namespace mxlv

@@ -10,6 +10,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <thread>
 
 #include "mxlio/common_io.hpp"
@@ -160,10 +161,23 @@ std::string seconds_json(const std::map<std::uint64_t, std::uint64_t>& m) {
 }
 }  // namespace
 
+namespace {
+std::shared_future<std::string>& versions_future() {
+    static std::shared_future<std::string> f;
+    return f;
+}
+}  // namespace
+
+void prefetch_versions(const Opts& o) {
+    if (o.impl == "cpu") versions_future() = std::async(std::launch::async, [] { return mxlv::versions_json(false); }).share();
+}
+
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json) {
     std::error_code ec;
     std::filesystem::create_directories(o.out, ec);
-    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + mxlv::versions_json() + ",\"format\":\"" + vramflow::format_name(o.fmt) + "\",\"run_id\":\"" + o.run_id + "\",\"flows_n\":" + std::to_string(o.flows) +
+    // CPU variantas (C) CUDA nenaudoja: versijos — iš paleidimo metu fone paruoštų (prefetch_versions), be įrenginio laukų (A3)
+    const std::string vj = versions_future().valid() ? versions_future().get() : mxlv::versions_json(o.impl != "cpu");
+    std::string j = "{\"role\":\"" + role + "\",\"versions\":" + vj + ",\"format\":\"" + vramflow::format_name(o.fmt) + "\",\"run_id\":\"" + o.run_id + "\",\"flows_n\":" + std::to_string(o.flows) +
                     ",\"duration_s\":" + std::to_string(o.duration_s) + ",\"exit_code\":" + std::to_string(s.exit_code) +
                     ",\"first_index\":" + std::to_string(s.first_index == ~0ull ? 0 : s.first_index) +
                     ",\"last_index\":" + std::to_string(s.last_index) + ",\"proc\":" + map_json(s.proc) + ",\"hist\":{";

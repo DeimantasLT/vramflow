@@ -18,6 +18,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import functional as F  # noqa: E402
@@ -30,19 +31,30 @@ def flow_dir(d, role, n):
     return pathlib.Path(d) / f"{F.role_flow_id(role, n)}.mxl-flow"
 
 
-def term_timed(pr, signals=1, gap_s=0.0):
-    """signals × SIGTERM (gap_s tarpu); grąžina (exit, ms nuo PASKUTINIO signalo iki pabaigos)."""
+def term_timed(pr, signals=1, gap_s=0.0, sig=signal.SIGTERM):
+    """signals × sig (gap_s tarpu); grąžina (exit, ms nuo PASKUTINIO signalo iki pabaigos). Laukiama blokuojančiu waitpid
+    atskiroje gijoje: Popen.wait(timeout=…) apklausia kas ≤ 50 ms, todėl matavimas būdavo suapvalintas į viršų iki +50 ms
+    (A3: 215,7 ms buvo ~170–215 ms)."""
+    done = {}
+
+    def reap():
+        try:
+            done["rc"] = pr.p.wait()  # be timeout — os.waitpid blokuoja, grįžta iškart po pabaigos
+        finally:
+            done["t"] = time.monotonic()
+
+    th = threading.Thread(target=reap, daemon=True)
+    th.start()
     for k in range(signals):
-        pr.p.send_signal(signal.SIGTERM)
+        pr.p.send_signal(sig)
         t = time.monotonic()
         if k + 1 < signals:
             time.sleep(gap_s)
-    try:
-        rc = pr.p.wait(timeout=30)
-    except subprocess.TimeoutExpired:
+    th.join(timeout=30)
+    if th.is_alive():
         pr.p.kill()
-        rc = pr.p.wait()
-    return rc, round((time.monotonic() - t) * 1000.0, 1)
+        th.join(timeout=10)
+    return done.get("rc"), round((done.get("t", time.monotonic()) - t) * 1000.0, 1)
 
 
 def fields_ok(s):

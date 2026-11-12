@@ -212,6 +212,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    prefetch_versions(o);  // CPU variantas: santraukos versijos fone (ne sustabdymo kelyje)
     if (app.got_subcommand("gen")) return run_gen(o);
     if (app.got_subcommand("gfxgen")) return run_gfxgen(o);
     if (app.got_subcommand("logo")) return run_logo(o);
