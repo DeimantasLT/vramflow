@@ -22,12 +22,21 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "perf"))
 import domain  # noqa: E402  tests/perf/domain.py — unikalūs domenai, trynimas tik be gyvų savininkų
+import keepwarm  # noqa: E402  tests/perf/keepwarm.py — GPU virš P8 GPU variantų metu (VRAMFLOW_GPU_KEEPWARM=0 išjungia)
 
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
 FUNC_BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
 MXL_INFO = os.environ.get("MXL_INFO", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin/mxl-info")
 LIB = os.environ.get("MXL_LIB", str(pathlib.Path.home() / "src/mxl-pr653/install/Linux-Clang-Release/lib"))
 ENV = dict(os.environ, LD_LIBRARY_PATH=LIB)
+# GPU „šildymas“ (tests/perf/keepwarm.py): įjungiamas GPU variantams, išjungiamas CPU (C) variantams — per gpu_mode()
+# (vcommon jį kviečia kiekvieno varianto pradžioje); kiekvienas rezultatas įrašo, ar jis veikė (laukas keepwarm).
+KW = keepwarm.KeepWarm(FUNC_BIN, ENV)
+
+
+def gpu_mode(impl):
+    """Prieš varianto procesus: impl gpu (H, G) — keepwarm veikia, cpu (C) — ne."""
+    KW.want(impl == "gpu")
 
 
 class Proc:
@@ -90,10 +99,11 @@ def leftovers(domain):
 
 def result(tid, status, **details):
     print(f"[{status:7s}] {tid}: {details.get('why', '')}", flush=True)
-    return {"id": tid, "status": status, **details}
+    return {"id": tid, "status": status, "keepwarm": KW.on(), **details}
 
 
 def f5a(out):
+    gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     d = fresh_domain("f5a")
     a = Proc("writer", d, out / "f5a/writerA", "--duration", 25, "--gc-before-create")
     time.sleep(2)
@@ -117,6 +127,7 @@ def f5a(out):
 
 
 def f5b(out, iters=10):
+    gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     bad = []
     for it in range(iters):
         d = fresh_domain(f"f5b")
@@ -142,6 +153,7 @@ def f5b(out, iters=10):
 
 
 def f6(out):
+    gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     res = []
     d = fresh_domain("f6")
     w1 = Proc("writer", d, out / "f6/w1", "--duration", 60, "--gc-before-create")
@@ -180,6 +192,7 @@ def f6(out):
 
 
 def f7(out, cycles=10):
+    gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     d = fresh_domain("f7")
     w = Proc("writer", d, out / "f7/writer", "--duration", 18 + cycles * 3, "--gc-before-create")
     time.sleep(2)
@@ -206,6 +219,7 @@ def f7(out, cycles=10):
 
 
 def f8(out):
+    gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     d = fresh_domain("f8")
     w = Proc("writer", d, out / "f8/writer", "--duration", 50, "--gc-before-create")
     time.sleep(2)
@@ -248,6 +262,7 @@ def fgfx1(out):
         o = pathlib.Path(out) / f"fgfx1-{tag}"
         o.mkdir(parents=True, exist_ok=True)
         err = open(o / "gfxgen.err", "w")
+        gpu_mode(impl)
         p = subprocess.Popen([FUNC_BIN, "gfxgen", "--domain", str(d), "--flows", str(N), "--layers", str(K), "--layer-geom",
                               "logo,full", "--mode", "pace", "--impl", impl, "--storage", storage, "--duration", str(DUR),
                               "--out", str(o)], stdout=subprocess.PIPE, stderr=err, env=ENV, text=True)
@@ -364,6 +379,8 @@ def flow_ctr(s, n):
 
 
 def vcommon(impl, storage):
+    """Varianto parinktys; kartu nustato GPU šildymą šiam variantui (gpu_mode)."""
+    gpu_mode(impl)
     return ["--impl", impl, "--storage", storage]
 
 
@@ -653,6 +670,23 @@ def fkeepwarm(out):
     ok = alive and quiet and rc == 0 and m is not None and int(m.group(1)) > 0 and m.group(2) == "64" and m.group(3) == "5.0"
     res.append(result("fkeepwarm[duration 0 + SIGTERM]", "PASS" if ok else "FAIL",
                       why=f"gyvas po 3 s={alive} tylus={quiet} exit {rc} stderr={txt.strip()[-200:]!r}"))
+    # harness'o taisyklė: GPU variantas (vcommon gpu …) — keepwarm veikia (jei neišjungtas), CPU variantas — ne; rezultatas
+    # įrašo būseną (laukas keepwarm)
+    def running():
+        r = subprocess.run(["pgrep", "-f", f"{FUNC_BIN} keepwarm"], capture_output=True, text=True)
+        return r.stdout.split()
+    vcommon("gpu", "cuda-linear")
+    g_on, g_procs, g_rec = KW.on(), running(), result("fkeepwarm[harness G]", "INFO")
+    vcommon("gpu", "host")
+    h_on = KW.on()
+    vcommon("cpu", "host")
+    c_on, c_procs, c_rec = KW.on(), running(), result("fkeepwarm[harness C]", "INFO")
+    want = keepwarm.ENABLED
+    ok = (g_on == want and h_on == want and (len(g_procs) == 1) == want and g_rec.get("keepwarm") is want and not c_on
+          and not c_procs and c_rec.get("keepwarm") is False)
+    res.append(result("fkeepwarm[harness]", "PASS" if ok else "FAIL",
+                      why=f"įjungta={want}: G on={g_on} procesų={len(g_procs)} įraše={g_rec.get('keepwarm')}; H on={h_on}; "
+                          f"C on={c_on} procesų={len(c_procs)} įraše={c_rec.get('keepwarm')}"))
     return res
 
 
@@ -969,6 +1003,7 @@ def ffmt_dec_chroma(out):
 def ffmt_neg(out):
     """Neigiamas: logo su 720p50 įėjimu ir logotipu už ribų (X 1488 + 384 > 1280) → exit != 0 su aiškiu tekstu; nežinomas
     formatas (1080i25) → exit != 0 su tekstu."""
+    gpu_mode("cpu")
     res = []
     d = fresh_domain("ffmt-neg")
     p = FProc(out, "ffmt-neg/logo", "logo", d, "--flows", 1, "--format", "720p50", "--logo-x", 1488, "--duration", 2,
@@ -994,6 +1029,7 @@ def main():
     out = pathlib.Path(a.out)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
+    KW.log_dir = out
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
@@ -1018,6 +1054,7 @@ def main():
             results += fn()
         except Exception as e:  # testo infrastruktūros klaida — FAIL, ne tylėjimas
             results.append(result(name, "FAIL", why=f"išimtis: {e!r}"))
+    KW.stop()
     cleanup_domains()
     (out / "functional.json").write_text(json.dumps(results, indent=1))
     failed = [r["id"] for r in results if r["status"] == "FAIL"]

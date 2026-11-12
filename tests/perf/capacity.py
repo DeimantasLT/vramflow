@@ -13,6 +13,10 @@ visi procesai exit 0. N* = didžiausias N, kai PASS ir visi mažesni PASS.
   capacity.py <out> --func dec --n 1,2,4,8,12,16,24,32 --clip clip.ts --ref ref_crc.json
   capacity.py <out> --func chain --n 1,2,4,6,8,10,12 --clip clip.ts
   capacity.py <out> --func composite --layers 2 --n 1,2,4,8,16,32 [--out-format v210|v210a]
+
+H / G variantams fone veikia `vramflow-func keepwarm` (GPU virš P8: kito proceso darbo pliūpsnis nebestabdo GPU —
+docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); jo apkrova (~13 % GPU, ~+6 W) įeina į GPU zondo skaičius.
+VRAMFLOW_GPU_KEEPWARM=0 išjungia; kiekvienas rezultatas turi lauką keepwarm.
 """
 import argparse
 import json
@@ -25,6 +29,7 @@ import sys
 import time
 
 import domain  # tests/perf/domain.py
+import keepwarm  # tests/perf/keepwarm.py — GPU virš P8 H / G variantams (VRAMFLOW_GPU_KEEPWARM=0 išjungia)
 import gpuinfo  # tests/perf/gpuinfo.py
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -541,18 +546,22 @@ def main():
     a = ap.parse_args()
     pathlib.Path(a.out).mkdir(parents=True, exist_ok=True)
     results, fails = [], 0
+    # GPU šildymas: tik H / G variantams (C — niekada, net su --source fair); kiekvienas rezultatas įrašo, ar jis veikė
+    kw = keepwarm.KeepWarm(BIN, env=ENV, log_dir=a.out)
+    kw.want(a.impl == "gpu")
     for n in [int(x) for x in a.n.split(",")]:
         variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
         skip = comp_guard(a, n) if a.func == "composite" else None
         if skip:
             r = {"func": a.func, "layers": a.layers, "out_format": a.out_format, "variant": variant, "impl": a.impl,
                  "storage": a.storage, "source": a.source, "n": n, "skipped": True, "skip_reason": skip, "pass": False,
-                 "pass_tol": False, "seconds": a.seconds, "power_scheme": power_scheme()}
+                 "pass_tol": False, "seconds": a.seconds, "power_scheme": power_scheme(), "keepwarm": kw.on()}
             results.append(r)
             print(f"[{func_tag(a)}/{variant} N={n:2d}] PRALEISTA: {skip}", flush=True)
             (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
             continue
         r = run_level(a, n)
+        r["keepwarm"] = kw.on()
         results.append(r)
         if r.get("invalid_reason"):
             print(f"[{func_tag(a)}/{variant} N={n:2d}] NEDERINA: {r['invalid_reason']}", flush=True)
@@ -573,6 +582,8 @@ def main():
         fails = 0 if r["pass_tol"] else fails + 1  # sustojam, kai viršijama talpa (tol kriterijus)
         if fails >= a.stop_after_fails:
             break
+
+    kw.stop()
 
     def nstar(key):
         best = 0

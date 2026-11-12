@@ -148,7 +148,7 @@ def fstart_restart(out):
 def fstart_wait(out):
     res = []
     d = F.fresh_domain("fstart-wait")
-    v = ["--impl", "cpu", "--storage", "host"]
+    v = F.vcommon("cpu", "host")
     t0 = time.monotonic()
     p = F.FProc(out, "fstart-wait/finite", "logo", d, "--flows", 1, "--duration", 5, "--input-wait-ms", 1500, *v)
     rc = p.wait(timeout=60)
@@ -172,7 +172,7 @@ def fstart_wait(out):
 
 def fstart_owner(out):
     d = F.fresh_domain("fstart-owner")
-    v = ["--impl", "cpu", "--storage", "host"]
+    v = F.vcommon("cpu", "host")
     a = F.FProc(out, "fstart-owner/a", "gen", d, "--flows", 1, "--duration", 40, "--run-id", "fstart-first", *v)
     b = None
     rb = None
@@ -201,7 +201,7 @@ def fstart_domain(out):
     a, b = domain.make_domain("fstart-dom"), domain.make_domain("fstart-dom")
     distinct = a != b and a.is_dir() and b.is_dir()
     domain.remove_domain(b)
-    g = F.FProc(out, "fstart-domain", "gen", a, "--flows", 1, "--duration", 30, "--impl", "cpu", "--storage", "host")
+    g = F.FProc(out, "fstart-domain", "gen", a, "--flows", 1, "--duration", 30, *F.vcommon("cpu", "host"))
     removed_live = None
     files_kept = False
     try:
