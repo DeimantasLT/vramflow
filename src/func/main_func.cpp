@@ -166,6 +166,8 @@ int main(int argc, char** argv) {
     k->add_option("--interval-ms", kw.interval_ms, "užpildymo periodas, ms")->check(CLI::Range(0.1, 10000.0));
     k->add_option("--duration", kw.duration_s, "trukmė, s; 0 — iki sustabdymo (SIGINT / SIGTERM; numatyta)")->check(CLI::NonNegativeNumber);
     k->add_option("--device-uuid", o.device_uuid);
+    k->add_option("--parent-pid", kw.parent_pid, "baigti, kai šio proceso nebėra (harness'ui; 0 — netikrinti)")
+        ->check(CLI::NonNegativeNumber);
     CLI11_PARSE(app, argc, argv);
     if (app.got_subcommand("keepwarm")) return run_keepwarm(kw, o.device_uuid);  // ne MXL funkcija: be domeno ir nuomos
     {

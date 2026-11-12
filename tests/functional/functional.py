@@ -687,7 +687,42 @@ def fkeepwarm(out):
     res.append(result("fkeepwarm[harness]", "PASS" if ok else "FAIL",
                       why=f"įjungta={want}: G on={g_on} procesų={len(g_procs)} įraše={g_rec.get('keepwarm')}; H on={h_on}; "
                           f"C on={c_on} procesų={len(c_procs)} įraše={c_rec.get('keepwarm')}"))
+    res.append(keepwarm_orphan(out))
     return res
+
+
+def keepwarm_orphan(out):
+    """Harness'as nužudomas SIGKILL (timeout, CI) — keepwarm (--duration 0) neturi likti veikti: po 3 s jo procesas baigtas
+    (keepwarm --parent-pid + PR_SET_PDEATHSIG; SIGKILL atveju harness'o handler'iai nesuveikia)."""
+    perf = pathlib.Path(__file__).resolve().parents[1] / "perf"
+    code = (f"import sys, time; sys.path.insert(0, {str(perf)!r}); import keepwarm; k = keepwarm.KeepWarm({FUNC_BIN!r}); "
+            f"k.start(); print(k.p.pid if k.p else -1, flush=True); time.sleep(120)")
+    h = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=open(out / "kw-orphan.err", "w"), env=ENV,
+                         text=True)
+    try:
+        line = h.stdout.readline().strip()
+        kpid = int(line) if line.lstrip("-").isdigit() else -1
+    finally:
+        h.send_signal(signal.SIGKILL)
+        h.wait()
+    if kpid <= 0:
+        return result("fkeepwarm[harness SIGKILL]", "FAIL", why=f"keepwarm nepasileido (pid {line!r})")
+    time.sleep(3.0)
+
+    def gone(pid):
+        try:
+            st = pathlib.Path(f"/proc/{pid}/status").read_text()
+        except OSError:
+            return True
+        return "\nState:\tZ" in st  # zombis — baigėsi, laukia, kol surinks init
+    ok = gone(kpid)
+    if not ok:  # nepalikti šiukšlių kitiems testams
+        try:
+            os.kill(kpid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return result("fkeepwarm[harness SIGKILL]", "PASS" if ok else "FAIL",
+                  why=f"harness'as nužudytas SIGKILL; keepwarm pid {kpid} po 3 s {'baigtas' if ok else 'VIS DAR VEIKIA'}")
 
 
 def fcomp6(out):
@@ -1049,14 +1084,16 @@ def main():
     import targeted  # tiksliniai migracijos peržiūros testai (fsplit, flate_stall, fcrashloop)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in targeted.TESTS.items()})
     results = []
-    for name, fn in tests.items():
-        if a.only and name.lower() not in a.only.lower().split(","):
-            continue
-        try:
-            results += fn()
-        except Exception as e:  # testo infrastruktūros klaida — FAIL, ne tylėjimas
-            results.append(result(name, "FAIL", why=f"išimtis: {e!r}"))
-    KW.stop()
+    try:
+        for name, fn in tests.items():
+            if a.only and name.lower() not in a.only.lower().split(","):
+                continue
+            try:
+                results += fn()
+            except Exception as e:  # testo infrastruktūros klaida — FAIL, ne tylėjimas
+                results.append(result(name, "FAIL", why=f"išimtis: {e!r}"))
+    finally:
+        KW.stop()  # ir po KeyboardInterrupt / SIGTERM (KeepWarm handler'iai) — keepwarm nelieka veikti
     cleanup_domains()
     (out / "functional.json").write_text(json.dumps(results, indent=1))
     failed = [r["id"] for r in results if r["status"] == "FAIL"]

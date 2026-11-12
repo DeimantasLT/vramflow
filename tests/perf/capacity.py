@@ -15,7 +15,7 @@ visi procesai exit 0. N* = didžiausias N, kai PASS ir visi mažesni PASS.
   capacity.py <out> --func composite --layers 2 --n 1,2,4,8,16,32 [--out-format v210|v210a]
 
 H / G variantams fone veikia `vramflow-func keepwarm` (GPU virš P8: kito proceso darbo pliūpsnis nebestabdo GPU —
-docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); jo apkrova (~13 % GPU, ~+6 W) įeina į GPU zondo skaičius.
+docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); jo apkrova (19,5 % GPU, +8,5 W) įeina į GPU zondo skaičius.
 VRAMFLOW_GPU_KEEPWARM=0 išjungia; kiekvienas rezultatas turi lauką keepwarm.
 """
 import argparse
@@ -548,7 +548,17 @@ def main():
     results, fails = [], 0
     # GPU šildymas: tik H / G variantams (C — niekada, net su --source fair); kiekvienas rezultatas įrašo, ar jis veikė
     kw = keepwarm.KeepWarm(BIN, env=ENV, log_dir=a.out)
-    kw.want(a.impl == "gpu")
+    try:
+        kw.want(a.impl == "gpu")
+        variant = run_levels(a, kw, results)
+    finally:
+        kw.stop()  # ir po išimties / signalo; SIGKILL atveju keepwarm baigiasi pats (--parent-pid)
+    report(a, results, variant)
+
+
+def run_levels(a, kw, results):
+    fails = 0
+    variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
     for n in [int(x) for x in a.n.split(",")]:
         variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
         skip = comp_guard(a, n) if a.func == "composite" else None
@@ -582,9 +592,10 @@ def main():
         fails = 0 if r["pass_tol"] else fails + 1  # sustojam, kai viršijama talpa (tol kriterijus)
         if fails >= a.stop_after_fails:
             break
+    return variant
 
-    kw.stop()
 
+def report(a, results, variant):
     def nstar(key):
         best = 0
         for r in results:

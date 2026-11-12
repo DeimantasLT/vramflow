@@ -111,10 +111,13 @@ struct Opts {
 
 // keepwarm (keepwarm.cpp): GPU laikoma virš P8 — užpildymas size_mb kas interval_ms; duration_s 0 — iki sustabdymo.
 // Numatytosios — iš docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md §6 (64 MB kas 5 ms).
+// parent_pid > 0: baigti, kai to proceso nebėra (harness'as nužudytas SIGKILL / timeout / CI) — tikrinama kas užpildymą
+// (getppid pasikeitimas, kai tai tiesioginis tėvas; kitaip kill(pid, 0)); papildomai PR_SET_PDEATHSIG (SIGTERM).
 struct KeepWarmOpts {
     std::uint32_t size_mb = 64;
     double interval_ms = 5.0;
     double duration_s = 0;
+    int parent_pid = 0;
 };
 int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
 

@@ -7,8 +7,16 @@
 // Ką daro: kas --interval-ms (absoliutus periodas, be dreifo) užpildo --size-mb VRAM bloką (cudaMemsetAsync — device
 // užpildymo kernel'is, ta pati darbo klasė kaip tyrimo gpu_ctx_probe busy) ir palaukia jo pabaigos.
 // Kol veikia — nespausdina nieko; pabaigoje (trukmė arba SIGINT / SIGTERM) — viena santraukos eilutė į stderr.
-// Numatytosios reikšmės — iš tyrimo (64 MB kas 5 ms). --duration 0 — iki sustabdymo.
+// Numatytosios reikšmės — iš tyrimo (64 MB kas 5 ms). --duration 0 — iki sustabdymo. --parent-pid P — baigti ir tada, kai
+// proceso P nebėra (harness'as, nužudytas SIGKILL, neturi kaip sustabdyti „amžino“ keepwarm): PR_SET_PDEATHSIG (SIGTERM, kai
+// miršta tėvas) ir patikra kiekviename cikle (tiesioginiam tėvui — getppid pasikeitimas: nužudytas tėvas gali likti zombiu,
+// kurį kill(P, 0) dar „mato“).
 #include <cuda_runtime_api.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <csignal>
 
 #include <algorithm>
 #include <chrono>
@@ -19,8 +27,24 @@
 
 namespace mxlv::func {
 
+namespace {
+bool parent_alive(int pid, pid_t ppid0) {
+    if (pid <= 0) return true;
+    if (pid == ppid0) return getppid() == ppid0;  // tiesioginis tėvas: mirus — perimamas kito (init / subreaper)
+    return kill(pid, 0) == 0 || errno == EPERM;
+}
+}  // namespace
+
 int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
     auto& stop = stop_flag();
+    const pid_t ppid0 = getppid();
+    if (k.parent_pid > 0) {
+        if (k.parent_pid == ppid0) prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (!parent_alive(k.parent_pid, ppid0)) {
+            std::fprintf(stderr, "[keepwarm] --parent-pid %d: proceso nėra\n", k.parent_pid);
+            return 0;
+        }
+    }
     const int dev = cuda_device(device_uuid);
     if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
         std::fprintf(stderr, "[keepwarm] CUDA įrenginys nerastas\n");
@@ -44,7 +68,12 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
     double fill_max_ms = 0, fill_sum_ms = 0;
     cudaError_t ce = cudaSuccess;
     auto next = t0;
+    bool orphan = false;
     while (!stop.load(std::memory_order_relaxed) && clk::now() < end) {
+        if (!parent_alive(k.parent_pid, ppid0)) {  // harness'as dingo (SIGKILL) — nelikti veikti be galo
+            orphan = true;
+            break;
+        }
         const auto a = clk::now();
         ce = cudaMemsetAsync(p, static_cast<int>(fills & 0xff), bytes, s);
         if (ce == cudaSuccess) ce = cudaStreamSynchronize(s);
@@ -71,9 +100,9 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
     }
     std::fprintf(stderr,
                  "[keepwarm] baigta: %llu užpildymų po %u MB kas %.1f ms, %.1f s; užpildymo trukmė vid. %.3f ms, maks. %.3f ms, "
-                 "ilgesnių už periodą %llu\n",
+                 "ilgesnių už periodą %llu%s\n",
                  static_cast<unsigned long long>(fills), k.size_mb, k.interval_ms, secs, fills ? fill_sum_ms / static_cast<double>(fills) : 0.0,
-                 fill_max_ms, static_cast<unsigned long long>(late));
+                 fill_max_ms, static_cast<unsigned long long>(late), orphan ? " (tėvinio proceso nebėra)" : "");
     return 0;
 }
 

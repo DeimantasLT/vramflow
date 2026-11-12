@@ -352,8 +352,18 @@ def fgold_logo(out):
 
 
 def fgold_composite(out):
-    return [finish(f"fgold_composite[{tag}]", run_composite(out, tag, impl, storage), "composite", "verify-composite",
-                   ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED) for tag, impl, storage in variants()]
+    res = [finish(f"fgold_composite[{tag}]", run_composite(out, tag, impl, storage), "composite", "verify-composite",
+                  ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED) for tag, impl, storage in variants()]
+    if any(t == "G" for t, _, _ in variants()) and os.environ.get("FGOLD_NOKW_ARM", "1") != "0":
+        # INFO ranka: tas pats G be keepwarm (kaip VRAMFLOW_GPU_KEEPWARM=0) — nešiojamo GPU elgsena (P8 → P3 pliūpsniai) lieka
+        # matoma, bet vartų neveikia (docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md: 30 su / 30 be)
+        with F.KW.suspended():
+            r = finish("fgold_composite[G be keepwarm]", run_composite(out, "G-nokw", "gpu", "cuda-linear"), "composite",
+                       "verify-composite", ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED)
+        r["why"] = f"(INFO, be keepwarm: {r['status']}) {r.get('why', '')}"
+        r["status"] = "INFO"
+        res.append(r)
+    return res
 
 
 def dec_clock_rule(sd, frame_ms=40.0):
