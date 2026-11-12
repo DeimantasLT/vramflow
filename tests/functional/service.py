@@ -8,7 +8,11 @@ fsvc_run           — logo BE --duration (numatyta 0 — tarnyba) veikia 40 s; 
                      parašyta (strict_exit false, ≥ 1900 laukų).
 fsvc_loss          — tarnyboje (be --duration) aukštupis nužudomas kill -9: SIGTERM → exit 0, santraukoje any_loss true ir
                      missing_fields > 0; tas pats su --duration 20 (griežtas, auto) → exit 4.
-fsvc_second_signal — du SIGTERM 20 ms atstumu: logo ir enc baigiasi per ≤ 200 ms po antrojo, logo flow'ų domene nelieka.
+fsvc_second_signal — du SIGTERM 20 ms atstumu: logo C / G, enc C (x264) / G (nvenc), composite C ir dec C (įėjimas tylus 3 s) baigiasi per
+                     ≤ 200 ms po antrojo, exit 0 (tarnyba; anksčiau priimta ir 4), funkcijos išėjimo flow'ų domene nelieka.
+fdec_reconnect     — gen | enc | dec C: enc nužudomas (kill -9) 22 s (> buvęs UDP timeout 20 s), tada paleidžiamas iš naujo:
+                     dec įvykis „jungiamasi iš naujo“ (stderr, su laiku), input_reconnects ≥ 1, gyvoje statistikoje flow'as
+                     Unhealthy tylos metu ir Healthy po grįžimo, fields_ok po grįžimo auga; du SIGTERM → exit 0 per ≤ 200 ms.
 fsvc_fail_unit     — logo N = 4, flow'o 1 išėjimas sugenda ilgam (--test-out-error open --test-out-error-flow 1): tik jis
                      sustabdomas (unit_failed, jo išėjimo flow'as dingsta iš domeno bėgimo metu), flow'ai 0, 2, 3 — visi laukai
                      be praradimų; atkūrimo bandymai su atidėjimu (unit_retries / unit_failures > 1); sustabdant vis dar
@@ -126,39 +130,139 @@ def fsvc_loss(out):
     return res
 
 
+def ts_sink(out, sub, port, flows, seconds):
+    return subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "perf/ts_sink.py"),
+                             "--port-base", str(port), "--flows", str(flows), "--seconds", str(seconds), "--out",
+                             str(pathlib.Path(out) / sub / "sink.json")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# (vardas, impl, storage): funkcija, kurios sustabdymas matuojamas; jos išėjimų rolė (None — UDP)
+SIG_CASES = (("logo", "cpu", "host"), ("enc", "cpu", "host"), ("logo", "gpu", "cuda-linear"), ("enc", "gpu", "cuda-linear"),
+             ("composite", "cpu", "host"), ("dec", "cpu", "host"))
+SIG_PORT = 27500
+
+
+def sig_case(out, func, impl, storage, k):
+    """Funkcija func veikia tarnybos režimu 6 s; du SIGTERM 20 ms atstumu → (exit, ms, likę išėjimų flow'ai, klaida)."""
+    tag = "C" if impl == "cpu" else "G"
+    sub = f"fsvc-2sig/{func}-{tag}"
+    v = F.vcommon(impl, storage)
+    d = F.fresh_domain(f"fsvc-2sig-{func}-{tag}")
+    port = SIG_PORT + 10 * k
+    others, target, role = [], None, None
+    try:
+        g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", 2, "--audio", 1, *v)
+        others.append(g)
+        if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(2)] + [F.role_flow_id(3, n) for n in range(2)]):
+            return None, None, None, "gen flow'ai neatsirado"
+        if func == "logo":
+            target, role = F.FProc(out, sub, "logo", d, "--flows", 2, "--warmup", 1, *v), 2
+        elif func == "enc":
+            # x264 fast: sustabdant išleidžiama eilė ir koderio lookahead (~30 kadrų, prieš pataisą — 1,1 s po antro signalo);
+            # antras signalas abu nutraukia
+            others.append(ts_sink(out, sub, port, 2, 20))
+            ea = ["--encoder", "x264", "--x264-preset", "fast"] if impl == "cpu" else ["--encoder", "nvenc"]
+            target = F.FProc(out, sub, "enc", d, "--flows", 2, "--audio", 1, *ea, "--port-base", port, "--warmup", 1, *v)
+        elif func == "composite":
+            x = F.FProc(out, f"{sub}/gfx", "gfxgen", d, "--flows", 2, "--layers", 1, "--layer-geom", "logo", "--mode", "pace", *v)
+            others.append(x)
+            if not F.wait_flows(d, [F.role_flow_id(5, n * 8) for n in range(2)]):
+                return None, None, None, "gfxgen flow'ai neatsirado"
+            target, role = F.FProc(out, sub, "composite", d, "--flows", 2, "--layers", 1, "--layer-xy", "1488,64", "--opacity", "1.0",
+                                   "--base", "gen", "--out-format", "v210", "--warmup", 1, *v), 6
+        elif func == "dec":
+            target, role = F.FProc(out, sub, "dec", d, "--flows", 1, "--port-base", port, "--warmup", 1, *v), 4
+            time.sleep(1)
+            others.append(F.FProc(out, f"{sub}/enc", "enc", d, "--flows", 1, "--encoder", "x264", "--x264-preset", "ultrafast",
+                                  "--port-base", port, *v))
+        if role is not None and not F.wait_flows(d, [F.role_flow_id(role, n) for n in range(1 if func == "dec" else 2)], 30):
+            return None, None, None, f"{func} išėjimai neatsirado"
+        time.sleep(6)
+        if func == "dec":  # sustabdoma, kai įėjimas tylus (anksčiau: UDP skaitymas be pertraukimo — join iki 20 s)
+            others[-1].kill9()
+            time.sleep(3)
+        rc, ms = term_timed(target, signals=2, gap_s=0.020)
+        left = [n for n in range(2) if role is not None and flow_dir(d, role, n).exists()]
+        return rc, ms, left, None
+    finally:
+        for pr in others:
+            if isinstance(pr, subprocess.Popen):
+                if pr.poll() is None:
+                    pr.kill()
+            else:
+                pr.term()
+        if target is not None and target.p.poll() is None:
+            target.term()
+
+
 def fsvc_second_signal(out):
     res = []
-    v = F.vcommon(*V)
-    d = F.fresh_domain("fsvc-2sig")
-    g = F.FProc(out, "fsvc-2sig/gen", "gen", d, "--flows", 2, "--audio", 1, *v)
-    sink = None
-    try:
-        if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(2)] + [F.role_flow_id(3, n) for n in range(2)]):
-            return [F.result("fsvc_second_signal", "FAIL", why="gen flow'ai neatsirado")]
-        lg = F.FProc(out, "fsvc-2sig/logo", "logo", d, "--flows", 2, "--warmup", 1, *v)
-        port = 27500
-        sink = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / "perf/ts_sink.py"),
-                                 "--port-base", str(port), "--flows", "2", "--seconds", "20", "--out",
-                                 str(pathlib.Path(out) / "fsvc-2sig" / "sink.json")], stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-        # enc su x264 fast: sustabdant išleidžiama eilė ir koderio lookahead (~30 kadrų, prieš pataisą — 1,1 s po antro
-        # signalo); antras signalas abu nutraukia
-        en = F.FProc(out, "fsvc-2sig/enc", "enc", d, "--flows", 2, "--audio", 1, "--encoder", "x264", "--x264-preset", "fast",
-                     "--port-base", port, "--warmup", 1, *v)
-        if not F.wait_flows(d, [F.role_flow_id(2, n) for n in range(2)], 30):
-            return [F.result("fsvc_second_signal", "FAIL", why="logo išėjimai neatsirado")]
-        time.sleep(6)
-        for name, pr in (("logo", lg), ("enc", en)):
-            rc, ms = term_timed(pr, signals=2, gap_s=0.020)
-            left = [n for n in range(2) if flow_dir(d, 2, n).exists()] if name == "logo" else []
-            ok = ms <= 200 and not left and rc in (0, 4)
-            res.append(F.result(f"fsvc_second_signal[{name}]", "PASS" if ok else "FAIL",
-                                why=f"exit={rc} antras SIGTERM → pabaiga {ms} ms (riba 200); likę logo flow'ai {left}"))
-    finally:
-        if sink is not None and sink.poll() is None:
-            sink.kill()
-        g.term()
+    for k, (func, impl, storage) in enumerate(SIG_CASES):
+        tid = f"fsvc_second_signal[{func}-{'C' if impl == 'cpu' else 'G'}]"
+        rc, ms, left, err = sig_case(out, func, impl, storage, k)
+        if err:
+            res.append(F.result(tid, "FAIL", why=err))
+            continue
+        ok = ms <= 200 and not left and rc == 0
+        res.append(F.result(tid, "PASS" if ok else "FAIL",
+                            why=f"exit={rc} (laukta 0) antras SIGTERM → pabaiga {ms} ms (riba 200); likę išėjimų flow'ai {left}"))
     return res
+
+
+def fdec_reconnect(out):
+    """dec įėjimo tyla > 20 s ir grįžimas (žr. modulio aprašą)."""
+    v = F.vcommon(*V)
+    sub = "fdec-reconnect"
+    d = F.fresh_domain(sub)
+    port = SIG_PORT + 200
+    stats = pathlib.Path(out) / sub / "stats.jsonl"
+    g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", 1, *v)
+    e = e2 = dc = watch = None
+    ea = ["--encoder", "x264", "--x264-preset", "ultrafast", "--port-base", port]
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, 0)]):
+            return [F.result("fdec_reconnect", "FAIL", why="gen flow'as neatsirado")]
+        dc = F.FProc(out, sub, "dec", d, "--flows", 1, "--port-base", port, "--warmup", 1, "--stats-file", stats, *v)
+        watch = LogWatch(dc.err_path, {"reconnect": r"srautas 0: .*jungiamasi iš naujo"})
+        time.sleep(1)
+        e = F.FProc(out, f"{sub}/enc", "enc", d, "--flows", 1, *ea, *v)
+        time.sleep(8)
+        t_kill = time.clock_gettime_ns(time.CLOCK_TAI)
+        e.kill9()
+        time.sleep(22)
+        t_back = time.clock_gettime_ns(time.CLOCK_TAI)
+        e2 = F.FProc(out, f"{sub}/enc2", "enc", d, "--flows", 1, *ea, *v)
+        time.sleep(10)
+        rc, ms = term_timed(dc, signals=2, gap_s=0.020)
+    finally:
+        for pr in (e2, g):
+            if pr is not None:
+                pr.term()
+        seen = watch.close() if watch is not None else {}
+    s = dc.summary() or {}
+    f0 = (s.get("flows") or [{}])[0]
+    lines, events = stats_lines(stats)
+    bad = []
+    if rc != 0 or ms is None or ms > 200:
+        bad.append(f"du SIGTERM: exit {rc}, {ms} ms (laukta 0, ≤ 200)")
+    if not f0.get("input_reconnects"):
+        bad.append(f"input_reconnects={f0.get('input_reconnects')}")
+    if "reconnect" not in seen or not (t_kill < seen["reconnect"] < t_back):
+        bad.append(f"eilutės „jungiamasi iš naujo“ tylos metu nėra ({seen})")
+    if lines is None:
+        bad.append(f"stats: {events}")
+        lines = []
+    st = lambda lo, hi: [x["flows"][0]["state"] for x in lines if lo <= x["tai"] < hi and x.get("flows")]  # noqa: E731
+    quiet = st(t_kill + 3_000_000_000, t_back)
+    after = st(t_back + 4_000_000_000, t_back + 9_000_000_000)
+    ok_after = sum(x["flows"][0]["ok"] for x in lines if x["tai"] >= t_back + 4_000_000_000 and x.get("flows"))
+    if not quiet or any(q != "Unhealthy" for q in quiet):
+        bad.append(f"tylos metu būsenos {quiet} (laukta Unhealthy)")
+    if not after or after[-1] != "Healthy" or ok_after < 100:
+        bad.append(f"po grįžimo būsenos {after}, ok {ok_after} (laukta Healthy, ≥ 100)")
+    return [F.result("fdec_reconnect", "FAIL" if bad else "PASS",
+                     why=f"{'; '.join(bad) or 'įėjimas atkurtas'} | exit={rc} {ms} ms input_reconnects={f0.get('input_reconnects')} "
+                         f"fields_ok={f0.get('fields_ok')} tyloje {quiet[:3]}… po grįžimo {after} ok={ok_after}")]
 
 
 class LogWatch:
@@ -374,4 +478,4 @@ def fsvc_stats(out):
 
 
 TESTS = {"fsvc_run": fsvc_run, "fsvc_loss": fsvc_loss, "fsvc_second_signal": fsvc_second_signal, "fsvc_fail_unit": fsvc_fail_unit,
-         "fsvc_stats": fsvc_stats}
+         "fsvc_stats": fsvc_stats, "fdec_reconnect": fdec_reconnect}

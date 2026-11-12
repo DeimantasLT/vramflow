@@ -153,6 +153,8 @@ int main(int argc, char** argv) {
     common(d, o);
     d->add_option("--port-base", o.port_base);
     d->add_option("--playout-frames", o.playout_frames);
+    d->add_option("--input-silence-ms", o.input_silence_ms, "įėjimas tylus ilgiau nei tiek ms → jungiamasi iš naujo (numatyta 2000)")
+        ->check(CLI::Range(100u, 600000u));
     d->add_option("--chroma-siting", o.chroma_siting, "interlaced flow'ui: auto (pagal kadro žymę) | field | frame")
         ->check(CLI::IsMember({"auto", "field", "frame"}));
     std::uint32_t clip_frames = 250;

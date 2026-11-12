@@ -119,6 +119,9 @@ struct Opts {
     std::uint32_t test_fault_proc_delay_ms = 0;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
+    // dec: įėjimas, gavęs bent vieną paketą, tylus ilgiau nei tiek — sesija nutraukiama ir jungiamasi iš naujo (atidėjimas
+    // 1, 2, 4 … ≤ 30 s; laikas skaičiuojamas, įvykis — stderr). Iki pirmo paketo laukiama neribotai (nutraukiama tik stop).
+    std::uint32_t input_silence_ms = 2000;
     // interlaced flow'o 4:2:0 → 4:2:2 chroma: auto — pagal kadro AV_FRAME_FLAG_INTERLACED; field / frame — priverstinai.
     // NVENC (šioje GPU be lauko kodavimo) žymi kadrus progresyviais, nors turinys — supinti laukai su lauko chroma:
     // tokiam srautui reikia `field`.

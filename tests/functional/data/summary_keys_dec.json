@@ -51,6 +51,7 @@
   "hist": [],
   "flows": [
    "fields_ok",
+   "input_reconnects",
    "output_errors",
    "startup_discard",
    "unit_failed",

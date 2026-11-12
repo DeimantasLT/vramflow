@@ -17,6 +17,7 @@ extern "C" {
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -32,6 +33,7 @@ extern "C" {
 #include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
+#include "func/stats_lines.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
 #include "media/media_ref.hpp"
@@ -72,34 +74,63 @@ struct DecStream {
     // statistika (darbininkas)
     std::uint64_t frames_decoded = 0, pkts = 0, pkts_corrupt = 0, decode_errors = 0, flag_mismatch = 0, pts_gap_frames = 0,
                   overflow_drops = 0, send_eagain = 0, clock_overflow_drops = 0, startup_overflow_drops = 0;
+    std::uint64_t reconnects = 0;  // įėjimo sesija baigėsi (tyla, EOF, klaida) ir jungtasi iš naujo
     std::atomic<bool> playing{false};  // tick'as pradėjo atkurti šį srautą (iki tol perpildymas — paleidimo pliūpsnis)
 };
 
-void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<bool>& stop) {
+// libavformat pertraukimas (B3): kiekviename laukime (atidarymas, zondavimas, av_read_frame) — stop (sustabdymas, iškart) ir
+// tyla: paskutinis paketas senesnis nei silence_ns (tik gavus bent vieną paketą sesijoje). 1 — nutraukti (AVERROR_EXIT).
+struct Interrupt {
+    const std::atomic<bool>* stop = nullptr;
+    std::uint64_t last_pkt = 0;  // TAI; 0 — sesijoje dar nė vieno paketo
+    std::uint64_t silence_ns = 0;
+    bool silent = false;
+};
+int interrupt_cb(void* p) {
+    auto* x = static_cast<Interrupt*>(p);
+    if (x->stop->load(std::memory_order_relaxed)) return 1;
+    if (x->last_pkt != 0 && x->silence_ns != 0 && now_tai() - x->last_pkt > x->silence_ns) {
+        x->silent = true;
+        return 1;
+    }
+    return 0;
+}
+
+// Viena įėjimo sesija: atidarymas → dekodavimas, kol įėjimas tylus / baigėsi / klaida arba stop. why — kodėl baigėsi;
+// true — nepataisoma klaida (netikėtas kadro formatas, nėra dekoderio): jungtis iš naujo beprasmiška.
+bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<bool>& stop, std::string& why) {
     const bool inter = o.fmt.raster.interlaced;
     const double fps = static_cast<double>(o.fmt.frame_rate.num) / static_cast<double>(o.fmt.frame_rate.den);
-    AVFormatContext* ic = nullptr;
+    bool fatal = false;
+    Interrupt intr;
+    intr.stop = &stop;
+    intr.silence_ns = std::uint64_t{o.input_silence_ms} * 1'000'000;
+    AVFormatContext* ic = avformat_alloc_context();
     AVCodecContext* c = nullptr;
     AVPacket* pkt = av_packet_alloc();
     AVFrame* fr = av_frame_alloc();
     char url[256];
-    std::snprintf(url, sizeof url,
-                  "udp://127.0.0.1:%d?fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608&timeout=20000000",
-                  o.port_base + s.idx);
+    // be UDP `timeout`: tylą ir sustabdymą sprendžia pertraukimo kabliukas (anksčiau timeout=20 s — darbininkas baigdavosi
+    // visam laikui, o sustabdymas laukdavo iki 20 s)
+    std::snprintf(url, sizeof url, "udp://127.0.0.1:%d?fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608", o.port_base + s.idx);
+    ic->interrupt_callback.callback = interrupt_cb;
+    ic->interrupt_callback.opaque = &intr;
     // Trumpas zondavimas: numatytasis probesize 5 MB prie 8,5 Mbit/s = ~4,7 s, o sukaupti paketai po to
     // dekoduojami pliūpsniu. TS H.264 parametrai žinomi iš SPS per < 0,5 s.
     AVDictionary* io = nullptr;
     av_dict_set(&io, "probesize", "1000000", 0);
     av_dict_set(&io, "analyzeduration", "500000", 0);
-    int e = avformat_open_input(&ic, url, av_find_input_format("mpegts"), &io);
+    int e = avformat_open_input(&ic, url, av_find_input_format("mpegts"), &io);  // klaidoje ic atlaisvinamas
     av_dict_free(&io);
     int vs = -1;
     const AVCodec* codec = nullptr;
     AVDictionary* d = nullptr;
-    if (e < 0) { s.error = "open_input: " + averr(e); goto out; }
-    if ((e = avformat_find_stream_info(ic, nullptr)) < 0) { s.error = "find_stream_info: " + averr(e); goto out; }
+    s.pts0 = AV_NOPTS_VALUE;  // nauja sesija — siuntėjas galėjo pradėti iš naujo (PTS nuo nulio)
+    s.prev_n = -1;
+    if (e < 0) { why = "open_input: " + averr(e); goto out; }
+    if ((e = avformat_find_stream_info(ic, nullptr)) < 0) { why = "find_stream_info: " + averr(e); goto out; }
     vs = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (vs < 0) { s.error = "nėra video srauto"; goto out; }
+    if (vs < 0) { why = "nėra video srauto"; goto out; }
     if (o.impl == "cpu") {
         // C: FFmpeg programinis H.264 dekoderis (normatyviai bitų tikslus), kadrų + slice'ų gijos
         codec = avcodec_find_decoder_by_name("h264");
@@ -119,12 +150,16 @@ void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<
     c->pkt_timebase = ic->streams[vs]->time_base;
     e = avcodec_open2(c, codec, &d);
     av_dict_free(&d);
-    if (e < 0) { s.error = "cuvid open: " + averr(e); goto out; }
+    if (e < 0) { why = "cuvid open: " + averr(e); fatal = true; goto out; }
     s.opened = true;
     while (!stop.load()) {
         e = av_read_frame(ic, pkt);
         if (e == AVERROR(EAGAIN)) continue;
-        if (e < 0) { if (!stop.load()) s.error = "read_frame: " + averr(e); break; }
+        if (e < 0) {
+            why = intr.silent ? "įėjimas tylus > " + std::to_string(o.input_silence_ms) + " ms" : "read_frame: " + averr(e);
+            break;
+        }
+        intr.last_pkt = now_tai();
         if (pkt->stream_index != vs) { av_packet_unref(pkt); continue; }
         ++s.pkts;
         if (pkt->flags & AV_PKT_FLAG_CORRUPT) ++s.pkts_corrupt;
@@ -146,8 +181,9 @@ void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<
             }
             const AVPixelFormat want_fmt = o.impl == "cpu" ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_CUDA;
             if (fr->format != want_fmt || fr->width != o.fmt.raster.w || fr->height != o.fmt.raster.h) {
-                s.error = "netikėtas kadro formatas " + std::to_string(fr->width) + "x" + std::to_string(fr->height) + " (laukta " +
-                          vramflow::format_name(o.fmt) + ")";
+                why = "netikėtas kadro formatas " + std::to_string(fr->width) + "x" + std::to_string(fr->height) + " (laukta " +
+                      vramflow::format_name(o.fmt) + ")";
+                fatal = true;
                 av_frame_unref(fr);
                 goto out;
             }
@@ -187,7 +223,35 @@ out:
     av_packet_free(&pkt);
     avcodec_free_context(&c);
     if (ic) avformat_close_input(&ic);
-    if (!s.error.empty()) std::fprintf(stderr, "[dec %d] %s\n", s.idx, s.error.c_str());
+    if (why.empty()) why = "sesija baigėsi";
+    return fatal;
+}
+
+// Darbininkas (B3): įėjimo sesijos viena po kitos, kol stop. Pasibaigusi / tyli sesija — įvykis stderr, reconnects++, laukimas
+// su atidėjimu 1, 2, 4 … ≤ 30 s (nutraukiamas stop per ≤ 20 ms); sesija, trukusi ≥ 60 s, atidėjimą grąžina į 1 s. Tuo metu
+// tick'as šiam flow'ui neturi kadrų (no_content) — vieneto būsena Unhealthy gyvoje statistikoje.
+void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<bool>& stop) {
+    double backoff = 1;
+    while (!stop.load()) {
+        const std::uint64_t t0 = now_tai();
+        std::string why;
+        const bool fatal = dec_session(o, hw, s, stop, why);
+        if (stop.load()) break;
+        if (fatal) {
+            s.error = why;
+            log_line("dec", "srautas " + std::to_string(s.idx) + ": " + why + " — srautas sustabdytas");
+            break;
+        }
+        ++s.reconnects;
+        if (now_tai() - t0 >= 60'000'000'000ull) backoff = 1;
+        char b[64];
+        std::snprintf(b, sizeof b, "%.0f", backoff);
+        log_line("dec", "srautas " + std::to_string(s.idx) + ": " + why + " — jungiamasi iš naujo po " + b + " s (" +
+                            std::to_string(s.reconnects) + ")");
+        const std::uint64_t until = now_tai() + static_cast<std::uint64_t>(backoff * 1e9);
+        while (!stop.load() && now_tai() < until) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        backoff = std::min(30.0, 2 * backoff);
+    }
 }
 
 }  // namespace
@@ -491,7 +555,7 @@ int run_dec(const Opts& o) {
         }
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlow, st);
     }
-    stop = true;  // darbininkai baigia (UDP read su timeout)
+    stop = true;  // darbininkai baigia per ≤ ~100 ms: libavformat pertraukimo kabliukas tikrina stop kiekviename laukime
     for (auto& s : ds)
         if (s->th.joinable()) s->th.join();
     st.proc["clock_steps"] = hub.engine().clock_steps;
@@ -509,12 +573,13 @@ int run_dec(const Opts& o) {
         f.inc("send_eagain", s.send_eagain);
         f.inc("clock_overflow_drops", s.clock_overflow_drops);
         f.inc("startup_overflow_drops", s.startup_overflow_drops);
+        if (s.reconnects) f.inc("input_reconnects", s.reconnects);  // įvykio raktas
         // A17 (planas V13): suminė „laikrodžio nuolaida“ pašalinta — laikrodžiui priskiriama tik tai, ką paaiškina pats šuolis
         // atgal (timing::ClockQueueBudget: clock_overrun_frames, clock_overflow_drops). Raktas lieka (0) — raktų aibė.
         for (const char* k : {"overrun_frames", "overflow_drops"})
             if (f.c.count(k) && !f.c[k]) f.c.erase(k);
         f.inc("clock_drift_dropped_frames", 0);
-        if (!s.opened && !rc) { st.fatal = "srautas " + std::to_string(n) + ": " + s.error; rc = 2; }
+        if (!s.opened && !rc) { st.fatal = "srautas " + std::to_string(n) + ": " + (s.error.empty() ? "įėjimas neatsirado" : s.error); rc = 2; }
         for (auto& q : s.q) av_frame_free(&q.f);
         if (cur[n]) av_frame_free(&cur[n]);
     }
