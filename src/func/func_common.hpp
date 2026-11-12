@@ -96,6 +96,15 @@ struct Opts {
     double min_chroma_db = 0;  // verify --mode dec: chromos PSNR prieš gen etaloną (0 — netikrinama)
 };
 
+// keepwarm (keepwarm.cpp): GPU laikoma virš P8 — užpildymas size_mb kas interval_ms; duration_s 0 — iki sustabdymo.
+// Numatytosios — iš docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md §6 (64 MB kas 5 ms).
+struct KeepWarmOpts {
+    std::uint32_t size_mb = 64;
+    double interval_ms = 5.0;
+    double duration_s = 0;
+};
+int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
+
 // Vieno flow'o skaitikliai. Vardai — ataskaitoje.
 struct FlowStats {
     std::map<std::string, std::uint64_t> c;

@@ -619,6 +619,43 @@ def fcli1(out):
     return res
 
 
+KW_SUMMARY_RE = r"\[keepwarm\] baigta: (\d+) užpildymų po (\d+) MB kas ([\d.]+) ms, ([\d.]+) s"
+
+
+def fkeepwarm(out):
+    """keepwarm (docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md §6): --duration 2 — exit 0, viena santraukos eilutė su
+    tuo, ką padarė (užpildymų ≈ trukmė / intervalas); --duration 0 — veikia, kol sustabdomas, ir kol veikia nespausdina nieko;
+    SIGTERM — exit 0 ir santrauka. Be GPU (nėra nvidia-smi) — SKIP."""
+    import re
+    if not shutil.which("nvidia-smi") and not pathlib.Path("/usr/lib/wsl/lib/nvidia-smi").exists():
+        return [result("fkeepwarm", "SKIP", why="nėra GPU")]
+    res = []
+    r = subprocess.run([FUNC_BIN, "keepwarm", "--duration", "2", "--size-mb", "16", "--interval-ms", "5"], capture_output=True,
+                       text=True, timeout=60, env=ENV)
+    m = re.search(KW_SUMMARY_RE, r.stderr)
+    fills = int(m.group(1)) if m else 0
+    ok = r.returncode == 0 and m is not None and m.group(2) == "16" and 200 <= fills <= 410 and r.stdout == ""
+    res.append(result("fkeepwarm[duration 2]", "PASS" if ok else "FAIL",
+                      why=f"exit {r.returncode} užpildymų {fills} stderr={r.stderr.strip()[-200:]!r}"))
+    errp = out / "fkeepwarm.err"
+    p = subprocess.Popen([FUNC_BIN, "keepwarm", "--duration", "0"], stdout=subprocess.DEVNULL, stderr=open(errp, "w"), env=ENV)
+    time.sleep(3.0)
+    alive = p.poll() is None
+    quiet = errp.read_text(errors="replace") == ""
+    p.send_signal(signal.SIGTERM)
+    try:
+        rc = p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        rc = p.wait()
+    txt = errp.read_text(errors="replace")
+    m = re.search(KW_SUMMARY_RE, txt)
+    ok = alive and quiet and rc == 0 and m is not None and int(m.group(1)) > 0 and m.group(2) == "64" and m.group(3) == "5.0"
+    res.append(result("fkeepwarm[duration 0 + SIGTERM]", "PASS" if ok else "FAIL",
+                      why=f"gyvas po 3 s={alive} tylus={quiet} exit {rc} stderr={txt.strip()[-200:]!r}"))
+    return res
+
+
 def fcomp6(out):
     """verify --mode composite su N = 8 išėjimų (vienas gfxgen procesas, logo sluoksnis), C / H / G, pace / manual. Regresija:
     capacity G N >= 2 — gfxgen cudaMemcpy H2D (pageable) grįždavo prieš DMA pabaigą, biblioteka konvertuodavo dalinai įkeltą
@@ -960,7 +997,7 @@ def main():
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
-             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "ffmt_neg": lambda: ffmt_neg(out),
+             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
     # Paleidimo / sustabdymo testai (planas §P6) — atskirame modulyje; jis naudoja šį modulį (ne antrą jo kopiją).

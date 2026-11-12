@@ -14,7 +14,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/engine_mxl.cmake)  # variklio MXL prievadai (V
 # gfxgen naudoja TIK viešą libvramflow-gfx (include/vramflow/gfx.h): įrodo, kad biblioteka pakankama.
 add_executable(vramflow-func
   src/func/main_func.cpp src/func/func_common.cpp src/func/engine_glue.cpp
-  src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/dec.cpp
+  src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/dec.cpp src/func/keepwarm.cpp
   src/mxlio/common_io.cpp)
 vramflow_warnings(vramflow-func)
 target_link_libraries(vramflow-func PRIVATE mxlv_engine_mxl mxlv_runtime mxlv_flows mxlv_threadpool mxlv_media mxlv_media_cpu mxlv_common mxl::mxl vramflow-gfx mxlv_gfx_cpu mxlv_gfx_cuda mxlv_gfx_ref CLI11::CLI11 Threads::Threads PkgConfig::LIBAV CUDA::cudart_static)

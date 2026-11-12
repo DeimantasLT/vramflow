@@ -149,7 +149,16 @@ int main(int argc, char** argv) {
     auto* rc = app.add_subcommand("ref-crc", "raw NV12 → laukų CRC32C etalonas (JSON)");
     rc->add_option("nv12", ref_path)->required();
     rc->add_option("--format", o.format, "formatas (progresyviam — kadro grain'ų CRC)");
+    KeepWarmOpts kw;
+    auto* k = app.add_subcommand("keepwarm",
+                                 "laiko GPU virš tuščiosios eigos P8 lengva periodine apkrova (nešiojamiems / dev kompiuteriams, kol yra "
+                                 "gyvas eteris; docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md)");
+    k->add_option("--size-mb", kw.size_mb, "užpildomo VRAM bloko dydis, MB")->check(CLI::Range(1u, 4096u));
+    k->add_option("--interval-ms", kw.interval_ms, "užpildymo periodas, ms")->check(CLI::Range(0.1, 10000.0));
+    k->add_option("--duration", kw.duration_s, "trukmė, s; 0 — iki sustabdymo (SIGINT / SIGTERM; numatyta)")->check(CLI::NonNegativeNumber);
+    k->add_option("--device-uuid", o.device_uuid);
     CLI11_PARSE(app, argc, argv);
+    if (app.got_subcommand("keepwarm")) return run_keepwarm(kw, o.device_uuid);  // ne MXL funkcija: be domeno ir nuomos
     {
         std::string why;
         if (!vramflow::parse_format(o.format, o.fmt, why) || !vramflow::format_supported(o.fmt, why)) {

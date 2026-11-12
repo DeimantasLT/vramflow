@@ -29,7 +29,7 @@ Naudojimas (WSL2; FUNC_BIN, PROBE_BIN, LD_LIBRARY_PATH — kaip functional.py):
   python3 tests/perf/gpu_event_hiccup.py analyze <out> [<out> …]       # lentelė + <out>/analysis.json
 Papildomai (siaurinimui ir mitigacijoms): --keep-ctx (visą laiką gyvas gpu_ctx_probe serve su kontekstu),
 --prealloc-mb N (gyvas zondas prieš auką užsiima N MB), --keep-busy MB,ms (nuolatinė lengva GPU apkrova, kad GPU
-neišeitų į P8), --narrow "komanda;…" (zondo komandos narrow raundui), --logo-n, --logo-dur, --only logo8 ir t. t.
+neišeitų į P8), --keep-warm MB,ms (tas pats per `vramflow-func keepwarm`), --narrow "komanda;…" (zondo komandos narrow raundui), --logo-n, --logo-dur, --only logo8 ir t. t.
 Pastaba: `--tag` reikšmę, prasidedančią „-“, rašyti `--tag=-n2`.
 """
 import argparse
@@ -397,6 +397,10 @@ def run_one(out, victim, rnd, k, args):
         busy = r.probe("keepbusy", "busy", mb, ms)
         busy.wait_phase("busy")
         time.sleep(3)  # leisti taktams pakilti prieš aukos startą
+    if args.keep_warm:  # ta pati mitigacija gamybiniu įrankiu: vramflow-func keepwarm
+        mb, ms = args.keep_warm.split(",")
+        r.procs.append(P(r, "keepwarm", [FUNC_BIN, "keepwarm", "--size-mb", mb, "--interval-ms", ms, "--duration", 0]))
+        time.sleep(3)
     vic = r.func("victim", "gen", "--flows", N_VICTIM, "--duration", 900, "--warmup", 2, "--impl", impl, "--storage", storage)
     data = r.d / f"{flow_id(1, N_VICTIM - 1)}.mxl-flow" / "data"
     poll = None
@@ -441,7 +445,7 @@ def run_one(out, victim, rnd, k, args):
             f = ln.replace(",", "").split()
             late.append({"index": int(f[4]), "late_ms": float(f[5]), "tai": int(f[-1])})
     res = {"victim": victim, "round": rnd, "rep": k, "tag": args.tag, "victim_rc": vrc,
-           "keep_ctx": bool(args.keep_ctx), "prealloc_mb": args.prealloc_mb, "keep_busy": args.keep_busy,
+           "keep_ctx": bool(args.keep_ctx), "prealloc_mb": args.prealloc_mb, "keep_busy": args.keep_busy, "keep_warm": args.keep_warm,
            "window": [r.t_events_from, r.t_events_to], "events": r.events, "late_lines": late,
            "summary": json.loads(summ.read_text()) if summ.exists() else None}
     (r.dir / "run.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -598,6 +602,7 @@ def main():
     r.add_argument("--keep-ctx", action="store_true", help="mitigacija: gyvas CUDA kontekstas visą paleidimą")
     r.add_argument("--prealloc-mb", type=int, default=0)
     r.add_argument("--keep-busy", default="", help="mitigacija: gpu_ctx_probe busy <MB>,<pauzė ms> visą paleidimą")
+    r.add_argument("--keep-warm", default="", help="mitigacija: vramflow-func keepwarm <MB>,<periodas ms> visą paleidimą")
     r.add_argument("--no-smi", action="store_true")
     r.add_argument("--tag", default="")
     a = sp.add_parser("analyze")
