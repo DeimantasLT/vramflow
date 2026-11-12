@@ -314,3 +314,32 @@ TEST_CASE("round2: commit klaida — praradimas", "[engine][round2][mutant]") {
     CHECK(res.any_loss);
     CHECK(r.outs[0]->find(kI) == nullptr);
 }
+
+TEST_CASE("round2: A17 — laikrodžio įvykio langas 3 s (žingsnis 1-ą min., perpildymas 50-ą — ne laikrodis)",
+          "[engine][round2][clock]") {
+    // dec perpildymą priskiria laikrodžiui tik per clock_event_recent(3 s): žingsnis −40 ms ties 60 s,
+    // klausiama ties 60,5 s (true — laikrodis), 64 s (false) ir 50 min (false — overrun_frames).
+    Rig r(1);
+    const std::uint64_t t0 = r.clk.now_tai();
+    bool armed = false;
+    std::map<std::uint64_t, bool> recent;  // sekundė nuo starto → clock_event_recent(3 s)
+    r.fn.on_begin_tick = [&](Index, TickContext& ctx) {
+        const std::uint64_t mono_s = static_cast<std::uint64_t>(r.clk.now_mono_raw() - r.clk.mono_start()) / 1'000'000'000ull;
+        if (!armed && mono_s >= 60) {
+            armed = true;
+            r.clk.schedule_step(r.clk.now_mono_raw() + 1'000'000, -40'000'000);
+        }
+        const std::uint64_t ms = static_cast<std::uint64_t>(r.clk.now_mono_raw() - r.clk.mono_start()) / 1'000'000ull;
+        for (const std::uint64_t at : {60'500ull, 64'000ull, 3'000'000ull})
+            if (ms >= at && recent.count(at) == 0) recent[at] = ctx.clock_event_recent(3'000'000'000ull);
+        if (ms >= 3'000'000) r.stop = true;
+    };
+    r.build();
+    r.run();
+    (void)t0;
+    REQUIRE(r.hub.engine().clock_steps == 1);
+    REQUIRE(recent.count(60'500) == 1);
+    CHECK(recent[60'500]);
+    CHECK_FALSE(recent[64'000]);
+    CHECK_FALSE(recent[3'000'000]);
+}

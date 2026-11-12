@@ -677,7 +677,10 @@ struct TickEngine::Impl {
         if (d == 0) return;
         EngineCounters& e = hub.engine();
         ++e.clock_steps;
-        if (d < 0) ++e.clock_backward;
+        if (d < 0) {
+            ++e.clock_backward;
+            e.clock_back_ns += static_cast<std::uint64_t>(-d);
+        }
         step_in_tick = true;
         last_step_mono = clk.now_mono_raw();
         // Atviri tick'ai uždaromi: priežastis — laikrodis. Antras ratas — prisijungę po pernešimo (jų indeksas

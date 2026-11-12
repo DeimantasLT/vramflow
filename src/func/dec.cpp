@@ -27,6 +27,9 @@ extern "C" {
 #include <vector>
 
 #include "common/crc32c.hpp"
+#include "engine/engine.hpp"
+#include "engine/mxl_ports.hpp"
+#include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "media/cpu/cpu_media.hpp"
@@ -231,7 +234,6 @@ int run_dec(const Opts& o) {
     const std::string opts = cpu ? std::string{} : cuda_options(dev);
     const bool inter = o.fmt.raster.interlaced;
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
-    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
     const std::uint64_t gpf = inter ? 2 : 1;  // grain'ų kadre
     const std::string& siting = o.chroma_siting;  // tik interlaced flow'ui; progresyviam visada kadro chroma
     if (!inter && siting == "field") { st.fatal = "--chroma-siting field galimas tik interlaced formatui"; rc = 1; }
@@ -259,152 +261,218 @@ int run_dec(const Opts& o) {
     std::vector<std::int64_t> cur_n(o.flows, -1);
     std::vector<int> underrun_run(o.flows, 0);
     std::vector<std::uint64_t> first_play(o.flows, 0);
-    const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
-    if (inter && (i & 1)) ++i;  // pradėti nuo viršutinio lauko
-    ClockWatch cw;
-    cw.stepped();
+    // Bendras tick variklis (planas V13): N šaltinio vienetų; begin_tick — kadro parinkimas iš atkūrimo buferio (be kadro —
+    // no_content → spraga, leave), process — split visiems vienu batch'u, commit'ina variklis. Interlaced — skip_align 2
+    // (po praleidimo tęsti nuo viršutinio lauko). A17: perpildymai laikrodžiui priskiriami tik per clock_event_recent(3 s).
+    struct DecFn final : engine::TickFunction {
+        const Opts& o;
+        Stats& st;
+        std::vector<std::unique_ptr<DecStream>>& ds;
+        std::vector<std::int64_t>& anchor;
+        std::vector<AVFrame*>& cur;
+        std::vector<std::int64_t>& cur_n;
+        std::vector<int>& underrun_run;
+        std::vector<std::uint64_t>& first_play;
+        bool cpu, inter;
+        media::Dim dim;
+        std::uint64_t gpf;
+        int fps_i;
+        const std::string& siting;
+        ThreadPool& pool;
+        cudaStream_t stream;
+        double warm;
+        std::vector<media::SplitJob> jobs;
+        std::vector<std::uint32_t> job_flow;
+        std::vector<AVFrame*> job_src;
+        std::vector<media::ChromaMode> job_mode;
+        std::vector<media::SplitJob> part;
+        std::uint64_t t_wake = 0;
 
-    while (!rc && !stop.load() && now_tai() < end_tai) {
-        // Jei teks laukti ilgiau nei 2 laukus — laikrodis šoko atgal: žymim PRIEŠ laukimą, kad darbininkų eilių
-        // perpildymas laukimo metu būtų priskirtas šuoliui
-        if (mxlIndexToTimestamp(&rate, i) > now_tai() + 2 * (mxlIndexToTimestamp(&rate, 1) - mxlIndexToTimestamp(&rate, 0)))
-            g_clock_event_mono = mono_ns();
-        if (wait_until(rate, i, o.read_offset_us * 1000, stop)) {
-            st.proc["clock_backward"]++;
-            g_clock_event_mono = mono_ns();
+        DecFn(const Opts& o_, Stats& st_, std::vector<std::unique_ptr<DecStream>>& ds_, std::vector<std::int64_t>& anchor_,
+              std::vector<AVFrame*>& cur_, std::vector<std::int64_t>& cur_n_, std::vector<int>& ur_, std::vector<std::uint64_t>& fp_, bool cpu_,
+              bool inter_, media::Dim dim_, std::uint64_t gpf_, int fps_i_, const std::string& siting_, ThreadPool& pool_, cudaStream_t stream_,
+              double warm_)
+            : o(o_), st(st_), ds(ds_), anchor(anchor_), cur(cur_), cur_n(cur_n_), underrun_run(ur_), first_play(fp_), cpu(cpu_), inter(inter_),
+              dim(dim_), gpf(gpf_), fps_i(fps_i_), siting(siting_), pool(pool_), stream(stream_), warm(warm_) {
+            jobs.reserve(o.flows);
+            job_flow.reserve(o.flows);
+            job_src.reserve(o.flows);
+            job_mode.reserve(o.flows);
+            part.reserve(o.flows);
         }
-        if (stop.load()) break;
-        const int p = inter ? static_cast<int>(i & 1) : 0;  // progresyviam kiekvienas grain'as — naujas kadras
-        const std::uint64_t t_wake = now_tai();
-        jobs.clear();
-        job_flow.clear();
-        job_src.clear();
-        job_mode.clear();
-        int pitch_y = -1, pitch_uv = -1;
-        for (std::uint32_t n = 0; n < o.flows; ++n) {
-            DecStream& s = *ds[n];
-            if (p == 0) {  // naujas kadras
-                if (cur[n]) { av_frame_free(&cur[n]); }
-                cur_n[n] = -1;
-                // Atkūrimas ATVYKIMO tvarka (ne pagal PTS): po vieną kadrą kiekvienam kadro tick'ui, buferio gylis
-                // playout_frames. Tvirta prieš PTS nutrūkimus (kilpos sandūros, realūs srautai). anchor[n] — būsena:
-                // INT64_MIN = dar pildomas buferis, 0 = groja.
-                std::lock_guard g(s.m);
-                // paleidimo pereinamasis laikotarpis (skaičiuojamas atskirai): proceso warmup IR 2 s nuo šio srauto
-                // pirmo atkurto kadro (srautų zondavimas/startas nesutampa su proceso startu)
-                const std::uint64_t now = now_tai();
-                const bool in_warm = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
-                if (anchor[n] == INT64_MIN) {
-                    if (static_cast<int>(s.q.size()) < o.playout_frames) { st.flows[n].inc("waiting_buffer"); continue; }
-                    if (first_play[n] == 0) first_play[n] = now;
-                    s.playing = true;
-                    // paleidimo pliūpsnis (find_stream_info sukaupti paketai): paliekam tik naujausius playout_frames
-                    while (static_cast<int>(s.q.size()) > o.playout_frames) {
+
+        void begin_tick(engine::Index i, engine::TickContext& ctx) override {
+            t_wake = now_tai();
+            const int p = inter ? static_cast<int>(i & 1) : 0;  // progresyviam kiekvienas grain'as — naujas kadras
+            const bool clock_recent = ctx.clock_event_recent(3'000'000'000ull);
+            int pitch_y = -1, pitch_uv = -1;
+            for (std::uint32_t n = 0; n < o.flows; ++n) {
+                DecStream& s = *ds[n];
+                if (p == 0) {  // naujas kadras
+                    if (cur[n]) av_frame_free(&cur[n]);
+                    cur_n[n] = -1;
+                    // Atkūrimas ATVYKIMO tvarka (ne pagal PTS): po vieną kadrą kiekvienam kadro tick'ui, buferio gylis
+                    // playout_frames. anchor[n]: INT64_MIN — dar pildomas buferis, 0 — groja.
+                    std::lock_guard g(s.m);
+                    const std::uint64_t now = now_tai();
+                    const bool in_warm = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
+                    if (anchor[n] == INT64_MIN) {
+                        if (static_cast<int>(s.q.size()) < o.playout_frames) {
+                            st.flows[n].inc("waiting_buffer");
+                            ctx.no_content(n);
+                            continue;
+                        }
+                        if (first_play[n] == 0) first_play[n] = now;
+                        s.playing = true;
+                        while (static_cast<int>(s.q.size()) > o.playout_frames) {  // paleidimo pliūpsnis
+                            av_frame_free(&s.q.front().f);
+                            s.q.pop_front();
+                            st.flows[n].inc("startup_discard");
+                        }
+                        anchor[n] = 0;
+                    }
+                    // per daug sukaupta → seniausi išmetami; riba +1 s sugeria dekoderio pliūpsnius
+                    while (static_cast<int>(s.q.size()) > o.playout_frames + fps_i) {
                         av_frame_free(&s.q.front().f);
                         s.q.pop_front();
-                        st.flows[n].inc("startup_discard");
+                        st.flows[n].inc(in_warm ? "warmup_overrun_frames" : (clock_recent ? "clock_overrun_frames" : "overrun_frames"));
                     }
-                    anchor[n] = 0;
-                }
-                // per daug sukaupta (siuntėjas greitesnis / pliūpsnis) → seniausi išmetami ir užskaitomi
-                // dekoderis kadrus išduoda pliūpsniais (B perrikiavimas, UDP gija) — riba +25 kadrų (1 s) sugeria drebėjimą;
-                // viršijus — ilgalaikis greičių neatitikimas (tikras perpildymas)
-                while (static_cast<int>(s.q.size()) > o.playout_frames + fps_i) {
-                    av_frame_free(&s.q.front().f);
-                    s.q.pop_front();
-                    st.flows[n].inc(in_warm ? "warmup_overrun_frames" : (after_clock_event() ? "clock_overrun_frames" : "overrun_frames"));
-                }
-                if (!s.q.empty()) {
-                    cur[n] = s.q.front().f;
-                    cur_n[n] = s.q.front().n;
-                    s.q.pop_front();
-                    underrun_run[n] = 0;
-                } else {
-                    st.flows[n].inc(in_warm ? "warmup_underrun_frames" : "underrun_frames");
-                    if (++underrun_run[n] >= fps_i) {  // 1 s be kadrų → iš naujo pildyti buferį
-                        anchor[n] = INT64_MIN;
+                    if (!s.q.empty()) {
+                        cur[n] = s.q.front().f;
+                        cur_n[n] = s.q.front().n;
+                        s.q.pop_front();
                         underrun_run[n] = 0;
-                        st.flows[n].inc("rebuffer");
+                    } else {
+                        st.flows[n].inc(in_warm ? "warmup_underrun_frames" : "underrun_frames");
+                        if (++underrun_run[n] >= fps_i) {  // 1 s be kadrų → iš naujo pildyti buferį
+                            anchor[n] = INT64_MIN;
+                            underrun_run[n] = 0;
+                            st.flows[n].inc("rebuffer");
+                        }
+                    }
+                }
+                if (!cur[n]) {
+                    const std::uint64_t now = now_tai();
+                    const bool w = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
+                    st.flows[n].inc(w ? "warmup_underrun_fields" : "underrun_fields");
+                    ctx.no_content(n);
+                    continue;
+                }
+                if (!cpu) {  // GPU batch'as reikalauja vienodo pitch; CPU kiekvienam kadrui naudoja savo linesize
+                    if (pitch_y < 0) {
+                        pitch_y = cur[n]->linesize[0];
+                        pitch_uv = cur[n]->linesize[1];
+                    }
+                    if (cur[n]->linesize[0] != pitch_y || cur[n]->linesize[1] != pitch_uv) {
+                        st.flows[n].inc("pitch_mismatch");
+                        ctx.no_content(n);
                     }
                 }
             }
-            if (!cur[n]) {
-                const std::uint64_t now = now_tai();
-                const bool w = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
-                st.flows[n].inc(w ? "warmup_underrun_fields" : "underrun_fields");
-                continue;
-            }
-            if (!cpu) {  // GPU batch'as reikalauja vienodo pitch; CPU kiekvienam kadrui naudoja savo linesize
-                if (pitch_y < 0) { pitch_y = cur[n]->linesize[0]; pitch_uv = cur[n]->linesize[1]; }
-                if (cur[n]->linesize[0] != pitch_y || cur[n]->linesize[1] != pitch_uv) { st.flows[n].inc("pitch_mismatch"); continue; }
-            }
-            mxlStatus ms{};
-            std::uint32_t* dst = out[n].open(i, ms);
-            if (!dst) {
-                if (ms == MXL_ERR_INVALID_ARG && i <= out[n].last_committed) { st.proc["clock_backward"]++; continue; }
-                st.fatal = "OpenGrainSlot " + std::to_string(ms);
-                rc = 2;
-                break;
-            }
-            jobs.push_back({cur[n]->data[0], cur[n]->data[1], dst});
-            job_flow.push_back(n);
-            job_src.push_back(cur[n]);
-            job_mode.push_back(siting == "field"   ? media::ChromaMode::FieldSited
-                               : siting == "frame" ? media::ChromaMode::FrameSited
-                               : (cur[n]->flags & AV_FRAME_FLAG_INTERLACED) ? media::ChromaMode::FieldSited
-                                                                             : media::ChromaMode::FrameSited);
         }
-        if (rc) break;
-        cudaError_t ce = cudaSuccess;
-        const int field = inter ? p : -1;
-        if (cpu) {
-            pool.run(static_cast<int>(jobs.size()), [&](int k) {
-                const AVFrame* f = job_src[k];
-                media::cpu::split_yuv420p(f->data[0], f->data[1], f->data[2], f->linesize[0], f->linesize[1], dim, field,
-                                          inter ? job_mode[k] : media::ChromaMode::FrameSited, jobs[k].dst);
-            });
-        } else if (!jobs.empty()) {
-            if (!inter) {
-                ce = media::split_nv12_progressive(jobs.data(), static_cast<int>(jobs.size()), dim, pitch_y, pitch_uv, stream);
-            } else {
-                // vienas paleidimas kiekvienam chromos režimui (dažniausiai visi kadrai to paties tipo — vienas paleidimas)
-                for (const media::ChromaMode m : {media::ChromaMode::FieldSited, media::ChromaMode::FrameSited}) {
-                    std::vector<media::SplitJob> part;
-                    for (std::size_t k = 0; k < jobs.size(); ++k)
-                        if (job_mode[k] == m) part.push_back(jobs[k]);
-                    if (!part.empty() && !ce) ce = media::split_nv12(part.data(), static_cast<int>(part.size()), dim, p, m, pitch_y, pitch_uv, stream);
+
+        bool process(const engine::Batch& b, engine::TickContext& ctx) override {
+            const int p = inter ? static_cast<int>(b.index & 1) : 0;
+            jobs.clear();
+            job_flow.clear();
+            job_src.clear();
+            job_mode.clear();
+            int pitch_y = -1, pitch_uv = -1;
+            for (const engine::UnitTick& ut : b.units) {
+                const std::uint32_t n = ut.unit;
+                if (pitch_y < 0) {
+                    pitch_y = cur[n]->linesize[0];
+                    pitch_uv = cur[n]->linesize[1];
+                }
+                jobs.push_back({cur[n]->data[0], cur[n]->data[1], static_cast<std::uint32_t*>(ut.out[0])});
+                job_flow.push_back(n);
+                job_src.push_back(cur[n]);
+                job_mode.push_back(siting == "field"   ? media::ChromaMode::FieldSited
+                                   : siting == "frame" ? media::ChromaMode::FrameSited
+                                   : (cur[n]->flags & AV_FRAME_FLAG_INTERLACED) ? media::ChromaMode::FieldSited
+                                                                                 : media::ChromaMode::FrameSited);
+            }
+            cudaError_t ce = cudaSuccess;
+            const int field = inter ? p : -1;
+            if (cpu) {
+                pool.run(static_cast<int>(jobs.size()), [&](int k) {
+                    const AVFrame* f = job_src[k];
+                    media::cpu::split_yuv420p(f->data[0], f->data[1], f->data[2], f->linesize[0], f->linesize[1], dim, field,
+                                              inter ? job_mode[k] : media::ChromaMode::FrameSited, jobs[k].dst);
+                });
+            } else if (!jobs.empty()) {
+                if (!inter) {
+                    ce = media::split_nv12_progressive(jobs.data(), static_cast<int>(jobs.size()), dim, pitch_y, pitch_uv, stream);
+                } else {
+                    // vienas paleidimas kiekvienam chromos režimui (dažniausiai visi kadrai to paties tipo)
+                    for (const media::ChromaMode m : {media::ChromaMode::FieldSited, media::ChromaMode::FrameSited}) {
+                        part.clear();
+                        for (std::size_t k = 0; k < jobs.size(); ++k)
+                            if (job_mode[k] == m) part.push_back(jobs[k]);
+                        if (!part.empty() && !ce)
+                            ce = media::split_nv12(part.data(), static_cast<int>(part.size()), dim, p, m, pitch_y, pitch_uv, stream);
+                    }
                 }
             }
+            if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
+            if (ce) {
+                st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce);
+                ctx.fatal(2, st.fatal);
+                return false;
+            }
+            return true;
         }
-        if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
-        if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
-        for (std::uint32_t n : job_flow) {
-            if (out[n].commit() != MXL_STATUS_OK) { st.fatal = "CommitGrain"; rc = 2; break; }
-            st.flows[n].inc("fields_ok");
+
+        void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
+            if (oc == engine::Outcome::Ready) st.flows[ut.unit].inc("fields_ok");
+            else if (oc == engine::Outcome::Skipped) st.proc["clock_backward"]++;
         }
-        const std::uint64_t t_done = now_tai();
-        if (t_done >= warm) {
-            st.add_hist("split_ms", t_done - t_wake);
-            st.add_hist("out_lateness", t_done - mxlIndexToTimestamp(&rate, i));
+
+        void end_tick(engine::Index i, engine::TickContext&) override {
+            const mxlRational r = mxl_rate(o.fmt.grain_rate());
+            const std::uint64_t t_done = now_tai();
+            if (static_cast<double>(t_done) >= warm) {
+                st.add_hist("split_ms", t_done - t_wake);
+                st.add_hist("out_lateness", t_done - mxlIndexToTimestamp(&r, i));
+            }
+            // Kito tick'o laukti ilgiau nei 2 laukus — laikrodis šoko atgal: žymima PRIEŠ laukimą, kad darbininkų eilių
+            // perpildymas laukimo metu būtų priskirtas šuoliui (darbininkai — after_clock_event())
+            if (mxlIndexToTimestamp(&r, i + 1) > t_done + 2 * (mxlIndexToTimestamp(&r, 1) - mxlIndexToTimestamp(&r, 0)))
+                g_clock_event_mono = mono_ns();
         }
-        if (st.first_index == ~0ull) st.first_index = i;
-        st.last_index = i;
-        ++i;
-        const bool clk = cw.stepped();
-        if (clk) g_clock_event_mono = mono_ns();
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
-        if (now_idx > i) {
-            for (auto& f : st.flows) f.inc(clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips"), now_idx - i);
-            i = inter ? now_idx + (now_idx & 1) : now_idx;  // interlaced: tęsti nuo viršutinio lauko
+
+        void on_clock_step(std::int64_t, engine::TickContext&) override { g_clock_event_mono = mono_ns(); }
+    };
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Legacy, o.read_offset_us * 1000);
+    if (inter) ecfg.skip_align = 2;  // pradėti ir po praleidimo tęsti nuo viršutinio lauko
+    std::vector<engine::MxlVideoOutput> ports;
+    ports.reserve(o.flows);
+    for (auto& v : out) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    engine::SystemClock clk;
+    engine::StatsHub hub;
+    engine::TickEngine eng(ecfg, clk, hub, stop);
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
+        engine::UnitSpec u;
+        u.name = flow_id(kRoleDec, o.flow_base + n);
+        u.out.push_back(&ports[n]);
+        std::uint32_t id = 0;
+        if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+    }
+    DecFn fn(o, st, ds, anchor, cur, cur_n, underrun_run, first_play, cpu, inter, dim, gpf, fps_i, siting, pool, stream, warm);
+    if (!rc) {
+        const engine::RunResult res = eng.run(fn);
+        if (res.reason == engine::EndReason::Fatal) {
+            if (st.fatal.empty()) st.fatal = res.fatal;
+            rc = res.exit_code ? res.exit_code : 2;
         }
+        to_summary(hub, eng, res, o.flows, SkipScope::PerFlow, st);
     }
     stop = true;  // darbininkai baigia (UDP read su timeout)
     for (auto& s : ds)
         if (s->th.joinable()) s->th.join();
-    st.proc["clock_steps"] = cw.steps;
-    st.proc["clock_back_ms"] = cw.back_ns / 1'000'000ull;
+    st.proc["clock_steps"] = hub.engine().clock_steps;
+    st.proc["clock_back_ms"] = hub.engine().clock_back_ns / 1'000'000ull;
     for (std::uint32_t n = 0; n < ds.size(); ++n) {
         DecStream& s = *ds[n];
         auto& f = st.flows[n];
@@ -418,19 +486,11 @@ int run_dec(const Opts& o) {
         f.inc("send_eagain", s.send_eagain);
         f.inc("clock_overflow_drops", s.clock_overflow_drops);
         f.inc("startup_overflow_drops", s.startup_overflow_drops);
-        // Laikrodžio domenų neatitikimas: siuntėjai tempą skaičiuoja monotoniniu laikrodžiu, atkūrimas — TAI.
-        // Kiek TAI šoko atgal (WSL2 koreguoja ~1,3 s kas ~31 s), tiek kadrų atkūrimas privalo išmesti — tokį
-        // overrun kiekį (+1 kadras per šuolį) priskiriam aplinkai; perteklius lieka pajėgumo praradimu.
-        const std::uint64_t frame_ns = static_cast<std::uint64_t>(mxlIndexToTimestamp(&rate, gpf) - mxlIndexToTimestamp(&rate, 0));
-        std::uint64_t allow = cw.back_ns / frame_ns + cw.steps;
-        for (const char* k : {"overrun_frames", "overflow_drops"}) {  // ta pati tolerancija abiem eilėms kartu
-            const std::uint64_t ov = f.c[k];
-            const std::uint64_t mv = std::min(ov, allow);
-            allow -= mv;
-            f.c[k] = ov - mv;
-            if (!f.c[k]) f.c.erase(k);
-            f.inc("clock_drift_dropped_frames", mv);
-        }
+        // A17 (planas V13): suminė „laikrodžio nuolaida“ pašalinta — perpildymai laikrodžiui priskiriami tik per
+        // clock_event_recent(3 s) (clock_overrun_frames, clock_overflow_drops). Raktas lieka (0) — santraukos raktų aibė.
+        for (const char* k : {"overrun_frames", "overflow_drops"})
+            if (f.c.count(k) && !f.c[k]) f.c.erase(k);
+        f.inc("clock_drift_dropped_frames", 0);
         if (!s.opened && !rc) { st.fatal = "srautas " + std::to_string(n) + ": " + s.error; rc = 2; }
         for (auto& q : s.q) av_frame_free(&q.f);
         if (cur[n]) av_frame_free(&cur[n]);
