@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <vector>
 
+#include "engine/engine.hpp"
+#include "engine/mxl_ports.hpp"
+#include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "media/cpu/cpu_media.hpp"
@@ -19,6 +22,117 @@
 #include <thread>
 
 namespace mxlv::func {
+
+namespace {
+// gen kaip TickFunction (planas §6 D1: šaltinio vienetai). process — turinys visiems paruoštiems vienetams vienu batch'u
+// (G: vienas kernel'is; H: kernel'is → D2H; C: gijų baseinas); commit'ina variklis.
+struct GenFn final : engine::TickFunction {
+    const Opts& o;
+    Stats& st;
+    bool cpu, host_gpu;
+    ThreadPool& pool;
+    std::vector<media::GenJob>& jobs;
+    std::vector<std::uint32_t*>& host_dst;
+    std::vector<std::uint32_t*>& scratch;
+    cudaStream_t stream;
+    std::vector<AudioOut>& aout;
+    vramflow::Rational grain;
+    media::Dim dim;
+    bool inter;
+    std::size_t gbytes;
+    double warm;
+    std::uint64_t first = ~0ull, last = 0;
+    std::uint64_t t_wake = 0;
+    std::vector<std::uint32_t> flow_of;  // batch'o eilė → flow numeris
+
+    GenFn(const Opts& o_, Stats& st_, bool cpu_, bool host_gpu_, ThreadPool& pool_, std::vector<media::GenJob>& jobs_,
+          std::vector<std::uint32_t*>& host_dst_, std::vector<std::uint32_t*>& scratch_, cudaStream_t stream_,
+          std::vector<AudioOut>& aout_, vramflow::Rational grain_, media::Dim dim_, bool inter_, std::size_t gbytes_, double warm_)
+        : o(o_), st(st_), cpu(cpu_), host_gpu(host_gpu_), pool(pool_), jobs(jobs_), host_dst(host_dst_), scratch(scratch_),
+          stream(stream_), aout(aout_), grain(grain_), dim(dim_), inter(inter_), gbytes(gbytes_), warm(warm_) {
+        flow_of.reserve(o.flows);
+    }
+
+    void begin_tick(engine::Index, engine::TickContext&) override { t_wake = now_tai(); }
+
+    bool process(const engine::Batch& b, engine::TickContext& ctx) override {
+        const std::uint64_t i = b.index;
+        jobs.clear();
+        flow_of.clear();
+        for (const engine::UnitTick& ut : b.units) {
+            if (ut.out.empty()) continue;  // tik garsas
+            jobs.push_back({static_cast<std::uint32_t*>(ut.out[0]), o.flow_base + ut.unit});
+            flow_of.push_back(ut.unit);
+        }
+        cudaError_t ce = cudaSuccess;
+        if (cpu) {
+            media::GenParams base{o.run_seed, 0, o.complexity};
+            base.rate_num = static_cast<std::uint32_t>(grain.num);
+            base.rate_den = static_cast<std::uint32_t>(grain.den);
+            pool.run(static_cast<int>(jobs.size()), [&](int n) {
+                media::GenParams g = base;
+                g.flow = jobs[n].flow;
+                media::cpu::gen_field(g, i, dim, inter, jobs[n].dst);
+            });
+        } else if (host_gpu) {
+            for (std::size_t n = 0; n < jobs.size(); ++n) {
+                host_dst[n] = jobs[n].dst;
+                jobs[n].dst = scratch[flow_of[n]];
+            }
+            if (!jobs.empty())
+                ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
+                                       static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
+            for (std::size_t n = 0; n < jobs.size() && !ce; ++n)
+                ce = cudaMemcpyAsync(host_dst[n], jobs[n].dst, gbytes, cudaMemcpyDeviceToHost, stream);
+            if (!ce) ce = cudaStreamSynchronize(stream);
+        } else {
+            if (!jobs.empty())
+                ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
+                                       static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
+            if (!ce) ce = cudaStreamSynchronize(stream);
+        }
+        if (ce) {
+            st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce);
+            ctx.fatal(2, st.fatal);
+            return false;
+        }
+        return true;
+    }
+
+    void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
+        if (oc == engine::Outcome::Skipped) {  // AlreadyCommitted — laikrodis atgal (M11)
+            st.proc["clock_backward"]++;
+            return;
+        }
+        if (oc != engine::Outcome::Ready) return;
+        const std::uint32_t n = ut.unit;
+        if (o.video) st.flows[n].inc("fields_written");
+        if (n >= aout.size()) return;
+        // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
+        const std::uint64_t i = ut.index;
+        const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
+        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
+        constexpr double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
+        const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
+            const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
+            return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
+        });
+        if (as == MXL_STATUS_OK) st.flows[n].inc("audio_blocks");
+        else st.flows[n].inc("audio_write_errors");
+    }
+
+    void end_tick(engine::Index i, engine::TickContext&) override {
+        const std::uint64_t t_done = now_tai();
+        if (static_cast<double>(t_done) >= warm) {
+            st.add_hist("gen_ms", t_done - t_wake);
+            const mxlRational r = mxl_rate(grain);
+            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&r, i));
+        }
+        if (first == ~0ull) first = i;
+        last = i;
+    }
+};
+}  // namespace
 
 int run_gen(const Opts& o) {
     Stats st;
@@ -42,7 +156,6 @@ int run_gen(const Opts& o) {
     std::string err;
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     const vramflow::Rational grain = o.fmt.grain_rate();
-    const mxlRational rate = mxl_rate(grain);
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
     const bool inter = o.fmt.raster.interlaced;
     const std::size_t gbytes = media::grain_bytes(dim, inter);
@@ -68,92 +181,34 @@ int run_gen(const Opts& o) {
             if (cudaMalloc(reinterpret_cast<void**>(&p), gbytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; break; }
             scratch.push_back(p);
         }
-    const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    const double warm = warm_tai_after(o.warmup_s);
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
-    const double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
-    ClockWatch cw;
-    cw.stepped();
-
-    while (!rc && !stop.load() && now_tai() < end_tai) {
-        if (wait_until(rate, i, 0, stop)) st.proc["clock_backward"]++;
-        if (stop.load()) break;
-        const std::uint64_t t_wake = now_tai();
-        bool ok = true;
-        for (std::uint32_t n = 0; n < vout.size(); ++n) {
-            mxlStatus s{};
-            jobs[n].dst = vout[n].open(i, s);
-            jobs[n].flow = o.flow_base + n;
-            if (!jobs[n].dst) {
-                if (s == MXL_ERR_INVALID_ARG && i <= vout[n].last_committed) { st.proc["clock_backward"]++; ok = false; break; }
-                st.fatal = "OpenGrainSlot status " + std::to_string(s);
-                rc = 2;
-                ok = false;
-                break;
-            }
+    // Bendras tick variklis (planas V8): N šaltinio vienetų (be įėjimų), išėjimas — video flow'as (jei yra), garsas —
+    // end_unit. Laikas — legacy (gen niekada nelaukia įėjimų; ro = 0, kaip anksčiau wait_until(i, 0)).
+    std::vector<engine::MxlVideoOutput> ports;
+    ports.reserve(vout.size());
+    for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    engine::SystemClock clk;
+    engine::StatsHub hub;
+    engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
+        engine::UnitSpec u;
+        u.name = flow_id(kRoleGen, o.flow_base + n);
+        if (o.video) u.out.push_back(&ports[n]);
+        std::uint32_t id = 0;
+        if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+    }
+    GenFn fn(o, st, cpu, host_gpu, pool, jobs, host_dst, scratch, stream, aout, grain, dim, inter, gbytes, warm_tai_after(o.warmup_s));
+    if (!rc) {
+        const engine::RunResult res = eng.run(fn);
+        if (res.reason == engine::EndReason::Fatal) {
+            if (st.fatal.empty()) st.fatal = res.fatal;
+            rc = res.exit_code ? res.exit_code : 2;
         }
-        if (!ok) {
-            for (auto& v : vout) v.cancel();
-            if (!rc) { i = vout.empty() ? i + 1 : vout[0].last_committed + 1; continue; }
-            break;
-        }
-        cudaError_t ce = cudaSuccess;
-        if (cpu) {
-            media::GenParams base{o.run_seed, 0, o.complexity};
-            base.rate_num = static_cast<std::uint32_t>(grain.num);
-            base.rate_den = static_cast<std::uint32_t>(grain.den);
-            pool.run(static_cast<int>(jobs.size()), [&](int n) {
-                media::GenParams g = base;
-                g.flow = jobs[n].flow;
-                media::cpu::gen_field(g, i, dim, inter, jobs[n].dst);
-            });
-        } else if (host_gpu) {
-            for (std::size_t n = 0; n < jobs.size(); ++n) {
-                host_dst[n] = jobs[n].dst;
-                jobs[n].dst = scratch[n];
-            }
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
-                                                        static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
-            for (std::size_t n = 0; n < jobs.size() && !ce; ++n)
-                ce = cudaMemcpyAsync(host_dst[n], scratch[n], gbytes, cudaMemcpyDeviceToHost, stream);
-            if (!ce) ce = cudaStreamSynchronize(stream);
-        } else {
-            if (!jobs.empty()) ce = media::gen_fields(jobs.data(), static_cast<int>(jobs.size()), o.run_seed, o.complexity, i, dim, inter,
-                                                        static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
-            if (!ce) ce = cudaStreamSynchronize(stream);
-        }
-        if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; break; }
-        for (std::uint32_t n = 0; n < vout.size(); ++n) {
-            if (vout[n].commit() != MXL_STATUS_OK) { st.fatal = "CommitGrain"; rc = 2; break; }
-            st.flows[n].inc("fields_written");
-        }
-        // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
-        const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
-        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
-        for (std::uint32_t n = 0; n < aout.size(); ++n) {
-            const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
-                const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
-                return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
-            });
-            if (as == MXL_STATUS_OK) st.flows[n].inc("audio_blocks");
-            else st.flows[n].inc("audio_write_errors");
-        }
-        const std::uint64_t t_done = now_tai();
-        if (t_done >= warm) {
-            st.add_hist("gen_ms", t_done - t_wake);
-            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
-        }
-        if (st.first_index == ~0ull) st.first_index = i;
-        st.last_index = i;
-        ++i;
-        const bool clk = cw.stepped();
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
-        if (now_idx > i) {
-            st.proc[clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips")] += now_idx - i;
-            i = now_idx;
+        to_summary(hub, eng, res, o.flows, SkipScope::Process, st);
+        if (fn.first != ~0ull) {  // first / last — iš įvykdytų tick'ų (kaip anksčiau)
+            st.first_index = fn.first;
+            st.last_index = fn.last;
         }
     }
-    st.proc["clock_steps"] = cw.steps;
     if (!cpu) {
         cudaStreamSynchronize(stream);
         cudaStreamDestroy(stream);
