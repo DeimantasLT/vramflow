@@ -141,6 +141,8 @@ struct GenFn final : engine::TickFunction {
         if (static_cast<double>(t_done) >= warm) {
             st.add_hist("gen_ms", t_done - t_wake);
             st.add_hist("commit_lateness", late);
+            std::uint64_t& m = st.commit_lateness_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+            m = std::max<std::uint64_t>(m, late / 1000);
         }
         // Vėlesnis nei --deadline-ms commit'as: vartotojai su tokia riba šio indekso nesulaukia. Skaitiklis (visam
         // paleidimui, ne tik po warmup) ir eilutė su TAI laiku — izoliacijos testai priskiria praradimus aukštupiui.

@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
     l->add_option("--inject-every", o.inject_every);
     l->add_option("--deadline-ms", o.deadline_ms);
     l->add_option("--read-offset-us", o.read_offset_us);
+    l->add_option("--test-fault-proc-delay-ms", o.test_fault_proc_delay_ms)->group("");  // izoliacijos vartų meta-testui
     auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
     common(cp, o);
     inputs(cp, o);

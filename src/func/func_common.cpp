@@ -139,6 +139,15 @@ std::string map_json(const std::map<std::string, std::uint64_t>& m) {
     }
     return j + "}";
 }
+// [[sekundė, µs], …] — lateness_s / commit_lateness_s
+std::string seconds_json(const std::map<std::uint64_t, std::uint64_t>& m) {
+    std::string j = "[";
+    for (const auto& [k, v] : m) {
+        if (j.size() > 1) j += ",";
+        j += "[" + std::to_string(k) + "," + std::to_string(v) + "]";
+    }
+    return j + "]";
+}
 }  // namespace
 
 void write_summary(const Opts& o, const std::string& role, const Stats& s, const std::string& extra_json) {
@@ -157,9 +166,15 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
     j += "},\"flows\":[";
     for (std::size_t i = 0; i < s.flows.size(); ++i) {
         if (i) j += ",";
-        j += map_json(s.flows[i].c);
+        std::string f = map_json(s.flows[i].c);
+        if (!s.flows[i].lateness_s.empty()) {
+            f.pop_back();
+            f += std::string(f.size() > 1 ? "," : "") + "\"lateness_s\":" + seconds_json(s.flows[i].lateness_s) + "}";
+        }
+        j += f;
     }
     j += "]";
+    if (!s.commit_lateness_s.empty()) j += ",\"commit_lateness_s\":" + seconds_json(s.commit_lateness_s);
     if (!s.fatal.empty()) {
         j += ",\"fatal\":";
         mxlv::json_escape_into(j, s.fatal);

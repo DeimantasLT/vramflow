@@ -118,8 +118,13 @@ def scenario(out, name, func, tag, impl, storage, faults):
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     special = set(faults.values())
-    roles = {"A": [n for n in range(N) if n not in special]}  # sveiki — iš eilės nuo 0 (vienas gen: --flow-base 0)
-    assert roles["A"] == list(range(len(roles["A"]))), roles
+    # sveiki — po vieną gen kiekvienai ištisinei atkarpai (A0, A1, …): paveikti flow'ai gali būti bet kurioje vietoje
+    roles, run = {}, []
+    for n in range(N + 1):
+        if n < N and n not in special:
+            run.append(n)
+        elif run:
+            roles[f"A{len(roles)}"], run = run, []
     for k, n in faults.items():
         roles[k] = [n]
     procs = start_sources(out, sub, d, func, v, roles)
@@ -157,13 +162,18 @@ def scenario(out, name, func, tag, impl, storage, faults):
     sv = F.vsummary(vf, "verify-composite" if func == "composite" else "verify-logo")
     if sf is None or sv is None:
         return {"err": f"nėra santraukų ({func}={sf is not None}, verify={sv is not None})"}
-    return {"rc": rc, "fn": sf, "verify": sv, "upstream": I.upstream(procs["A"]), "special": special}
+    return {"rc": rc, "fn": sf, "verify": sv, "upstream": I.upstream([p for k, p in procs.items() if k.startswith("A")]),
+            "special": special}
 
 
 def check_split(r, func):
     bad = []
     sf, sv = r["fn"], r["verify"]
     ff, vfl = sf.get("flows") or [], sv.get("flows") or []
+    # Sveiko aukštupio (gen A…) paties praradimai (eilutės „vėlus commit“ > --deadline-ms ir „praleista“) — ne funkcijos;
+    # kitų procesų GPU įvykiai (pvz. perkrauto gen CUDA kontekstas H variante) gali pavėlinti ir sveiką gamintoją.
+    up = r.get("upstream") or {}
+    budget = len(up.get("late_index") or []) + sum(b - a + 1 for a, b in up.get("skipped") or [])
     for n in range(N):
         f, vv = (ff[n] if n < len(ff) else {}), (vfl[n] if n < len(vfl) else {})
         if vv.get("mismatch_fields", 0):
@@ -173,12 +183,15 @@ def check_split(r, func):
         vl = vv.get("missing", 0) + vv.get("invalid", 0)
         if vl > fn_loss(f) + (0 if n not in r["special"] else 0):
             bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai {fn_loss(f)}")
-        if n not in r["special"] and fn_loss(f):
-            bad.append(f"sveiko #{n} praradimai { {k: f[k] for k in LOSS if f.get(k)} }")
+        if n not in r["special"] and fn_loss(f) > budget:
+            bad.append(f"sveiko #{n} praradimai { {k: f[k] for k in LOSS if f.get(k)} } > aukštupio {budget}")
     held = ((sf.get("hist") or {}).get("held_ms") or {}).get("count", 0)
     if not held:
         bad.append("held_ms tuščia — fazės neskilo (scenarijus nepatikrino skilusio indekso)")
     return bad, held
+
+
+SPLIT_HEALTHY = {("logo", "C"): 0, ("logo", "H"): 1, ("logo", "G"): 2, ("composite", "H"): 3, ("composite", "G"): 1}
 
 
 def fsplit(out):
@@ -187,7 +200,10 @@ def fsplit(out):
         for tag in tags:
             impl, storage = VARIANTS[tag]
             tid = f"fsplit[{func}-{tag}]"
-            r = scenario(out, "fsplit", func, tag, impl, storage, {"jitter": 1, "restart": 2, "stall": 3})
+            # sveiko flow'o vieta sukama per variantus (0, 1, 2, 3, 0): variklio tvarka negali paslėpti sugedusių už sveiko
+            healthy = SPLIT_HEALTHY[(func, tag)]
+            r = scenario(out, "fsplit", func, tag, impl, storage,
+                         dict(zip(("jitter", "restart", "stall"), [n for n in range(N) if n != healthy])))
             if r.get("err"):
                 res.append(F.result(tid, "FAIL", why=r["err"]))
                 continue
@@ -202,7 +218,8 @@ def flate_stall(out):
     for tag in ("C", "G"):
         impl, storage = VARIANTS[tag]
         tid = f"flate_stall[logo-{tag}]"
-        r = scenario(out, "flatestall", "logo", tag, impl, storage, {"jitter": 2, "stall": 3})  # sveiki 0, 1 — vienas gen
+        # C: sveiki 1 ir 3 (du gen, paveikti 0 ir 2); G: sveiki 0 ir 2 (paveikti 1 ir 3) — ne „paveikti visada paskutiniai“
+        r = scenario(out, "flatestall", "logo", tag, impl, storage, {"C": {"jitter": 0, "stall": 2}, "G": {"jitter": 1, "stall": 3}}[tag])
         if r.get("err"):
             res.append(F.result(tid, "FAIL", why=r["err"]))
             continue

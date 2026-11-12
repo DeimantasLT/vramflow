@@ -92,6 +92,10 @@ struct Opts {
     std::string test_out_error;
     double test_out_error_after_s = 3;
     std::uint32_t test_out_error_count = 0;
+    // Testinė (paslėpta) gedimo vėlinimo injekcija (logo): process() A fazėje užmiega tiek ms, kai tame indekse kurio nors
+    // vieneto įėjimo nėra (spraga atidarant — GapBlocked). Izoliacijos vartų „dantų“ meta-testui (tests/functional/isolation.py fiso_teeth):
+    // funkcija, kuri dėl sugedusio įėjimo vėluoja ir sveikiems, vartuose turi būti FAIL. 0 — išjungta.
+    std::uint32_t test_fault_proc_delay_ms = 0;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
     // interlaced flow'o 4:2:0 → 4:2:2 chroma: auto — pagal kadro AV_FRAME_FLAG_INTERLACED; field / frame — priverstinai.
@@ -117,10 +121,16 @@ struct FlowStats {
     void inc(const char* k, std::uint64_t v = 1) { c[k] += v; }
     // lateness_max_us: šio flow'o didžiausias commit'o (enc — eilės) vėlavimas nuo T(i), µs, tik po įšilimo (t ≥ warm).
     // Proceso histograma (out_lateness) apima visą tick'ą; šis — kiekvienam flow'ui atskirai (izoliacijos vartai).
+    // lateness_s: tas pats maksimumas kiekvienai indekso laiko T(i) sekundei (TAI s → µs) — izoliacijos vartai lygina
+    // to paties paleidimo langą prieš gedimą su gedimo langu (savikontrolė, ne atskiras kontrolinis paleidimas).
+    std::map<std::uint64_t, std::uint64_t> lateness_s;
     void note_lateness(std::uint64_t t, std::uint64_t t_index, double warm) {
         if (static_cast<double>(t) < warm || t < t_index) return;
+        const std::uint64_t us = (t - t_index) / 1000;
         std::uint64_t& m = c["lateness_max_us"];
-        m = std::max<std::uint64_t>(m, (t - t_index) / 1000);
+        m = std::max<std::uint64_t>(m, us);
+        std::uint64_t& s = lateness_s[t_index / 1'000'000'000];
+        s = std::max<std::uint64_t>(s, us);
     }
 };
 
@@ -128,6 +138,9 @@ struct Stats {
     std::vector<FlowStats> flows;
     std::map<std::string, std::uint64_t> proc;  // proceso lygio
     std::map<std::string, Histogram> hist;      // ns
+    // gen: commit'o vėlavimo maksimumas kiekvienai indekso laiko T(i) sekundei (TAI s → µs; santraukoje
+    // commit_lateness_s) — izoliacijos vartams sveiko aukštupio vėlavimą priskirti gedimo langui.
+    std::map<std::uint64_t, std::uint64_t> commit_lateness_s;
     std::uint64_t first_index = ~0ull, last_index = 0;
     std::string fatal;
     int exit_code = 0;

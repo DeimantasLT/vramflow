@@ -7,6 +7,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <vector>
 
@@ -104,6 +105,7 @@ struct LogoFn final : engine::TickFunction {
     std::vector<engine::InCounters> seen;  // įėjimų skaitikliai po paskutinio vieneto sprendimo (spragos priežasčiai)
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
     std::uint64_t injected_at = ~0ull;
+    std::uint64_t missing_at = ~0ull;  // paskutinis indeksas su GapBlocked vienetu (--test-fault-proc-delay-ms)
 
     LogoFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, const engine::TickEngine& eng_, bool cpu_, bool host_gpu_,
            bool inter_, media::Dim dim_, std::size_t gbytes_, std::size_t inject_word_, ThreadPool& pool_, DeviceLogo& dlogo_,
@@ -130,6 +132,11 @@ struct LogoFn final : engine::TickFunction {
             jobs.push_back({static_cast<const std::uint32_t*>(ut.in[0].ptr), static_cast<std::uint32_t*>(ut.out[0])});
             job_flow.push_back(ut.unit);
         }
+        // Testinė injekcija (--test-fault-proc-delay-ms): šio indekso A fazėje, kai kurio nors vieneto įėjimo nėra (spraga
+        // atidarant — GapBlocked: rašytojas dingo / užstrigo) — vėlinimas apdorojime (blogos funkcijos modelis: sveiki vėluoja
+        // dėl sugedusio įėjimo). Vien vėluojantis įėjimas (B fazė) jos nesukelia. Izoliacijos vartai tai privalo aptikti.
+        if (o.test_fault_proc_delay_ms && b.phase == 0 && missing_at == i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(o.test_fault_proc_delay_ms));
         const bool inject = o.inject_every && i % o.inject_every == 0 && !jobs.empty() && injected_at != i;
         if (inject) injected_at = i;
         cudaError_t ce = cudaSuccess;
@@ -195,7 +202,10 @@ struct LogoFn final : engine::TickFunction {
                 f.inc("lapped");
                 times.unit_done(ut.index, now_tai(), false);
                 break;
-            case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;  // gamintojo nėra / užstrigęs
+            case engine::Outcome::GapBlocked:  // gamintojo nėra / užstrigęs
+                f.inc("missing_fields");
+                missing_at = ut.index;
+                break;
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;      // laikrodžio žingsnis — aplinka
             case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;  // AlreadyCommitted — laikrodis atgal (M11)
             case engine::Outcome::OutputError:  // open / commit klaida (ilgalaikė — fatalu)
