@@ -22,7 +22,8 @@ if(MXLV_BUILD_TESTS)
                  tests/engine/test_gap_state.cpp tests/engine/test_engine.cpp
                  tests/engine/test_engine_timing.cpp tests/engine/test_stats.cpp
                  tests/engine/test_engine_rules.cpp tests/engine/test_engine_round2.cpp
-                 tests/engine/test_engine_review3.cpp tests/engine/test_engine_review4.cpp)
+                 tests/engine/test_engine_review3.cpp tests/engine/test_engine_review4.cpp
+                 tests/engine/test_engine_review5.cpp)
   vramflow_warnings(mxlv-engine-unit)
   target_link_libraries(mxlv-engine-unit PRIVATE mxlv_engine mxl::mxl Catch2::Catch2WithMain)
   set_target_properties(mxlv-engine-unit PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
