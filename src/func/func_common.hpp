@@ -3,6 +3,7 @@
 #pragma once
 // Bendros GPU media funkcijų dalys: opcijos, skaitikliai (rašo tik tick gija), latencijų histogramos, JSON santrauka.
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -113,7 +114,7 @@ struct Opts {
     double test_out_error_after_s = 3;
     std::uint32_t test_out_error_count = 0;
     int test_out_error_flow = -1;  // tik šio flow'o (0…N − 1) išėjimas; < 0 — visi
-    // Testinė (paslėpta) gedimo vėlinimo injekcija (logo): process() A fazėje užmiega tiek ms, kai tame indekse kurio nors
+    // Testinė (paslėpta) gedimo vėlinimo injekcija (logo, enc): process() A fazėje užmiega tiek ms, kai tame indekse kurio nors
     // vieneto įėjimo nėra (spraga atidarant — GapBlocked). Izoliacijos vartų „dantų“ meta-testui (tests/functional/isolation.py fiso_teeth):
     // funkcija, kuri dėl sugedusio įėjimo vėluoja ir sveikiems, vartuose turi būti FAIL. 0 — išjungta.
     std::uint32_t test_fault_proc_delay_ms = 0;
@@ -157,13 +158,33 @@ struct FlowStats {
     // Proceso histograma (out_lateness) apima visą tick'ą; šis — kiekvienam flow'ui atskirai (izoliacijos vartai).
     // lateness_s: tas pats maksimumas kiekvienai indekso laiko T(i) sekundei (TAI s → µs) — izoliacijos vartai lygina
     // to paties paleidimo langą prieš gedimą su gedimo langu (savikontrolė, ne atskiras kontrolinis paleidimas).
-    SecondRing lateness_s;
+    // p99_s: to paties vėlavimo p99 kiekvienai sekundei (tikslus iš tos sekundės indeksų; izoliacijos vartų lango p99 —
+    // per-sekundinių p99 mediana). Einamoji sekundė — fiksuotame buferyje (be alokacijų); vėlesnis senesnės sekundės indeksas
+    // (pernešimas) į p99 neįskaičiuojamas (į maksimumą — taip).
+    SecondRing lateness_s, p99_s;
     void note_lateness(std::uint64_t t, std::uint64_t t_index, double warm) {
         if (static_cast<double>(t) < warm || t < t_index) return;
         const std::uint64_t us = (t - t_index) / 1000;
         std::uint64_t& m = at("lateness_max_us");
         m = std::max<std::uint64_t>(m, us);
-        lateness_s.max(t_index / 1'000'000'000, us);
+        const std::uint64_t sec = t_index / 1'000'000'000;
+        lateness_s.max(sec, us);
+        if (sec != cur_sec_) {
+            if (cur_sec_ != kNoSec && sec < cur_sec_) return;
+            if (cur_n_ != 0) p99_s.max(cur_sec_, cur_p99());
+            cur_sec_ = sec;
+            cur_n_ = 0;
+        }
+        if (cur_n_ < cur_.size()) cur_[cur_n_++] = static_cast<std::uint32_t>(std::min<std::uint64_t>(us, ~std::uint32_t{0}));
+    }
+    // Einamosios (dar neužbaigtos) sekundės p99: (sekundė, µs); n == 0 — nėra.
+    std::uint64_t cur_sec() const { return cur_sec_; }
+    std::uint32_t cur_n() const { return cur_n_; }
+    std::uint64_t cur_p99() const {
+        std::array<std::uint32_t, 512> v = cur_;
+        const std::size_t k = static_cast<std::size_t>(0.99 * static_cast<double>(cur_n_ - 1));  // kaip Hist64::quantile
+        std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(k), v.begin() + cur_n_);
+        return v[k];
     }
     // loss_s: šio flow'o praradimų (spragų, lap'ų, praleidimų) skaičius kiekvienai indekso laiko T(i) sekundei (TAI s) —
     // izoliacijos vartai lygina funkcijos praradimus GEDIMO LANGE su aukštupio biudžetu tame pačiame lange (ne viso
@@ -175,8 +196,16 @@ struct FlowStats {
     }
     void set_seconds(std::size_t n) {
         lateness_s.set_capacity(n);
+        p99_s.set_capacity(n);
         loss_s.set_capacity(n);
     }
+
+private:
+    static constexpr std::uint64_t kNoSec = ~std::uint64_t{0};
+    std::array<std::uint32_t, 512> cur_{};
+    std::uint32_t cur_n_ = 0;
+    std::uint64_t cur_sec_ = kNoSec;
+public:
 };
 
 struct Stats {

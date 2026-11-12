@@ -6,8 +6,8 @@
 
 Klausimas: ką sveikiems flow'ams daro vieno aukštupio rašytojo mirtis (kill -9) ar užstrigimas (SIGSTOP / SIGCONT)? N = 8 flow'ų;
 paveikto (victim) flow'o šaltinis — atskiras procesas, sveikų — kiti procesai (po vieną kiekvienai ištisinei flow'ų atkarpai).
-Paveikto flow'o vieta sukama tarp vartų atvejų (pirmas / vidurinis / paskutinis, rotation()): variklio tvarka (vienetų eilė
-batch'e, ašies parinkimas pagal numerį) negali „pasislėpti“ už to, kad sugedęs visada paskutinis.
+Kiekvienas vartų atvejis kiekvienam variantui vykdomas su paveiktu flow'u PIRMU, VIDURINIU ir PASKUTINIU (POSITIONS): variklio
+tvarka (vienetų eilė batch'e, ašies parinkimas pagal numerį) negali „pasislėpti“ už sugedusio vietos.
 
 fiso_kill      — gen(-ai) sveikiems + gen paveiktam → logo N → verify N; ties FAULT_AT s paveikto gamintojas nužudomas (kill -9).
 fiso_stall     — tas pats, bet paveikto gamintojas sustabdomas (SIGSTOP) 5 s ir tęsiamas (SIGCONT); po to paveiktas flow'as
@@ -16,8 +16,8 @@ fiso_composite — gen (N bazių) + gfxgen sveikiems + gfxgen paveiktam (vieno i
 fiso_enc       — gen(-ai) sveikiems (video + garsas) + gen paveiktam → enc N (+ ts_sink); paveikto gamintojas nužudomas.
 fiso_enc_audio — kaip fiso_enc, bet paveikto srauto video ir garsas — skirtingi procesai; nužudomas TIK garso gamintojas.
                  Sveikiems — kaip fiso_enc; paveiktam — video nenukenčia, prarastas garsas suskaičiuotas.
-fiso_teeth     — vartų „dantų“ meta-testas: logo su --test-fault-proc-delay-ms (funkcija vėluoja, kol trūksta įėjimo) privalo
-                 būti FAIL (30 ms ir 10 ms), be injekcijos — PASS.
+fiso_teeth     — vartų „dantų“ meta-testas: logo C, logo G ir enc C su --test-fault-proc-delay-ms (funkcija vėluoja, kol trūksta
+                 įėjimo) privalo būti FAIL (30 ms ir 10 ms; 10 ms — ir dėl lango p99), be injekcijos — PASS.
 Variantai: C (cpu + host, x264) ir G (gpu + cuda-linear, nvenc); FISO_VARIANTS=C,G, FISO_N=8.
 
 Savikontrolė (vienas paleidimas, ne atskiras kontrolinis): funkcija įrašo kiekvieno flow'o didžiausią commit'o vėlavimą
@@ -27,10 +27,14 @@ kiekvienai indekso laiko sekundei (santraukos `lateness_s`), gen — savo commit
 Ką vartai APTINKA (FAIL):
   * sveiko flow'o funkcijos praradimą (FN_LOSS / ENC_LOSS, verify missing + invalid) virš sveiko aukštupio praradimų gedimo
     lange (gen eilutės „vėlus commit“ / „praleista“ su TAI) — ir vieną; neatitikimą (mismatch) — visada;
-  * sveiko flow'o didžiausią vėlavimą gedimo lange > to paties paleidimo sveikų flow'ų maks. prieš gedimą + Wr + ro + Δup + 1 ms.
-    Wr + ro — vienkartinis laikymas iki a(i), kai įėjimas miršta ar užstringa (planas §6 D2); Δup — tik sveiko aukštupio
-    (gen) commit'o vėlavimo padidėjimas gedimo lange (jo maks. gedimo lange − maks. prieš gedimą, ≥ 0). Funkcijos apdorojimo
-    laikas (proc_ms) ribos NEDIDINA: funkcija, kuri dėl sugedusio įėjimo apdoroja lėčiau (fiso_teeth: +10 ms), — FAIL;
+  * sveiko flow'o vėlavimą bet kurią gedimo lango sekundę s > kontrolės atskaita + Wr + ro + Δup(s) + 1 ms. Kontrolės atskaita
+    — sveikų flow'ų maks. kontroliniame lange (≥ MIN_PRE_S s kiekvienam flow'ui), bet ne daugiau kaip CTRL_CAP × jo mediana:
+    sutrikdyta kontrolė ribos neplečia. Wr + ro — vienkartinis laikymas iki a(i), kai įėjimas miršta ar užstringa (planas §6
+    D2); Δup(s) — sveiko aukštupio (gen) commit'o vėlavimo padidėjimas TĄ PAČIĄ sekundę (jo maks. sekundę s − maks.
+    kontroliniame lange, ≥ 0), ne viso lango. Funkcijos apdorojimo laikas (proc_ms) ribos NEDIDINA: funkcija, kuri dėl
+    sugedusio įėjimo apdoroja lėčiau (fiso_teeth: +10 ms), — FAIL;
+  * lango p99: sveiko flow'o per-sekundinių p99 (santraukos p99_s) mediana gedimo lange > ta pati mediana kontroliniame lange +
+    Wr + 1 ms (kaip buvęs p99 + Wr + 1 ms tarp paleidimų; mediana — ilgalaikis pablogėjimas, kurio maksimumas nepagauna);
   * paveikto flow'o būseną, neatitinkančią gedimo (missing_fields == 0, fiso_stall: stalls < 1, po SIGCONT praradimai).
 Ko vartai NEAPTINKA:
   * vėlavimo, mažesnio už Wr + ro + 1 ms (~6,5 ms prie 50 Hz) virš prieš gedimą buvusio maksimumo, ir vėlavimo, kurį
@@ -71,6 +75,7 @@ SETTLE_S = 2.0
 PRE_GAP_S = 1.0  # langas prieš gedimą baigiasi 1 s iki gedimo
 LEAD_S = 0.5  # gedimo langas prasideda 0,5 s iki gedimo
 MIN_PRE_S = 4  # tiek sekundžių prieš gedimą privalo būti kiekvienam sveikam flow'ui (kitaip atskaitos nėra — FAIL)
+CTRL_CAP = 2.0  # kontrolės maksimumas ribojamas iki CTRL_CAP × jos mediana (sutrikdyta kontrolė ribos neplečia)
 VERIFY_S = 22
 ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
@@ -107,16 +112,11 @@ def split_summary(s, keys, victim):
     return {"healthy": flow_view(s, keys, healthy_of(victim)), "affected": flow_view(s, keys, [victim])}
 
 
-POSITIONS = ("first", "middle", "last")
+POSITIONS = tuple(x for x in os.environ.get("FISO_POSITIONS", "first,middle,last").split(",") if x)
 
 
 def victim_at(pos):
     return {"first": 0, "middle": N // 2, "last": N - 1}[pos]
-
-
-def rotation(case_no, variant_no):
-    """Paveikto flow'o vieta vartų atvejui: sukama per atvejus ir variantus (pirmas / vidurinis / paskutinis)."""
-    return POSITIONS[(case_no + variant_no) % len(POSITIONS)]
 
 
 def ranges(victim):
@@ -279,6 +279,7 @@ def with_budget(rec, s_fn, up_whole_extra=0):
     rec["lat_s"] = {n: series(fl[n].get("lateness_s")) if n < len(fl) else {} for n in healthy_of(rec["victim"])}
     rec["loss_s"] = {n: {int(k): v for k, v in (fl[n].get("loss_s") or [])} if n < len(fl) else {}
                      for n in healthy_of(rec["victim"])}
+    rec["p99_s"] = {n: series(fl[n].get("p99_s")) if n < len(fl) else {} for n in healthy_of(rec["victim"])}
     rec["end_tai"] = ((s_fn or {}).get("last_index") or 0) * FIELD_NS
     return rec
 
@@ -292,7 +293,7 @@ def gens(out, sub, d, v, victim, *extra):
 # --- logo ----------------------------------------------------------------------------------------------------------------
 
 def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
-    sub = f"fiso-logo-{tag}-{fault}{suffix}"
+    sub = f"fiso-logo-{tag}-{fault}-{pos}{suffix}"
     victim = victim_at(pos)
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
@@ -343,7 +344,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
 # --- composite -----------------------------------------------------------------------------------------------------------
 
 def run_composite(out, tag, impl, storage, fault, pos="last"):
-    sub = f"fiso-comp-{tag}-{fault}"
+    sub = f"fiso-comp-{tag}-{fault}-{pos}"
     victim = victim_at(pos)
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
@@ -398,8 +399,8 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
 
 # --- enc -----------------------------------------------------------------------------------------------------------------
 
-def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False):
-    sub = f"fiso-enc{'a' if audio_only else ''}-{tag}-{fault}"
+def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False, extra=(), suffix=""):
+    sub = f"fiso-enc{'a' if audio_only else ''}-{tag}-{fault}-{pos}{suffix}"
     victim = victim_at(pos)
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
@@ -424,7 +425,7 @@ def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False):
         ea = ["--encoder", enc, "--port-base", ENC_PORT] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
         t0 = time.monotonic()
         mark_start()
-        e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--duration", RUN_S, "--warmup", WARM_S, *ea, *v)
+        e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--duration", RUN_S, "--warmup", WARM_S, *ea, *extra, *v)
         mark_ready()
         t_fault = apply_fault(fault, gb, t0)
         re_ = e.wait(timeout=RUN_S + 60)
@@ -486,38 +487,82 @@ def upstream_budget(r):
     return 0 if b is None else b
 
 
+def median(v):
+    s = sorted(v)
+    return (s[(len(s) - 1) // 2] + s[len(s) // 2]) / 2 if s else None
+
+
+def fault_seconds(sec, fault_tai, end_tai):
+    """{sekundė: reikšmė} → [(sekundė, reikšmė)] gedimo lange (kaip split_windows)."""
+    lo_f = fault_tai - int(LEAD_S * 1e9)
+    return sorted((k, v) for k, v in sec.items()
+                  if (k + 1) * 1_000_000_000 > lo_f and k * 1_000_000_000 <= end_tai
+                  and (k + 1) * 1_000_000_000 > fault_tai - int(PRE_GAP_S * 1e9))
+
+
 def lateness_bound(r):
-    """Savikontrolės riba: (riba ms, prieš gedimą maks. ms, Δup ms) arba (None, priežastis, None).
-    riba = sveikų flow'ų maks. prieš gedimą + Wr + ro + Δup + 1 ms; Δup = max(0, sveiko aukštupio commit'o vėlavimo maks.
-    gedimo lange − maks. prieš gedimą) — tik aukštupio sekundės gedimo lange. Funkcijos apdorojimo laiko nario nėra."""
+    """Savikontrolės riba be Δup: (bazė ms, atskaita ms, Δup maks. ms) arba (None, priežastis, None).
+    bazė = atskaita + Wr + ro + 1 ms; atskaita = min(sveikų flow'ų maks. kontroliniame lange, CTRL_CAP × jo mediana).
+    Sekundės s riba — bazė + up_delta(r, s). Kiekvienam sveikam flow'ui kontroliniame lange ≥ MIN_PRE_S s."""
     ft, et = r.get("fault_tai"), r.get("end_tai")
     if ft is None:
         return None, "nėra gedimo laiko", None
     pre = []
-    for sec in (r.get("lat_s") or {}).values():
+    for n, sec in (r.get("lat_s") or {}).items():
         p, _ = split_windows(sec, ft, et, ctl_from(r))
+        if len(p) < MIN_PRE_S:
+            return None, f"sveiko #{n} kontrolinis langas {len(p)} s < {MIN_PRE_S} s", None
         pre += p
-    if len(pre) < MIN_PRE_S * (N - 1):
-        return None, f"langas prieš gedimą per trumpas ({len(pre)} flow'o sekundžių < {MIN_PRE_S * (N - 1)})", None
-    up_pre, up_flt = split_windows((r.get("upstream") or {}).get("lat_s") or {}, ft, et, ctl_from(r))
-    dup = max(0.0, max(up_flt) - max(up_pre)) if up_pre and up_flt else 0.0
-    pmax = max(pre)
-    return pmax + WR_MS + RO_MS + dup + 1.0, pmax, dup
+    if not pre:
+        return None, "kontrolinio lango nėra", None
+    ref = min(max(pre), CTRL_CAP * median(pre))
+    dmax = max((up_delta(r, s) for n_sec in (r.get("lat_s") or {}).values() for s, _ in fault_seconds(n_sec, ft, et)), default=0.0)
+    return ref + WR_MS + RO_MS + 1.0, ref, dmax
+
+
+def up_delta(r, s):
+    """Δup(s): sveiko aukštupio commit'o vėlavimo padidėjimas sekundę s (maks. tą sekundę − maks. kontroliniame lange, ≥ 0)."""
+    up = (r.get("upstream") or {}).get("lat_s") or {}
+    up_pre, _ = split_windows(up, r["fault_tai"], r["end_tai"], ctl_from(r))
+    if not up_pre or s not in up:
+        return 0.0
+    return max(0.0, up[s] - max(up_pre))
 
 
 def max_lateness_bad(r, what):
-    """Kiekvieno sveiko flow'o didžiausias vėlavimas gedimo lange ≤ lateness_bound (to paties paleidimo langas prieš gedimą)."""
-    lim, pmax, dup = lateness_bound(r)
-    if lim is None:
-        return [f"{what}: {pmax}"]
+    """Kiekvieno sveiko flow'o vėlavimas kiekvieną gedimo lango sekundę s ≤ bazė + Δup(s) (lateness_bound)."""
+    base, ref, _ = lateness_bound(r)
+    if base is None:
+        return [f"{what}: {ref}"]
     bad = []
     for n, sec in (r.get("lat_s") or {}).items():
-        _, flt = split_windows(sec, r["fault_tai"], r["end_tai"])
+        flt = fault_seconds(sec, r["fault_tai"], r["end_tai"])
         if not flt:
             bad.append(f"sveiko #{n} gedimo lange nėra {what} duomenų")
-        elif max(flt) > lim:
-            bad.append(f"sveiko #{n} maks. vėlavimas gedimo lange {max(flt):.2f} ms > {lim:.2f} ms "
-                       f"(prieš gedimą {pmax:.2f}, Δup {dup:.2f})")
+            continue
+        worst = max(flt, key=lambda kv: kv[1] - up_delta(r, kv[0]))
+        s, v = worst
+        lim = base + up_delta(r, s)
+        if v > lim:
+            bad.append(f"sveiko #{n} maks. vėlavimas gedimo lange {v:.2f} ms (sek. {s}) > {lim:.2f} ms "
+                       f"(atskaita {ref:.2f}, Δup {up_delta(r, s):.2f})")
+    return bad
+
+
+def p99_bad(r, what):
+    """Lango p99: kiekvieno sveiko flow'o per-sekundinių p99 mediana gedimo lange ≤ ta pati mediana kontroliniame lange +
+    Wr + 1 ms (buvęs „p99 po gedimo ≤ p99 be gedimo + Wr + 1 ms“, dabar — to paties paleidimo langai)."""
+    bad = []
+    ft, et = r.get("fault_tai"), r.get("end_tai")
+    for n, sec in (r.get("p99_s") or {}).items():
+        pre, _ = split_windows(sec, ft, et, ctl_from(r))
+        flt = [v for _, v in fault_seconds(sec, ft, et)]
+        if len(pre) < MIN_PRE_S or not flt:
+            bad.append(f"sveiko #{n} {what} p99: kontrolė {len(pre)} s, gedimo langas {len(flt)} s")
+            continue
+        a, b = median(flt), median(pre)
+        if a > b + WR_MS + 1.0:
+            bad.append(f"sveiko #{n} {what} lango p99 (per-sekundinių mediana) {b:.2f} → {a:.2f} ms > +{WR_MS + 1.0} ms")
     return bad
 
 
@@ -542,6 +587,7 @@ def logo_gate(fault, r):
         if v.get("mismatch_fields", 0):
             bad.append(f"verify sveiko #{n} mismatch={v['mismatch_fields']}")
     bad += max_lateness_bad(r, "out_lateness")
+    bad += p99_bad(r, "out_lateness")
     if not fa.get("missing_fields", 0):
         bad.append("paveikto missing_fields == 0")
     if fault == "stall":
@@ -590,6 +636,7 @@ def enc_gate(fault, r):
     if sk.get("healthy_cc_errors", 0) or sk.get("healthy_sync_errors", 0):
         bad.append(f"TS klaidos sveikuose: {sk}")
     bad += max_lateness_bad(r, "frame_lateness")
+    bad += p99_bad(r, "frame_lateness")
     if not r["fn"]["affected"].get("missing_frames", 0):
         bad.append("paveikto missing_frames == 0")
     return bad
@@ -614,17 +661,12 @@ def enc_audio_gate(fault, r):
     return bad
 
 
-# Vartų atvejo numeris paveikto flow'o vietos sukimui (rotation): kill C — pirmas, G — vidurinis; stall C — vidurinis, G —
-# paskutinis; composite C — paskutinis, G — pirmas; enc C — vidurinis, G — paskutinis; enc_audio C — paskutinis, G — pirmas.
-CASES = {"fiso_kill": 0, "fiso_stall": 1, "fiso_composite": 2, "fiso_enc": 1, "fiso_enc_audio": 2}
-
-
 def probe(out, name, runner, faults):
-    """Kiekvienam variantui — vienas paleidimas su gedimu (savikontrolė: langas prieš gedimą tame pačiame paleidime)."""
+    """Kiekvienam variantui ir kiekvienai paveikto flow'o vietai (pirmas, vidurinis, paskutinis) — vienas paleidimas su gedimu
+    (savikontrolė: langas prieš gedimą tame pačiame paleidime)."""
     res = []
-    for vno, (tag, impl, storage, enc) in enumerate(variants()):
-        tid = f"{name}[{tag}]"
-        pos = rotation(CASES[name], vno)
+    for (tag, impl, storage, enc), pos in [(v, p) for v in variants() for p in POSITIONS]:
+        tid = f"{name}[{tag}:{pos}]"
         args = (out, tag, impl, storage) + ((enc,) if runner in (run_enc, run_enc_audio) else ())
         gate = {run_enc: enc_gate, run_enc_audio: enc_audio_gate}.get(runner, logo_gate)
         for fault in faults:
@@ -634,7 +676,7 @@ def probe(out, name, runner, faults):
                 continue
             lim, pmax, dup = lateness_bound(r)
             why = (f"{fault} ties {r['fault_at_s']} s: {describe(r)} | vėlavimo riba "
-                   f"{None if lim is None else round(lim, 2)} ms (prieš gedimą {pmax}, Δup {dup})")
+                   f"{None if lim is None else round(lim, 2)} ms + Δup(s) (atskaita {pmax}, Δup maks. {dup})")
             u = r["upstream"] or {}
             brief = {k: v for k, v in u.items() if k not in ("late_index", "skipped", "lat_s")}
             res.append(F.result(f"{tid}:upstream", "INFO", why=f"sveikas aukštupis (gen): {brief}; biudžetas gedimo lange "
@@ -667,22 +709,39 @@ def fiso_enc_audio(out):
     return probe(out, "fiso_enc_audio", run_enc_audio, ["kill"])
 
 
+TEETH = (("logo", "C", "middle"), ("logo", "G", "first"), ("enc", "C", "last"))
+
+
 def fiso_teeth(out):
-    """Vartų „dantys“ (meta-testas, logo C, kill, paveiktas — vidurinis): --test-fault-proc-delay-ms D — funkcija, kol vieno
-    įėjimo nėra, A fazėje apdorojime užmiega D ms (sveiki vėluoja dėl sugedusio įėjimo). D = 30 — logo_gate FAIL; D = 10 (< P:
-    be praradimų, tik vėlavimas) — FAIL vien dėl vėlavimo ribos; D = 0 — PASS."""
-    tag, impl, storage = "C", "cpu", "host"
-    runs = {d: run_logo(out, tag, impl, storage, "kill", "middle", extra=["--test-fault-proc-delay-ms", d] if d else [],
-                        suffix=f"-teeth{d}") for d in (30, 10, 0)}
-    if any(x.get("err") for x in runs.values()):
-        return [F.result("fiso_teeth", "FAIL", why=" | ".join(describe(x) for x in runs.values()))]
-    bad = {d: logo_gate("kill", r) for d, r in runs.items()}
-    lat10 = [b for b in bad[10] if "maks. vėlavimas" in b]
-    ok = bool(bad[30]) and bool(lat10) and not bad[0]
-    show = lambda b: ("FAIL " + "; ".join(b)[:600]) if b else "PASS"  # noqa: E731
-    return [F.result("fiso_teeth", "PASS" if ok else "FAIL",
-                     why=f"30 ms: {show(bad[30])} | 10 ms: {show(bad[10])} (vėlavimo ribos radinių {len(lat10)}) | "
-                         f"0 ms: {show(bad[0])}")]
+    """Vartų „dantys“ (meta-testas; kill): --test-fault-proc-delay-ms D — funkcija, kol vieno įėjimo nėra, A fazėje apdorojime
+    užmiega D ms (sveiki vėluoja dėl sugedusio įėjimo). logo C (paveiktas vidurinis), logo G (pirmas), enc C x264 (paskutinis):
+    D = 30 — vartai FAIL; D = 10 (< P: be praradimų, tik vėlavimas) — FAIL dėl vėlavimo ribos ir dėl lango p99; D = 0 — PASS."""
+    res = []
+    for func, tag, pos in TEETH:
+        impl, storage, enc = VARIANTS[tag]
+        tid = f"fiso_teeth[{func}-{tag}]"
+        if tag not in [t for t, *_ in variants()]:
+            continue
+        runs = {}
+        for d in (30, 10, 0):
+            extra = ["--test-fault-proc-delay-ms", d] if d else []
+            if func == "logo":
+                runs[d] = run_logo(out, tag, impl, storage, "kill", pos, extra=extra, suffix=f"-teeth{d}")
+            else:
+                runs[d] = run_enc(out, tag, impl, storage, enc, "kill", pos, extra=extra, suffix=f"-teeth{d}")
+        if any(x.get("err") for x in runs.values()):
+            res.append(F.result(tid, "FAIL", why=" | ".join(describe(x) for x in runs.values())))
+            continue
+        gate = logo_gate if func == "logo" else enc_gate
+        bad = {d: gate("kill", r) for d, r in runs.items()}
+        lat10 = [b for b in bad[10] if "maks. vėlavimas" in b]
+        p99_10 = [b for b in bad[10] if "lango p99" in b]
+        ok = bool(bad[30]) and bool(lat10) and bool(p99_10) and not bad[0]
+        show = lambda b: ("FAIL " + "; ".join(b)[:500]) if b else "PASS"  # noqa: E731
+        res.append(F.result(tid, "PASS" if ok else "FAIL",
+                            why=f"30 ms: {show(bad[30])} | 10 ms: {show(bad[10])} (vėlavimo ribos radinių {len(lat10)}, "
+                                f"p99 radinių {len(p99_10)}) | 0 ms: {show(bad[0])}"))
+    return res
 
 
 TESTS = {"fiso_teeth": fiso_teeth, "fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite,

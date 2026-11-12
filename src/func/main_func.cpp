@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
     e->add_option("--audio", o.audio);
     // testinės parinktys (paslėptos --help): deterministiniai kadrų atmetimai (tests/functional/avsync.py)
     e->add_option("--test-drop-every", o.test_drop_every)->group("");
+    e->add_option("--test-fault-proc-delay-ms", o.test_fault_proc_delay_ms)->group("");  // izoliacijos vartų meta-testui
     e->add_option("--test-drop-after", o.test_drop_after_s)->group("");
     auto* d = app.add_subcommand("dec", "H.264 TS per UDP → NVDEC → MXL");
     common(d, o);

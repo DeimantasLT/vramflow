@@ -196,6 +196,12 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
             f.pop_back();
             f += std::string(f.size() > 1 ? "," : "") + "\"lateness_s\":" + seconds_json(s.flows[i].lateness_s) + "}";
         }
+        if (!s.flows[i].p99_s.empty() || s.flows[i].cur_n() != 0) {  // + einamoji (neužbaigta) sekundė
+            SecondRing r = s.flows[i].p99_s;
+            if (s.flows[i].cur_n() != 0) r.max(s.flows[i].cur_sec(), s.flows[i].cur_p99());
+            f.pop_back();
+            f += std::string(f.size() > 1 ? "," : "") + "\"p99_s\":" + seconds_json(r) + "}";
+        }
         if (!s.flows[i].loss_s.empty()) {
             f.pop_back();
             f += std::string(f.size() > 1 ? "," : "") + "\"loss_s\":" + seconds_json(s.flows[i].loss_s) + "}";

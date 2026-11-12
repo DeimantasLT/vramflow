@@ -52,6 +52,7 @@
    "frames_queued",
    "lateness_s",
    "loss_s",
+   "p99_s",
    "unit_failed",
    "unit_failures",
    "unit_recoveries"

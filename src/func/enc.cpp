@@ -555,6 +555,7 @@ int run_enc(const Opts& o) {
         std::vector<engine::InCounters> seen;
         std::uint64_t t_done = 0;
         TickTimes times;  // weave_ms — tik indeksams, kurių kadrai apdoroti (atskirai kiekvienam indeksui)
+        std::uint64_t missing_at = ~0ull;  // paskutinis indeksas su GapBlocked vienetu (--test-fault-proc-delay-ms)
 
         EncFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, std::vector<runtime::InputSlot>& in_,
               std::vector<engine::MxlAudioInput>& pa_, std::vector<std::uint64_t>& sr_, std::vector<std::unique_ptr<Stream>>& streams_, Ctx& cx_,
@@ -584,6 +585,10 @@ int run_enc(const Opts& o) {
         bool process(const engine::Batch& b, engine::TickContext& ctx) override {
             F = b.index / gpf;
             times.phase_begin(b.index, now_tai());
+            // Testinė injekcija (--test-fault-proc-delay-ms, kaip logo): A fazėje, kai šio indekso kurio nors vieneto įėjimo nėra
+            // (GapBlocked) — vėlinimas apdorojime (blogos funkcijos modelis). Izoliacijos vartai privalo tai aptikti (fiso_teeth).
+            if (o.test_fault_proc_delay_ms && b.phase == 0 && missing_at == b.index)
+                std::this_thread::sleep_for(std::chrono::milliseconds(o.test_fault_proc_delay_ms));
             jobs.clear();
             job_flow.clear();
             for (const engine::UnitTick& ut : b.units) {
@@ -691,7 +696,11 @@ int run_enc(const Opts& o) {
                     release_unit(n);
                     audio_of_dropped(n, ut.index);
                     return;
-                case engine::Outcome::GapBlocked: fs.loss("missing_frames", ti); audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::GapBlocked:
+                    fs.loss("missing_frames", ti);
+                    missing_at = ut.index;
+                    audio_of_dropped(n, ut.index);
+                    return;
                 case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti

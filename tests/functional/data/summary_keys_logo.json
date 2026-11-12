@@ -45,6 +45,7 @@
    "lateness_s",
    "loss_s",
    "output_errors",
+   "p99_s",
    "unit_failed",
    "unit_failures",
    "unit_recoveries"
