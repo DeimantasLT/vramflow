@@ -31,8 +31,9 @@ sutrikimai paleidžiant ir stabdant (pvz. GPU P8 → P3 pliūpsnis po funkcijos 
 praradimai skaičiuojami visam jos gyvenimui. Aukštupio sutrikimas rašomas atskira INFO eilute (didžiausias gen A commit'o
 vėlavimas su gedimu / be jo ir vėlaus tick'o laikas nuo SIGSTOP / SIGCONT / kill momento).
 Vėlavimas: be p99 (kuris gali paslėpti ≤ 1 % blogų tick'ų) — kiekvieno sveiko flow'o didžiausias commit'o vėlavimas po
-įšilimo (`lateness_max_us`, nuo FAULT_AT − 1 s, t. y. visas gedimo langas) ≤ max(kontrolinio sveikų maks., kontrolinio p99 + Wr)
-+ 1 ms (Wr — vienkartinis laikymas, kai įėjimas miršta ar užstringa).
+įšilimo (`lateness_max_us`, nuo FAULT_AT − 1 s, t. y. visas gedimo langas) ≤ kontrolinio sveikų maks. + Wr + ro + Δproc + 1 ms
+(Wr + ro — vienkartinis laikymas iki a(i), kai įėjimas miršta ar užstringa; Δproc — apdorojimo maks. padidėjimas, žr.
+max_lateness_bad).
 fiso_enc: video ir garsas (gen --audio 1, enc --audio 1); sveikiems — ir garso praradimai (audio_underrun_frames) ≤ biudžetas,
 packets_audio > 0.
 
@@ -62,6 +63,7 @@ RUN_S = 24  # funkcijos trukmė
 LOGO_RUN_S = 27  # logo: po SIGCONT (ties 15 s) lieka ≥ 10 s patikrai „0 praradimų po atsigavimo“
 POST_S = 10  # logo stall: verify paveiktam flow'ui po SIGCONT
 WR_MS = 5.0  # Wr = P/4 prie 50 Hz (planas §6 D2)
+RO_MS = 0.5  # --read-offset-us numatytoji (ro)
 WARM_S = FAULT_AT - 1  # histograma nuo 1 s iki gedimo
 VERIFY_S = 20
 ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
@@ -224,7 +226,7 @@ def run_logo(out, tag, impl, storage, fault):
     if sl is None or sv is None:
         return {"err": f"nėra santraukų (logo={sl is not None}, verify={sv is not None})"}
     rec = {**common_record(fault, t_fault), "exit": {"logo": rl, "verify": rv}, "fn": split_summary(sl, FN_KEYS, N),
-           "out_lateness": hist_of(sl, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
+           "out_lateness": hist_of(sl, "out_lateness"), "proc": hist_of(sl, "proc_ms"), "verify": split_summary(sv, VER_KEYS, N),
            "verify_proc": (sv.get("proc") or {}), "fatal": sl.get("fatal"), "upstream": upstream(ga),
            "fn_flows": [flow_view(sl, FN_KEYS, [n]) for n in range(N - 1)],
            "verify_flows": [flow_view(sv, VER_KEYS, [n]) for n in range(N - 1)]}
@@ -274,7 +276,7 @@ def run_composite(out, tag, impl, storage, fault):
           "max_lateness_ms": ug["max_lateness_ms"], "late_ticks": ug["late_ticks"], "gfxgen": ux}
     up["late_index"], up["skipped"] = ug["late_index"], ug["skipped"]
     rec = {**common_record(fault, t_fault), "exit": {"composite": rc, "verify": rv}, "fn": split_summary(sc, FN_KEYS, N),
-           "out_lateness": hist_of(sc, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
+           "out_lateness": hist_of(sc, "out_lateness"), "proc": hist_of(sc, "proc_ms"), "verify": split_summary(sv, VER_KEYS, N),
            "verify_proc": (sv.get("proc") or {}), "fatal": sc.get("fatal"), "upstream": up,
            "fn_flows": [flow_view(sc, FN_KEYS, [n]) for n in range(N - 1)],
            "verify_flows": [flow_view(sv, VER_KEYS, [n]) for n in range(N - 1)]}
@@ -324,7 +326,8 @@ def run_enc(out, tag, impl, storage, enc, fault, audio_only=False):
         sk = {}
     sflows = sk.get("flows") or []
     return with_budget({**common_record(fault, t_fault), "exit": {"enc": re_}, "fn": split_summary(se, ENC_KEYS, N),
-            "out_lateness": hist_of(se, "frame_lateness"), "fatal": se.get("fatal"), "upstream": upstream(ga),
+            "out_lateness": hist_of(se, "frame_lateness"), "proc": hist_of(se, "weave_ms"), "fatal": se.get("fatal"),
+            "upstream": upstream(ga),
             "fn_flows": [flow_view(se, ENC_KEYS, [n]) for n in range(N - 1)],
             "sink": {"healthy_video_pes_min": min((f.get("video_pes", 0) for f in sflows[:N - 1]), default=None),
                      "healthy_cc_errors": sum(f.get("cc_errors", 0) for f in sflows[:N - 1]),
@@ -365,18 +368,23 @@ def upstream_budget(r):
 
 
 def max_lateness_bad(ctrl, r, what):
-    """Kiekvieno sveiko flow'o didžiausias commit'o vėlavimas (lateness_max_us) ≤ max(kontrolinio sveikų maks., kontrolinio
-    p99 + Wr) + 1 ms — p99 negali paslėpti kelių blogų tick'ų."""
+    """Kiekvieno sveiko flow'o didžiausias commit'o vėlavimas (lateness_max_us) ≤ kontrolinio sveikų maks. + Wr + ro +
+    Δproc + 1 ms — p99 negali paslėpti kelių blogų tick'ų. Wr + ro — vienkartinis laikymas (planas §6 D2: sveikų commit ≤
+    T + ro + Wr + proc): apdorojimas prasideda ne ties atvykimu (~T + 1,2), o ties a(i). Δproc = max(0, apdorojimo maks. su
+    gedimu − be jo) (proc_ms / weave_ms — tik apdorojimas, be laukimo): GPU / CPU sulėtėjimas dėl KITO proceso įvykio (pvz.
+    post verify CUDA kontekstas ties SIGCONT — iki ~20 ms ir su keepwarm, docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md)
+    nėra laukimas dėl sugedusio įėjimo; laukimą ši riba tebegaudo."""
     cmax = max(((f.get("lateness_max_us") or 0) / 1000.0 for f in ctrl.get("fn_flows") or []), default=None)
-    p99b = ctrl["out_lateness"].get("p99_ms")
-    if cmax is None or p99b is None:
-        return [f"nėra kontrolinio {what} (lateness_max_us / p99)"]
-    lim = max(cmax, p99b + WR_MS) + 1.0
+    if cmax is None:
+        return [f"nėra kontrolinio {what} (lateness_max_us)"]
+    pa, pb = (r.get("proc") or {}).get("max_ms"), (ctrl.get("proc") or {}).get("max_ms")
+    dproc = max(0.0, pa - pb) if pa is not None and pb is not None else 0.0
+    lim = cmax + WR_MS + RO_MS + dproc + 1.0
     bad = []
     for n, f in enumerate(r.get("fn_flows") or []):
         m = f.get("lateness_max_us")
         if m is None or m / 1000.0 > lim:
-            bad.append(f"sveiko #{n} maks. vėlavimas {None if m is None else m / 1000.0} ms > {lim:.2f} ms")
+            bad.append(f"sveiko #{n} maks. vėlavimas {None if m is None else m / 1000.0} ms > {lim:.2f} ms (Δproc {dproc:.2f})")
     return bad
 
 
