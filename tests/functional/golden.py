@@ -360,9 +360,8 @@ def fgold_composite(out):
         with F.KW.suspended():
             r = finish("fgold_composite[G be keepwarm]", run_composite(out, "G-nokw", "gpu", "cuda-linear"), "composite",
                        "verify-composite", ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED)
-        r["why"] = f"(INFO, be keepwarm: {r['status']}) {r.get('why', '')}"
-        r["status"] = "INFO"
-        res.append(r)
+        res.append(F.result(r["id"], "INFO", why=f"(be keepwarm: {r['status']}) {r.get('why', '')}",
+                            **{k: v for k, v in r.items() if k not in ("id", "status", "why", "keepwarm")}))
     return res
 
 
