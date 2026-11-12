@@ -1020,11 +1020,12 @@ TEST_CASE("gfx_writer: vfgfx_get_stats abiem režimais", "[gfx_writer][mxl][stat
 TEST_CASE("gfx_writer: vfgfx_submit_at — kadrai pasirodo lygiai nurodytuose indeksuose", "[gfx_writer][mxl][submit_at]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
-    const gfx::Raster r{128, 72, true, true};
+    // progresyvus 50p: kadras gali prasidėti bet kuriuo indeksu (interlaced flow'e — tik lyginiu, viršutiniu lauku)
+    const gfx::Raster r{128, 72, false, true};
     Domain d(55);
     FlowId fid;
     vfgfx_writer w = nullptr;
-    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), storage_opts(cuda_store).c_str(), &w) == 0);
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, false).c_str(), storage_opts(cuda_store).c_str(), &w) == 0);
     Checker chk(d.inst, fid.id, r);
     Recorder rec;
     gi::PacingHooks hk;
@@ -1091,19 +1092,22 @@ TEST_CASE("gfx_writer: vfgfx_submit_at ribos — TOO_LATE, TOO_EARLY, QUEUE_FULL
     const std::uint64_t past = (s0.next_pacing_index - 1) & ~1ull;  // kontraktas: < next_pacing_index -> TOO_LATE
     CHECK(vfgfx_submit_at(w, past - 2, &f.f) == VFGFX_ERR_TOO_LATE);
     CHECK(vfgfx_submit_at(w, past, &f.f) == VFGFX_ERR_TOO_LATE);
-    CHECK(vfgfx_submit_at(w, now + 50 * VFGFX_SUBMIT_AT_MAX_LEAD_S + 100, &f.f) == VFGFX_ERR_TOO_EARLY);
+    CHECK(vfgfx_submit_at(w, (now + 50 * VFGFX_SUBMIT_AT_MAX_LEAD_S + 100) & ~1ull, &f.f) == VFGFX_ERR_TOO_EARLY);
     vfgfx_stats st = VFGFX_STATS_INIT;
     REQUIRE(vfgfx_get_stats(w, &st) == 0);
     const std::uint32_t cap = st.queue_capacity;
     REQUIRE(cap >= VFGFX_SUBMIT_AT_MIN_QUEUE);
-    for (std::uint32_t k = 0; k < cap; ++k) REQUIRE(vfgfx_submit_at(w, now + 100 + k, &f.f) == 0);
-    CHECK(vfgfx_submit_at(w, now + 100 + cap, &f.f) == VFGFX_ERR_QUEUE_FULL);
-    CHECK(vfgfx_submit_at(w, now + 100, &f.f) == 0);  // tas pats indeksas — pakeičia, ne papildo
-    CHECK(vfgfx_submit(w, &f.f) == 0);                // submit eilės neliečia ir jam vieta lieka
+    const std::uint64_t base = (now + 100) & ~1ull;  // interlaced: kadras prasideda viršutiniu (lyginiu) lauku
+    for (std::uint32_t k = 0; k < cap; ++k) REQUIRE(vfgfx_submit_at(w, base + 2 * k, &f.f) == 0);
+    CHECK(vfgfx_submit_at(w, base + 2 * cap, &f.f) == VFGFX_ERR_QUEUE_FULL);
+    CHECK(vfgfx_submit_at(w, base, &f.f) == 0);  // tas pats indeksas — pakeičia, ne papildo
     REQUIRE(vfgfx_get_stats(w, &st) == 0);
     CHECK(st.queue_depth == cap);
+    CHECK(vfgfx_submit(w, &f.f) == 0);  // „nuo dabar šis kadras“: atšaukia visus suplanuotus
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(st.queue_depth == 0);
     CHECK(st.scheduled == cap + 1);
-    CHECK(st.scheduled_replaced == 1);
+    CHECK(st.scheduled_replaced == 1 + cap);
     CHECK(st.caller_errors == 4);
     CHECK(vfgfx_write(w, now + 1, &f.f) == 0);  // rankinis rašymas eilės nenaudoja
     vfgfx_writer_destroy(w);
@@ -1399,4 +1403,222 @@ TEST_CASE("gfx_writer: restartas su kitu offset ir ritmas po rankinio rašymo į
     CHECK(st.clock_backward == 0);
     CHECK(st.pacing_errors == 0);
     vfgfx_writer_destroy(w);
+}
+
+// --- Peržiūros 1, 4 ir 8 punktai: suplanuotų kadrų eilė -----------------------------------------------------------------
+
+namespace {
+
+// Seka ritmo commit'us `dur` laiko ir kiekvieną commit'intą grain'ą j lygina su want(j) (pariteto lauku). Grąžina
+// neatitikimų (ir dingusių) skaičių; rec — visi commit'inti indeksai.
+template <class F>
+std::size_t follow(Checker& chk, Recorder& rec, std::chrono::milliseconds dur, F want) {
+    std::size_t verified = 0, bad = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < dur) {
+        const auto snap = rec.snapshot();
+        for (; verified < snap.size(); ++verified) {
+            const std::uint64_t j = snap[verified];
+            if (!chk.matches(j, want(j))) {
+                ++bad;
+                UNSCOPED_INFO("neatitinka indeksas " << j);
+            }
+        }
+        std::this_thread::sleep_for(2ms);
+    }
+    return bad;
+}
+
+std::uint64_t next_index(vfgfx_writer w) {
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    return st.next_pacing_index;
+}
+
+std::uint64_t even_up(std::uint64_t i) { return (i + 1) & ~1ull; }
+
+// Trys skirtingi kadrai A, B, C ir jų etalonai (128x72 interlaced, host saugykla).
+struct Abc {
+    gfx::Raster r{128, 72, true, true};
+    Frame a{128, 72, 71, VFGFX_ALPHA_STRAIGHT, false}, b{128, 72, 72, VFGFX_ALPHA_STRAIGHT, false},
+        c{128, 72, 73, VFGFX_ALPHA_PREMULTIPLIED, false};
+    std::vector<std::uint8_t> ra[2] = {a.ref(r, 0), a.ref(r, 1)}, rb[2] = {b.ref(r, 0), b.ref(r, 1)},
+                              rc[2] = {c.ref(r, 0), c.ref(r, 1)};
+};
+
+struct PacedWriter {
+    Domain d;
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    Recorder rec;
+    std::unique_ptr<Checker> chk;
+    explicit PacedWriter(int n, gi::PacingHooks hk = {}) : d(n) {
+        REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+        chk = std::make_unique<Checker>(d.inst, fid.id, gfx::Raster{128, 72, true, true});
+        hk.on_commit = [this](std::uint64_t i) { rec.add(i); };
+        REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    }
+    ~PacedWriter() {
+        chk.reset();
+        vfgfx_writer_destroy(w);
+    }
+};
+
+}  // namespace
+
+// Peržiūros atkūrimas: keturi submit_at ne ritmo metu, jų laikas praeina -> jie neužima eilės (QUEUE_FULL buvo klaida),
+// o vėlesnis vfgfx_submit(B) + start rodo B (ne seną A).
+TEST_CASE("gfx_writer: submit_at — praėję įrašai neužima eilės, submit atšaukia suplanuotus", "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(70);
+    Abc k;
+    const std::uint64_t n = even_up(next_index(pw.w) + 2);
+    for (std::uint64_t q = 0; q < 4; ++q) REQUIRE(vfgfx_submit_at(pw.w, n + 2 * q, &k.a.f) == 0);
+    std::this_thread::sleep_for(250ms);  // visi keturi indeksai praeina
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.queue_depth == 0);  // praėję įrašai — ne eilėje
+    const std::uint64_t m = even_up(next_index(pw.w) + 20);
+    for (std::uint64_t q = 0; q < 4; ++q) CHECK(vfgfx_submit_at(pw.w, m + 2 * q, &k.c.f) == 0);  // ne QUEUE_FULL
+    REQUIRE(vfgfx_submit(pw.w, &k.b.f) == 0);  // „nuo dabar B“: atšaukia visus suplanuotus
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.queue_depth == 0);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 900ms, [&](std::uint64_t j) { return k.rb[j & 1]; });  // ir po m — B
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    REQUIRE(pw.rec.size() >= 20);
+    CHECK(pw.rec.snapshot().back() > m + 8);
+    CHECK(bad == 0);
+}
+
+// Praėję įrašai sutraukiami: naujausias tampa dabartiniu turiniu (vėlai), ankstesnis — pakeistas.
+TEST_CASE("gfx_writer: submit_at — praėję įrašai: naujausias tampa dabartiniu (late), kiti pakeisti", "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(71);
+    Abc k;
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
+    const std::uint64_t n = even_up(next_index(pw.w) + 2);
+    REQUIRE(vfgfx_submit_at(pw.w, n, &k.b.f) == 0);
+    REQUIRE(vfgfx_submit_at(pw.w, n + 2, &k.c.f) == 0);
+    std::this_thread::sleep_for(150ms);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 200ms, [&](std::uint64_t j) { return k.rc[j & 1]; });
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    REQUIRE(pw.rec.size() >= 5);
+    CHECK(pw.rec.snapshot().front() > n + 2);
+    CHECK(bad == 0);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.scheduled == 2);
+    CHECK(st.scheduled_late == 1);
+    CHECK(st.scheduled_replaced == 1);
+    CHECK(st.queue_depth == 0);
+}
+
+TEST_CASE("gfx_writer: vfgfx_cancel_scheduled — laukiantys kadrai atšaukiami, dabartinis lieka", "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(72);
+    Abc k;
+    CHECK(vfgfx_cancel_scheduled(nullptr) == VFGFX_ERR_INVALID_ARG);
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    const std::uint64_t n = even_up(next_index(pw.w) + 6);
+    REQUIRE(vfgfx_submit_at(pw.w, n, &k.b.f) == 0);
+    REQUIRE(vfgfx_submit_at(pw.w, n + 4, &k.c.f) == 0);
+    REQUIRE(vfgfx_cancel_scheduled(pw.w) == 0);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.queue_depth == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 400ms, [&](std::uint64_t j) { return k.ra[j & 1]; });
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    CHECK(pw.rec.snapshot().back() > n + 6);
+    CHECK(bad == 0);
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.scheduled_replaced == 2);  // atšaukti — niekada netapo dabartiniais
+}
+
+// Eilė išlieka per stop/start: kadras pasirodo lygiai savo indekse ir ne anksčiau.
+TEST_CASE("gfx_writer: submit_at — eilė išlieka per stop / start", "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(73);
+    Abc k;
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    std::this_thread::sleep_for(60ms);
+    const std::uint64_t x = even_up(next_index(pw.w) + 14);  // ~280 ms į priekį
+    REQUIRE(vfgfx_submit_at(pw.w, x, &k.b.f) == 0);
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    std::this_thread::sleep_for(40ms);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 500ms, [&](std::uint64_t j) { return j < x ? k.ra[j & 1] : k.rb[j & 1]; });
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    const auto all = pw.rec.snapshot();
+    CHECK(std::find(all.begin(), all.end(), x) != all.end());
+    CHECK(bad == 0);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.scheduled_late == 0);
+}
+
+// Ne iš eilės pateikti submit_at (vėlesnis pirmas): eilė rikiuojama pagal indeksą.
+TEST_CASE("gfx_writer: submit_at — ne iš eilės pateikti kadrai rodomi pagal indeksą", "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(74);
+    Abc k;
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    std::this_thread::sleep_for(40ms);
+    const std::uint64_t n = even_up(next_index(pw.w) + 4);
+    REQUIRE(vfgfx_submit_at(pw.w, n + 8, &k.c.f) == 0);
+    REQUIRE(vfgfx_submit_at(pw.w, n, &k.b.f) == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 400ms, [&](std::uint64_t j) {
+        return j < n ? k.ra[j & 1] : j < n + 8 ? k.rb[j & 1] : k.rc[j & 1];
+    });
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    const auto all = pw.rec.snapshot();
+    CHECK(std::find(all.begin(), all.end(), n) != all.end());
+    CHECK(std::find(all.begin(), all.end(), n + 8) != all.end());
+    CHECK(bad == 0);
+}
+
+// Konvertuojant ritmo gija pasirinko indekso turinį -> TOO_LATE ir nieko neįdedama (pakartotinė patikra po convert).
+TEST_CASE("gfx_writer: submit_at — indeksas praėjo konvertuojant -> TOO_LATE", "[gfx_writer][mxl][submit_at]") {
+    gi::PacingHooks hk;
+    hk.after_convert = [] { std::this_thread::sleep_for(120ms); };
+    PacedWriter pw(75, hk);
+    Abc k;
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
+    REQUIRE(vfgfx_start_pacing(pw.w, 0) == 0);
+    std::this_thread::sleep_for(40ms);
+    const std::uint64_t n = even_up(next_index(pw.w) + 2);
+    CHECK(vfgfx_submit_at(pw.w, n, &k.b.f) == VFGFX_ERR_TOO_LATE);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(pw.w, &st) == 0);
+    CHECK(st.queue_depth == 0);
+    CHECK(st.scheduled == 0);
+    const std::size_t bad = follow(*pw.chk, pw.rec, 100ms, [&](std::uint64_t j) { return k.ra[j & 1]; });
+    REQUIRE(vfgfx_stop_pacing(pw.w) == 0);
+    CHECK(bad == 0);
+}
+
+TEST_CASE("gfx_writer: submit_at — interlaced flow'e nelyginis indeksas atmetamas, aibės išskiriamos pagal poreikį",
+          "[gfx_writer][mxl][submit_at]") {
+    PacedWriter pw(76);
+    Abc k;
+    CHECK(gi::prepared_sets(pw.w) == 2);
+    REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);  // dabartinis — aibė 0
+    const std::uint64_t n = even_up(next_index(pw.w) + 10);
+    CHECK(vfgfx_submit_at(pw.w, n + 1, &k.a.f) == VFGFX_ERR_INVALID_ARG);  // laukas turi prasidėti viršutiniu lauku
+    CHECK(std::string(vfgfx_last_error(pw.w)).find("even") != std::string::npos);
+    REQUIRE(vfgfx_submit_at(pw.w, n, &k.a.f) == 0);
+    CHECK(gi::prepared_sets(pw.w) == 2);  // aibės išskiriamos pagal poreikį (ne visos keturios iš karto)
+    REQUIRE(vfgfx_submit_at(pw.w, n + 2, &k.b.f) == 0);
+    CHECK(gi::prepared_sets(pw.w) == 3);  // 2 + laukiančių skaičius - 1 (dabartinė + laukiantys)
+    REQUIRE(vfgfx_submit_at(pw.w, n + 2, &k.c.f) == 0);  // pakeitimas: laikinai reikia dar vienos aibės
+    CHECK(gi::prepared_sets(pw.w) == 4);
+    REQUIRE(vfgfx_submit_at(pw.w, n + 4, &k.b.f) == 0);  // pakeistojo aibė laisva — pernaudojama
+    CHECK(gi::prepared_sets(pw.w) == 4);
+    // progresyviame flow'e nelyginis indeksas — leidžiamas
+    Domain d2(77);
+    FlowId f2;
+    vfgfx_writer w2 = nullptr;
+    REQUIRE(vfgfx_writer_create(d2.inst, def(f2.id, 64, 16, false).c_str(), nullptr, &w2) == 0);
+    Frame p(64, 16, 1, VFGFX_ALPHA_STRAIGHT, false);
+    CHECK(vfgfx_submit_at(w2, (next_index(w2) + 11) | 1ull, &p.f) == 0);
+    vfgfx_writer_destroy(w2);
 }

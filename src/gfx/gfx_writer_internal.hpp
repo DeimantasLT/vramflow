@@ -22,6 +22,8 @@ struct PacingHooks {
     std::function<void(std::uint64_t index)> on_commit;
     // Jei grąžina true, ritmo gijos commit'as laikomas nepavykusiu (klaidos kelio testams).
     std::function<bool()> fail_commit;
+    // vfgfx_submit_at: kviečiamas po kadro konvertavimo, prieš įdedant į eilę (lenktynių su ritmo gija testams).
+    std::function<void()> after_convert;
 };
 
 struct PacingStats {
@@ -36,5 +38,6 @@ struct PacingStats {
 int set_pacing_hooks(vfgfx_writer w, PacingHooks hooks);
 PacingStats pacing_stats(vfgfx_writer w);
 std::string pacing_error(vfgfx_writer w);  // paskutinė ritmo gijos klaida
+int prepared_sets(vfgfx_writer w);         // išskirtų paruoštų kadrų aibių skaičius (atminties kaina)
 
 }  // namespace vramflow::gfx::internal

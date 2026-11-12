@@ -423,32 +423,51 @@ struct vfgfx_writer_s {
     int alloc_sets(int n) {
         DeviceScope ds(device);
         const std::size_t gb = gfx::grain_bytes(r);
-        for (; nsets < n; ++nsets)
+        for (; nsets < n; ++nsets) {
+            // Visa aibė arba nieko: dalinės nesėkmės atveju jau išskirti laukai atlaisvinami (kitaip kartojant — nuotėkis).
+            void* ptr[2] = {nullptr, nullptr};
             for (int p = 0; p < fields; ++p) {
-                void* ptr = nullptr;
                 if (cuda_store) {
-                    if (const cudaError_t e = cudaMalloc(&ptr, gb); e != cudaSuccess) return fail_cuda("cudaMalloc paruoštam laukui", e);
+                    if (const cudaError_t e = cudaMalloc(&ptr[p], gb); e != cudaSuccess) {
+                        for (int q = 0; q < p; ++q) cudaFree(ptr[q]);
+                        return fail_cuda("cudaMalloc (prepared field)", e);
+                    }
                 } else {
-                    ptr = std::aligned_alloc(64, (gb + 63) / 64 * 64);
-                    if (!ptr) return fail(VFGFX_ERR_INTERNAL, "nepavyko išskirti paruošto lauko (host atmintis)");
+                    ptr[p] = std::aligned_alloc(64, (gb + 63) / 64 * 64);
+                    if (!ptr[p]) {
+                        for (int q = 0; q < p; ++q) std::free(ptr[q]);
+                        return fail(VFGFX_ERR_INTERNAL, "out of host memory (prepared field)");
+                    }
                 }
-                prep[nsets][p] = static_cast<std::uint8_t*>(ptr);
             }
+            for (int p = 0; p < fields; ++p) prep[nsets][p] = static_cast<std::uint8_t*>(ptr[p]);
+        }
         return 0;
     }
-    // Eilės įrašų, kurių first <= i, aktyvavimas (ritmo gija, po lat_m). Keli tuo pačiu metu — laimi didžiausias first.
-    void activate_due(std::uint64_t i) {
-        while (!queue.empty() && queue.front().first <= i) {
+    // Eilės įrašų, kurių first <= bound, aktyvavimas (po lat_m): naujausias (didžiausias first) tampa dabartiniu turiniu,
+    // rodomu nuo grain'o shown; ankstesni — pakeisti; first < shown — vėlus. Ritmo gija: bound = shown = i.
+    void activate(std::uint64_t bound, std::uint64_t shown) {
+        while (!queue.empty() && queue.front().first <= bound) {
             const Pending p = queue.front();
             queue.erase(queue.begin());
-            if (!queue.empty() && queue.front().first <= i) {
+            if (!queue.empty() && queue.front().first <= bound) {
                 n_sched_replaced.fetch_add(1);  // jį iškart pakeičia vėlesnis (jo laikas taip pat atėjo)
                 continue;
             }
-            if (p.first < i) n_sched_late.fetch_add(1);
+            if (p.first < shown) n_sched_late.fetch_add(1);
             cur = p.set;
             has = true;
         }
+    }
+    // Praėję įrašai (first < next_pacing_index) sutraukiami į dabartinį turinį ir neužima eilės (po lat_m).
+    void collapse_past() {
+        const std::uint64_t min = min_scheduled_index();
+        if (min > 0) activate(min - 1, min);
+    }
+    // Visų laukiančių kadrų atšaukimas (po lat_m); jie skaičiuojami kaip niekada netapę dabartiniais.
+    void cancel_all() {
+        n_sched_replaced.fetch_add(queue.size());
+        queue.clear();
     }
 
     void pace_loop();
@@ -496,7 +515,7 @@ void vfgfx_writer_s::pace_loop_body() {
         bool wrote = false;
         {
             std::lock_guard<std::mutex> l(lat_m);
-            activate_due(i);
+            activate(i, i);
             pace_next = i + 1;  // nuo šiol submit_at indeksui i — per vėlu (turinys pasirinktas)
             if (!has) {
                 bump(&gi::PacingStats::no_frame);
@@ -692,6 +711,7 @@ static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
         std::lock_guard<std::mutex> ll(w->lat_m);  // submit_at mato nuoseklią porą (pacing, pace_next)
         w->pace_next = w->start_index();
         w->pacing.store(true);
+        w->collapse_past();  // eilė išlieka per stop / start; praėję įrašai sutraukiami
     }
     try {
         w->th = std::thread([w] { w->pace_loop(); });
@@ -707,9 +727,13 @@ static int prepare_set(vfgfx_writer w, const vfgfx_frame& fr) {
     int target;
     {
         std::lock_guard<std::mutex> l(w->lat_m);
-        target = w->free_set();  // cur + eilė <= kSets - 1 (eilė <= kQueueCap), todėl laisva aibė visada yra
+        target = w->free_set();
     }
-    if (target < 0) return -w->fail(VFGFX_ERR_INTERNAL, "nėra laisvos paruoštų laukų aibės");
+    if (target < 0 && w->nsets < kSets) {  // aibės išskiriamos pagal poreikį: viena kiekvienam laukiančiam kadrui
+        if (const int c = w->alloc_sets(w->nsets + 1)) return -c;
+        target = w->nsets - 1;  // nauja aibė — niekieno nenaudojama (nsets keičia tik sub_m turėtojas)
+    }
+    if (target < 0) return -w->fail(VFGFX_ERR_INTERNAL, "no free prepared frame set");
     const int par[2] = {0, 1};
     std::uint8_t* const d[2] = {w->prep[target][0], w->prep[target][1]};
     if (const int c = w->convert(fr, w->fields, par, d)) return -c;
@@ -727,6 +751,7 @@ static int submit_impl(vfgfx_writer w, const vfgfx_frame* f) {
     std::lock_guard<std::mutex> l(w->lat_m);
     w->cur = target;
     w->has = true;
+    w->cancel_all();  // "nuo dabar šis kadras": suplanuoti kadrai atšaukiami
     w->n_submitted.fetch_add(1);
     return 0;
 }
@@ -743,8 +768,12 @@ static int submit_at_impl(vfgfx_writer w, std::uint64_t first, const vfgfx_frame
         return w->fail(VFGFX_ERR_TOO_LATE, "submit_at indeksas " + std::to_string(first) + " < " + std::to_string(min) +
                                                " (mažiausias priimamas — stats.next_pacing_index)");
     };
+    if (w->r.interlaced && (first & 1))
+        return w->fail(VFGFX_ERR_INVALID_ARG, "vfgfx_submit_at: first_index " + std::to_string(first) +
+                                                  " is odd; on an interlaced flow a frame must start on a top field (even index)");
     {
         std::lock_guard<std::mutex> l(w->lat_m);
+        w->collapse_past();
         const std::uint64_t min = w->min_scheduled_index();
         if (first < min) return too_late(min);
         const std::uint64_t now = w->current_index();
@@ -756,12 +785,11 @@ static int submit_at_impl(vfgfx_writer w, std::uint64_t first, const vfgfx_frame
         if (!same && static_cast<int>(w->queue.size()) >= kQueueCap)
             return w->fail(VFGFX_ERR_QUEUE_FULL, "submit_at eilė pilna (" + std::to_string(kQueueCap) + " laukiantys kadrai)");
     }
-    if (w->nsets < kSets) {
-        if (const int c = w->alloc_sets(kSets)) return c;
-    }
     const int target = prepare_set(w, fr);
     if (target < 0) return -target;
+    if (w->hooks.after_convert) w->hooks.after_convert();  // testo kabliukas (lenktynės su ritmo gija)
     std::lock_guard<std::mutex> l(w->lat_m);
+    w->collapse_past();
     const std::uint64_t min = w->min_scheduled_index();  // konvertuojant ritmo gija galėjo pasirinkti šio indekso turinį
     if (first < min) return too_late(min);
     auto it = std::lower_bound(w->queue.begin(), w->queue.end(), first, [](const Pending& p, std::uint64_t v) { return p.first < v; });
@@ -814,7 +842,9 @@ static int get_stats_impl(vfgfx_writer w, vfgfx_stats* out) {
     {
         std::lock_guard<std::mutex> l(w->lat_m);
         s.next_pacing_index = w->min_scheduled_index();
-        s.queue_depth = static_cast<std::uint32_t>(w->queue.size());
+        const std::uint64_t min = s.next_pacing_index;  // tik būsimi (praėję — jau dabartinis turinys)
+        s.queue_depth = static_cast<std::uint32_t>(
+            std::count_if(w->queue.begin(), w->queue.end(), [min](const Pending& p) { return p.first >= min; }));
     }
     s.pacing = w->pacing.load() ? 1u : 0u;
     s.queue_capacity = kQueueCap;
@@ -909,6 +939,15 @@ int vfgfx_stop_pacing(vfgfx_writer w) {
 int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out) {
     return guarded(w, [&] { return get_stats_impl(w, out); });
 }
+int vfgfx_cancel_scheduled(vfgfx_writer w) {
+    return guarded(w, [&] {
+        if (!w) return VFGFX_ERR_INVALID_ARG;
+        std::lock_guard<std::mutex> l(w->lat_m);
+        w->collapse_past();  // praėję įrašai jau yra dabartinis turinys — jie neatšaukiami
+        w->cancel_all();
+        return 0;
+    });
+}
 uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index) { return w ? mxlIndexToTimestamp(&w->rate, index) : 0; }
 uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
 uint64_t vfgfx_current_index(vfgfx_writer w) {
@@ -971,6 +1010,8 @@ std::string pacing_error(vfgfx_writer w) {
     std::lock_guard<std::mutex> l(w->err_m);
     return w->perr;
 }
+
+int prepared_sets(vfgfx_writer w) { return w->nsets; }
 
 PacingStats pacing_stats(vfgfx_writer w) {
     std::lock_guard<std::mutex> l(w->st_m);

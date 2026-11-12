@@ -38,7 +38,8 @@
  *    parity index % 2 — even index = top field = frame rows 0, 2, 4…; progressive flows: grain = frame, parity ignored.
  *  - Paced: vfgfx_start_pacing(w, offset_ns) starts a library thread that commits one grain per grain period of the
  *    flow (TAI clock; interlaced: 2 x frame rate). The content of grain i is the frame that is current at i:
- *      * vfgfx_submit(w, frame) makes `frame` current from the next grain the thread processes;
+ *      * vfgfx_submit(w, frame) means "this from now on": `frame` becomes the current content from the next grain the
+ *        thread processes and every scheduled (vfgfx_submit_at) frame is cancelled;
  *      * vfgfx_submit_at(w, first_index, frame) makes `frame` current from grain `first_index` on (frame accurate).
  *    Until the first frame exists no grains are committed. While pacing runs, the thread is the only user of the MXL
  *    writer and vfgfx_write fails with VFGFX_ERR_STATE. vfgfx_submit / vfgfx_submit_at are also allowed before
@@ -61,15 +62,23 @@
  *  - vfgfx_submit_at(w, first_index, frame):
  *      * accepted when stats.next_pacing_index <= first_index <= vfgfx_current_index(w) + VFGFX_SUBMIT_AT_MAX_LEAD_S x
  *        grain rate; earlier -> VFGFX_ERR_TOO_LATE, later -> VFGFX_ERR_TOO_EARLY (nothing is queued in either case);
- *      * first_index >= next_pacing_index + 2 leaves a margin of at least one grain period;
- *      * up to stats.queue_capacity (at least VFGFX_SUBMIT_AT_MIN_QUEUE) frames may be pending; one more fails with
- *        VFGFX_ERR_QUEUE_FULL. A frame for an index that is already pending replaces the pending one
+ *        first_index >= next_pacing_index + 2 leaves a margin of at least one grain period;
+ *      * interlaced flows: first_index must be even (a frame starts on its top field), else VFGFX_ERR_INVALID_ARG;
+ *      * up to stats.queue_capacity (at least VFGFX_SUBMIT_AT_MIN_QUEUE) FUTURE frames may be pending; one more fails
+ *        with VFGFX_ERR_QUEUE_FULL. A frame for an index that is already pending replaces the pending one
  *        (stats.scheduled_replaced);
- *      * a pending frame becomes current exactly at grain first_index if that grain is processed. If the thread skips
- *        first_index (late wake-up) or pacing was stopped over it, the frame becomes current at the next grain the
- *        thread processes (stats.scheduled_late); of several frames due at the same grain the one with the highest
- *        first_index wins, the others count as replaced. A pending frame is never shown before first_index;
- *      * vfgfx_submit does not clear the queue: pending frames still take over at their indices.
+ *      * a pending frame becomes current exactly at grain first_index if the pacing thread processes that grain. It is
+ *        never shown before first_index;
+ *      * past entries: as soon as first_index < next_pacing_index (pacing stopped over it, the thread skipped it after
+ *        a late wake-up, or it was queued before vfgfx_start_pacing and its time passed), the entry no longer occupies a
+ *        queue slot: of all such entries only the newest (highest first_index) survives, as the current content
+ *        (stats.scheduled_late); the older ones count as replaced;
+ *      * the queue survives vfgfx_stop_pacing / vfgfx_start_pacing (past entries are collapsed as above at start);
+ *      * vfgfx_submit cancels all pending frames; vfgfx_cancel_scheduled cancels them and keeps the current content
+ *        (both count the cancelled frames in stats.scheduled_replaced);
+ *      * memory: each pending frame holds one prepared frame in the flow's memory (GPU for cuda-linear): the grain size
+ *        x 2 fields for interlaced flows, x 1 for progressive (1080i or 1080p: 8.3 MB, 2160p: 33.2 MB). Buffers
+ *        are allocated on demand, one per frame actually pending (plus 2 always), and kept until vfgfx_writer_destroy.
  *  - vfgfx_current_index(w): MXL's current index at the flow grain rate, mxlTimestampToIndex(rate, now) — equal to
  *    mxlGetCurrentIndex for that rate. MXL rounds to the NEAREST index: the result is the index i with
  *    T(i) - P/2 <= now < T(i) + P/2 (P = grain period), so T(i) may still be up to half a period in the future.
@@ -200,7 +209,9 @@ typedef struct vfgfx_frame {
     { (uint32_t)sizeof(vfgfx_frame), 0u, NULL, 0u, 0u, 0u, VFGFX_PIXEL_RGBA8, VFGFX_ALPHA_STRAIGHT, VFGFX_MEM_HOST, NULL, \
       {0u, 0u, 0u, 0u} }
 
-/* Writer counters and state (vfgfx_get_stats). Counters are cumulative since vfgfx_writer_create. */
+/* Writer counters and state (vfgfx_get_stats). Counters are cumulative since vfgfx_writer_create. The fields are read
+ * one by one while the writer runs: they are NOT an atomic snapshot (e.g. committed may already include a grain that
+ * last_committed_index does not show yet). */
 typedef struct vfgfx_stats {
     uint32_t struct_size;          /* in: sizeof(vfgfx_stats) */
     uint32_t flags;                /* in: must be 0 */
@@ -210,7 +221,7 @@ typedef struct vfgfx_stats {
     uint64_t submitted;            /* frames accepted by vfgfx_submit */
     uint64_t scheduled;            /* frames accepted by vfgfx_submit_at */
     uint64_t scheduled_late;       /* scheduled frames that became current after their first_index */
-    uint64_t scheduled_replaced;   /* scheduled frames that never became current (replaced, see GRAIN INDICES) */
+    uint64_t scheduled_replaced;   /* scheduled frames that never became current (replaced or cancelled) */
     uint64_t late_skips;           /* grains skipped because the pacing thread was late */
     uint64_t no_frame;             /* grain periods without any frame (nothing committed) */
     uint64_t clock_backward;       /* backward clock steps seen by the pacing thread */
@@ -292,6 +303,9 @@ int vfgfx_stop_pacing(vfgfx_writer w);
 int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f);
 /* Makes f the content from grain first_index on (accepted range and queue: see GRAIN INDICES AND TIMING). */
 int vfgfx_submit_at(vfgfx_writer w, uint64_t first_index, const vfgfx_frame* f);
+
+/* Cancels every pending vfgfx_submit_at frame (counted in stats.scheduled_replaced); the current content stays. */
+int vfgfx_cancel_scheduled(vfgfx_writer w);
 
 /* Index of the grain period containing now (TAI) at the flow grain rate; VFGFX_INDEX_NONE for NULL. */
 uint64_t vfgfx_current_index(vfgfx_writer w);
