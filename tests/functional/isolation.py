@@ -31,9 +31,9 @@ sutrikimai paleidžiant ir stabdant (pvz. GPU P8 → P3 pliūpsnis po funkcijos 
 praradimai skaičiuojami visam jos gyvenimui. Aukštupio sutrikimas rašomas atskira INFO eilute (didžiausias gen A commit'o
 vėlavimas su gedimu / be jo ir vėlaus tick'o laikas nuo SIGSTOP / SIGCONT / kill momento).
 Vėlavimas: be p99 (kuris gali paslėpti ≤ 1 % blogų tick'ų) — kiekvieno sveiko flow'o didžiausias commit'o vėlavimas po
-įšilimo (`lateness_max_us`, nuo FAULT_AT − 1 s, t. y. visas gedimo langas) ≤ kontrolinio sveikų maks. + Wr + ro + Δproc + 1 ms
-(Wr + ro — vienkartinis laikymas iki a(i), kai įėjimas miršta ar užstringa; Δproc — apdorojimo maks. padidėjimas, žr.
-max_lateness_bad).
+įšilimo (`lateness_max_us`, nuo FAULT_AT − 1 s, t. y. visas gedimo langas) ≤ kontrolinio sveikų maks. + Wr + ro + Δproc + Δup
++ 1 ms (Wr + ro — vienkartinis laikymas iki a(i), kai įėjimas miršta ar užstringa; Δproc — apdorojimo, Δup — sveiko
+aukštupio commit'o vėlavimo maks. padidėjimas, žr. max_lateness_bad).
 fiso_enc: video ir garsas (gen --audio 1, enc --audio 1); sveikiems — ir garso praradimai (audio_underrun_frames) ≤ biudžetas,
 packets_audio > 0.
 
@@ -369,22 +369,25 @@ def upstream_budget(r):
 
 def max_lateness_bad(ctrl, r, what):
     """Kiekvieno sveiko flow'o didžiausias commit'o vėlavimas (lateness_max_us) ≤ kontrolinio sveikų maks. + Wr + ro +
-    Δproc + 1 ms — p99 negali paslėpti kelių blogų tick'ų. Wr + ro — vienkartinis laikymas (planas §6 D2: sveikų commit ≤
+    Δproc + Δup + 1 ms — p99 negali paslėpti kelių blogų tick'ų. Wr + ro — vienkartinis laikymas (planas §6 D2: sveikų commit ≤
     T + ro + Wr + proc): apdorojimas prasideda ne ties atvykimu (~T + 1,2), o ties a(i). Δproc = max(0, apdorojimo maks. su
     gedimu − be jo) (proc_ms / weave_ms — tik apdorojimas, be laukimo): GPU / CPU sulėtėjimas dėl KITO proceso įvykio (pvz.
     post verify CUDA kontekstas ties SIGCONT — iki ~20 ms ir su keepwarm, docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md)
-    nėra laukimas dėl sugedusio įėjimo; laukimą ši riba tebegaudo."""
+    nėra laukimas dėl sugedusio įėjimo; Δup = max(0, sveiko aukštupio — gen A — commit'o vėlavimo maks. su gedimu − be jo):
+    grain'as, atėjęs vėliau, commit'inamas vėliau (kaip biudžetas praradimams). Laukimą ši riba tebegaudo."""
     cmax = max(((f.get("lateness_max_us") or 0) / 1000.0 for f in ctrl.get("fn_flows") or []), default=None)
     if cmax is None:
         return [f"nėra kontrolinio {what} (lateness_max_us)"]
     pa, pb = (r.get("proc") or {}).get("max_ms"), (ctrl.get("proc") or {}).get("max_ms")
     dproc = max(0.0, pa - pb) if pa is not None and pb is not None else 0.0
-    lim = cmax + WR_MS + RO_MS + dproc + 1.0
+    ua, ub = (r.get("upstream") or {}).get("max_lateness_ms"), (ctrl.get("upstream") or {}).get("max_lateness_ms")
+    dup = max(0.0, ua - ub) if ua is not None and ub is not None else 0.0
+    lim = cmax + WR_MS + RO_MS + dproc + dup + 1.0
     bad = []
     for n, f in enumerate(r.get("fn_flows") or []):
         m = f.get("lateness_max_us")
         if m is None or m / 1000.0 > lim:
-            bad.append(f"sveiko #{n} maks. vėlavimas {None if m is None else m / 1000.0} ms > {lim:.2f} ms (Δproc {dproc:.2f})")
+            bad.append(f"sveiko #{n} maks. vėlavimas {None if m is None else m / 1000.0} ms > {lim:.2f} ms (Δproc {dproc:.2f}, Δup {dup:.2f})")
     return bad
 
 
