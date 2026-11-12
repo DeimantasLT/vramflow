@@ -3,9 +3,11 @@
 #pragma once
 // Atkūrimo eilės (dec) perpildymų priskyrimas laikrodžiui — taisyklė (peržiūros radinys po V13, pakeičia 3 s langą):
 //
-//   Laikrodžio žingsnis ATGAL per S paaiškina ne daugiau kaip ceil(S / kadro trukmė) eilėje susikaupusių kadrų, VIENĄ
-//   kartą: pirmame kadro tick'e po žingsnio tiek kadrų (bet ne daugiau, nei eilė viršija atkūrimo gylį) išmetama kaip
-//   laikrodžio pasekmė (clock_overrun_frames), ir eilė grįžta į įprastą gylį. Žingsnis PIRMYN eilės nepadidina (variklis
+//   Žingsniai ATGAL apskaitomi kaupiamai: jų trukmių suma (ns) su pernešamu likučiu; paaiškinta kadrų = floor(suma / kadro
+//   trukmė). Paaiškinti kadrai panaudojami VIENĄ kartą: pirmame kadro tick'e tiek kadrų (bet ne daugiau, nei eilė viršija
+//   atkūrimo gylį) išmetama kaip laikrodžio pasekmė (clock_overrun_frames), ir eilė grįžta į įprastą gylį; likutis (< kadras)
+//   pernešamas į kitus žingsnius. Taip 6 ms žingsnis nepaaiškina viso 40 ms kadro, o N mažų žingsnių — N kadrų (anksčiau
+//   ceil kiekvienam žingsniui: 10 × −6 ms „paaiškindavo“ 10 kadrų, nors eilė pailgėjo 60 ms, t. y. 1 kadru). Žingsnis PIRMYN eilės nepadidina (variklis
 //   indeksus praleidžia — clock_skips — realiu laiku tick'ai eina tuo pačiu tempu), todėl nepaaiškina nė vieno kadro.
 //   Visa kita, kas viršija ribą (gylis + 1 s), — tikras perpildymas (overrun_frames → exit 4).
 //
@@ -22,11 +24,12 @@ class ClockQueueBudget {
 public:
     explicit ClockQueueBudget(std::int64_t frame_ns) : frame_ns_(frame_ns > 0 ? frame_ns : 1) {}
 
-    // Variklio aptiktas žingsnis (TAI − MONOTONIC_RAW pokytis), ns; < 0 — atgal.
+    // Variklio aptiktas žingsnis (TAI − MONOTONIC_RAW pokytis), ns; < 0 — atgal (kaupiama suma).
     void on_step(std::int64_t delta_ns) {
-        if (delta_ns < 0) pending_ += static_cast<std::uint64_t>((-delta_ns + frame_ns_ - 1) / frame_ns_);
+        if (delta_ns < 0) back_ns_ += static_cast<std::uint64_t>(-delta_ns);
     }
-    std::uint64_t pending() const { return pending_; }
+    // Paaiškinti, dar nepanaudoti kadrai: floor(suma / kadras).
+    std::uint64_t pending() const { return back_ns_ / static_cast<std::uint64_t>(frame_ns_); }
 
     struct Tick {
         std::uint64_t clock_drop = 0;    // išmesti dabar: laikrodžio pasekmė
@@ -34,13 +37,15 @@ public:
         std::uint64_t reclassify = 0;    // darbininko išmetimai nuo praeito tick'o, priskiriami laikrodžiui
     };
     // Kadro tick'as: q — eilės ilgis, depth — atkūrimo gylis, cap — riba (gylis + 1 s), worker_drops — darbininko
-    // apsauginių išmetimų skaičius nuo praeito kadro tick'o. Likutis po šio tick'o nebegalioja (vienas kartas).
+    // apsauginių išmetimų skaičius nuo praeito kadro tick'o. Paaiškinti kadrai po šio tick'o nebegalioja (vienas kartas);
+    // pernešamas tik sub-kadro likutis.
     Tick on_frame_tick(std::uint64_t q, std::uint64_t depth, std::uint64_t cap, std::uint64_t worker_drops) {
         Tick t;
-        if (pending_ > 0) {
-            t.clock_drop = q > depth ? std::min(pending_, q - depth) : 0;
-            t.reclassify = std::min(pending_ - t.clock_drop, worker_drops);
-            pending_ = 0;
+        const std::uint64_t p = pending();
+        if (p > 0) {
+            t.clock_drop = q > depth ? std::min(p, q - depth) : 0;
+            t.reclassify = std::min(p - t.clock_drop, worker_drops);
+            back_ns_ -= p * static_cast<std::uint64_t>(frame_ns_);
         }
         const std::uint64_t left = q - t.clock_drop;
         t.overrun_drop = left > cap ? left - cap : 0;
@@ -49,7 +54,7 @@ public:
 
 private:
     std::int64_t frame_ns_;
-    std::uint64_t pending_ = 0;
+    std::uint64_t back_ns_ = 0;  // atgalinių žingsnių suma, dar nepaversta panaudotais kadrais
 };
 
 }  // namespace mxlv::timing

@@ -368,10 +368,11 @@ def fgold_composite(out):
 
 def dec_clock_rule(sd, frame_ms=40.0):
     """dec PASS taisyklė laikrodžiui (planas V13 / A17, timing::ClockQueueBudget): kiekvieno srauto laikrodžiui priskirti
-    išmetimai (clock_overrun_frames + clock_overflow_drops) ≤ ceil(clock_back_ms / kadras) + clock_steps — tai, ką gali
-    paaiškinti patys žingsniai atgal; daugiau — perkrova, paslėpta kaip laikrodis. Grąžina neatitikimų sąrašą."""
+    išmetimai (clock_overrun_frames + clock_overflow_drops) ≤ floor(Σ žingsnių atgal / kadras) — kaupiama suma, kaip
+    ClockQueueBudget (anksčiau ceil + 1 kiekvienam žingsniui: N mažų žingsnių „paaiškindavo“ N kadrų). clock_back_ms —
+    nupjautos ms, todėl + 1 ms. Daugiau — perkrova, paslėpta kaip laikrodis. Grąžina neatitikimų sąrašą."""
     proc = (sd or {}).get("proc") or {}
-    budget = -(-proc.get("clock_back_ms", 0) // frame_ms) + proc.get("clock_steps", 0)
+    budget = (proc.get("clock_back_ms", 0) + 1) // frame_ms
     return [f"srautas {n}: laikrodžiui {f.get('clock_overrun_frames', 0) + f.get('clock_overflow_drops', 0)} > {budget:.0f}"
             for n, f in enumerate(flows_of(sd))
             if f.get("clock_overrun_frames", 0) + f.get("clock_overflow_drops", 0) > budget]

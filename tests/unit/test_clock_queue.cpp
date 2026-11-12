@@ -55,7 +55,7 @@ TEST_CASE("clock_queue: žingsnis atgal −1,3 s — paaiškinti kadrai išmetam
     Model m;
     m.ticks(100);
     m.b.on_step(-1'300'000'000);
-    CHECK(m.b.pending() == 33);  // ceil(1300 / 40)
+    CHECK(m.b.pending() == 32);  // floor(1300 / 40) — kaupiama suma (anksčiau ceil: 33)
     m.wait(1'300'000'000);       // 32 kadrai susikaupė laukiant
     m.ticks(1);
     CHECK(m.clock == 32);        // visi susikaupę (ne daugiau nei paaiškina žingsnis)
@@ -108,14 +108,45 @@ TEST_CASE("clock_queue: šuolis didesnis už eilės ribą — darbininko išmeti
     CHECK(m.overrun == 0);
 }
 
-TEST_CASE("clock_queue: du žingsniai atgal prieš kadro tick'ą sumuojami, likutis nebegalioja", "[timing][clock_queue]") {
+TEST_CASE("clock_queue: du žingsniai atgal prieš kadro tick'ą sumuojami, paaiškinti kadrai nebegalioja", "[timing][clock_queue]") {
     ClockQueueBudget b(kFrame);
     b.on_step(-50'000'000);  // 2
     b.on_step(-41'000'000);  // 2
-    CHECK(b.pending() == 4);
+    CHECK(b.pending() == 2);  // floor(91 / 40) — suma, ne ceil kiekvienam (anksčiau 2 + 2 = 4)
     const auto t = b.on_frame_tick(kDepth + 1, kDepth, kCap, 0);
     CHECK(t.clock_drop == 1);
     CHECK(b.pending() == 0);
     const auto t2 = b.on_frame_tick(kDepth + 3, kDepth, kCap, 0);
     CHECK(t2.clock_drop == 0);
+}
+
+TEST_CASE("clock_queue: 10 žingsnių po −6 ms paaiškina 1 kadrą, ne 10 (kaupiama suma, likutis pernešamas)", "[timing][clock_queue]") {
+    // Anksčiau kiekvienas žingsnis paaiškindavo ceil(6 / 40) = 1 kadrą — 10 mažų žingsnių „paaiškindavo“ 10 kadrų.
+    ClockQueueBudget b(kFrame);
+    std::uint64_t clock = 0;
+    for (int k = 0; k < 10; ++k) {
+        b.on_step(-6'000'000);
+        clock += b.on_frame_tick(kDepth + 5, kDepth, kCap, 0).clock_drop;  // eilė visada virš gylio — išmestų tiek, kiek paaiškinta
+    }
+    CHECK(clock == 1);  // 60 ms / 40 ms
+    CHECK(b.pending() == 0);
+    b.on_step(-20'000'000);  // likutis 20 ms + 20 ms = 40 ms — dar vienas kadras
+    CHECK(b.pending() == 1);
+}
+
+TEST_CASE("clock_queue: vienas −6 ms žingsnis nepaaiškina nė vieno 40 ms kadro", "[timing][clock_queue]") {
+    ClockQueueBudget b(kFrame);
+    b.on_step(-6'000'000);
+    CHECK(b.pending() == 0);
+    CHECK(b.on_frame_tick(kDepth + 3, kDepth, kCap, 0).clock_drop == 0);
+}
+
+TEST_CASE("clock_queue: paaiškinti kadrai panaudojami vieną kartą, sub-kadro likutis lieka", "[timing][clock_queue]") {
+    ClockQueueBudget b(kFrame);
+    b.on_step(-100'000'000);  // 2 kadrai + 20 ms
+    CHECK(b.pending() == 2);
+    CHECK(b.on_frame_tick(kDepth, kDepth, kCap, 0).clock_drop == 0);  // eilė gylyje — nieko neišmesta, bet panaudota
+    CHECK(b.pending() == 0);
+    b.on_step(-20'000'000);  // 20 + 20 = 40 ms
+    CHECK(b.pending() == 1);
 }
