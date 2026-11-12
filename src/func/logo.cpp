@@ -26,8 +26,8 @@
 
 namespace mxlv::func {
 
-// Variklio ribos logo funkcijai: V9 — legacy (elgsena nekinta), V10 — izoliacija.
-constexpr EngineTiming kLogoTiming = EngineTiming::Legacy;
+// Variklio ribos logo funkcijai (V10): izoliacija — Wr = P/4, M = 3, Late histerezė 8, futex laukimas; D = --deadline-ms.
+constexpr EngineTiming kLogoTiming = EngineTiming::Isolation;
 
 // Logotipo plokštumos device atmintyje.
 struct DeviceLogo {

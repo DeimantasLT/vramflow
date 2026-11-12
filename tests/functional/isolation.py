@@ -19,9 +19,10 @@ todėl `out_lateness` histograma abiem apima tą patį langą: nuo 9-os sekundė
 — „prieš“ stulpelis (be gedimo), antrasis — „po“. Santraukos skaitikliai kaupiami visam paleidimui, bet iki gedimo sveikame
 paleidime jie 0 (kontrolinis tai patikrina).
 
-Būsena — INFO su skaičiais (kaip F6b): tai dokumentuoja DABARTINĘ elgseną ir vėliau taps vartais (V10–V12). FAIL tik jei
-neveikia pati infrastruktūra (flow'ai neatsirado, nėra santraukos). Struktūruoti skaičiai — `before` / `after` laukuose (functional.json).
-Skaičiai surašyti į docs/rezultatai/2026-11-12-izoliacija-pries.md.
+Būsena: fiso_kill ir fiso_stall — VARTAI logo funkcijai nuo V10 (izoliacija variklyje; tvirtinimai — logo_gate()); fiso_composite
+ir fiso_enc — kol kas INFO su skaičiais (vartais taps V11, V12). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
+nėra santraukos). Struktūruoti skaičiai — `before` / `after` laukuose (functional.json). „Prieš“ skaičiai —
+docs/rezultatai/2026-11-12-izoliacija-pries.md.
 
 Testai tikrina tik iš išorės: procesai, signalai, exit kodai, santraukų skaitikliai, verify išvestis.
 """
@@ -40,12 +41,15 @@ N = int(os.environ.get("FISO_N", "8"))
 FAULT_AT = float(os.environ.get("FISO_FAULT_AT", "10"))  # s po funkcijos starto
 STALL_S = 5.0
 RUN_S = 24  # funkcijos trukmė
+LOGO_RUN_S = 27  # logo: po SIGCONT (ties 15 s) lieka ≥ 10 s patikrai „0 praradimų po atsigavimo“
+POST_S = 10  # logo stall: verify paveiktam flow'ui po SIGCONT
+WR_MS = 5.0  # Wr = P/4 prie 50 Hz (planas §6 D2)
 WARM_S = FAULT_AT - 1  # histograma nuo 1 s iki gedimo
 VERIFY_S = 20
 ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
 FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skips", "lapped", "too_late", "in_invalid", "read_errors",
-           "missing_fields", "detached", "flow_invalid", "reopened", "reattached")
+           "missing_fields", "detached", "flow_invalid", "reopened", "reattached", "stalls")
 ENC_KEYS = ("frames_encoded", "late_frames", "late_skips_frames", "warmup_skips_frames", "clock_skips_frames", "missing_frames",
             "lapped", "too_late", "in_invalid", "frames_dropped_queue", "encode_errors", "mux_errors", "reattached")
 VER_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "too_late", "read_errors", "reattached", "in_reattached",
@@ -119,29 +123,37 @@ def run_logo(out, tag, impl, storage, fault):
     v = F.vcommon(impl, storage)
     ga = F.FProc(out, f"{sub}/genA", "gen", d, "--flows", N - 1, "--duration", RUN_S + 60, *v)
     gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", N - 1, "--duration", RUN_S + 60, *v)
-    lg = vf = None
-    rl = rv = None
+    lg = vf = vp = None
+    rl = rv = rp = None
     t_fault = None
     try:
         if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)]):
             return {"err": "gen flow'ai neatsirado"}
         t0 = time.monotonic()
-        lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", RUN_S, "--warmup", WARM_S, *v)
+        lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", LOGO_RUN_S, "--warmup", WARM_S, *v)
         if not F.wait_flows(d, [F.role_flow_id(2, n) for n in range(N)], 30):
             return {"err": "logo išėjimo flow'ai neatsirado"}
         vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", VERIFY_S, "--warmup", 1,
                      *F.vimpl(impl, storage))
         t_fault = apply_fault(fault, gb, t0)
+        if fault == "stall":  # po SIGCONT: paveiktas flow'as POST_S s — be praradimų (1 s įšilimas atsigavimui)
+            vp = F.FProc(out, f"{sub}/post", "verify", d, "--mode", "logo", "--flows", 1, "--flow-base", N - 1, "--every", 1,
+                         "--duration", POST_S, "--warmup", 1, *F.vimpl(impl, storage))
+            rp = vp.wait(timeout=POST_S + 60)
         rv = vf.wait(timeout=VERIFY_S + 60)
-        rl = lg.wait(timeout=RUN_S + 60)
+        rl = lg.wait(timeout=LOGO_RUN_S + 60)
     finally:
-        stop_all([vf, lg, gb, ga])
+        stop_all([vp, vf, lg, gb, ga])
     sl, sv = F.vsummary(lg, "logo"), F.vsummary(vf, "verify-logo")
     if sl is None or sv is None:
         return {"err": f"nėra santraukų (logo={sl is not None}, verify={sv is not None})"}
-    return {**common_record(fault, t_fault), "exit": {"logo": rl, "verify": rv}, "fn": split_summary(sl, FN_KEYS, N),
-            "out_lateness": hist_of(sl, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
-            "verify_proc": (sv.get("proc") or {}), "fatal": sl.get("fatal")}
+    rec = {**common_record(fault, t_fault), "exit": {"logo": rl, "verify": rv}, "fn": split_summary(sl, FN_KEYS, N),
+           "out_lateness": hist_of(sl, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
+           "verify_proc": (sv.get("proc") or {}), "fatal": sl.get("fatal")}
+    if vp is not None:
+        sp = F.vsummary(vp, "verify-logo")
+        rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
+    return rec
 
 
 # --- composite -----------------------------------------------------------------------------------------------------------
@@ -250,8 +262,36 @@ def describe(r):
     return s
 
 
+def logo_gate(fault, ctrl, r):
+    """V10 vartai (planas §9 V10): sveikiems N − 1 — late_fields, late_skips, lapped == 0, verify missing / invalid / mismatch
+    == 0; out_lateness p99 po gedimo ≤ p99 be gedimo + Wr + 1 ms; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir
+    po SIGCONT POST_S s be praradimų. Grąžina neatitikimų sąrašą (tuščias — PASS)."""
+    bad = []
+    fh, fa = r["fn"]["healthy"], r["fn"]["affected"]
+    vh = r["verify"]["healthy"]
+    for k in ("late_fields", "late_skips", "lapped"):
+        if fh.get(k, 0):
+            bad.append(f"sveikų {k}={fh[k]}")
+    for k in ("missing", "invalid", "mismatch_fields"):
+        if vh.get(k, 0):
+            bad.append(f"verify sveikų {k}={vh[k]}")
+    p99a, p99b = r["out_lateness"].get("p99_ms"), ctrl["out_lateness"].get("p99_ms")
+    if p99a is None or p99b is None or p99a > p99b + WR_MS + 1.0:
+        bad.append(f"out_lateness p99 {p99b} → {p99a} ms > +{WR_MS + 1.0} ms")
+    if not fa.get("missing_fields", 0):
+        bad.append("paveikto missing_fields == 0")
+    if fault == "stall":
+        if fa.get("stalls", 0) < 1:
+            bad.append(f"paveikto stalls={fa.get('stalls', 0)} < 1")
+        post = r.get("post") or {}
+        if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
+                post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):
+            bad.append(f"po SIGCONT {POST_S} s: {post}")
+    return bad
+
+
 def probe(out, name, runner, faults):
-    """Kiekvienam variantui: kontrolinis (be gedimo) + su gedimu; būsena INFO."""
+    """Kiekvienam variantui: kontrolinis (be gedimo) + su gedimu. logo (run_logo) — vartai (logo_gate), kiti — INFO."""
     res = []
     for tag, impl, storage, enc in variants():
         tid = f"{name}[{tag}]"
@@ -265,8 +305,15 @@ def probe(out, name, runner, faults):
             if ctrl.get("err") or r.get("err"):
                 res.append(F.result(tid, "FAIL", why=f"kontrolinis: {describe(ctrl)}; su gedimu ({fault}): {describe(r)}"))
                 continue
-            res.append(F.result(tid, "INFO", why=f"PRIEŠ (be gedimo): {describe(ctrl)} || PO ({fault} ties {r['fault_at_s']} s): "
-                                                  f"{describe(r)}", before=ctrl, after=r))
+            why = f"PRIEŠ (be gedimo): {describe(ctrl)} || PO ({fault} ties {r['fault_at_s']} s): {describe(r)}"
+            if runner is run_logo:
+                bad = logo_gate(fault, ctrl, r)
+                if r.get("post"):
+                    why += f" | po SIGCONT: {r['post']}"
+                res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") + why,
+                                    before=ctrl, after=r))
+                continue
+            res.append(F.result(tid, "INFO", why=why, before=ctrl, after=r))
     return res
 
 
