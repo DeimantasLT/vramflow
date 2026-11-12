@@ -334,6 +334,7 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `verify` | checks the output of `gen`, `logo`, `dec` or `composite` against the CPU reference | `--mode`, `--every N` (check every N-th field) |
 | `clip`, `ref-crc` | helpers for the decode test clip | `--format` |
 | `split-raw` | raw NV12 frames → v210 frames with the reference (chroma PSNR tool) | `--format`, `--chroma frame\|field` |
+| `keepwarm` | — (not an MXL function): keeps the GPU out of its idle power state with a light periodic fill, see *GPU clocks* in section 8 | `--size-mb` (64), `--interval-ms` (5), `--duration` (0 — until stopped) |
 
 `composite --base none --out-format v210a` builds a graphics-only layer; `--layer-flow K:UUID` takes another flow
 (for example another compositor's output) as layer K, so compositors can be chained. The base flow is `flow_id(--in-role, n)`; a
@@ -457,8 +458,17 @@ native Linux rerun will give the authoritative numbers.
   GPU is the limit, not compute.
 - Grain latency p50 1.2 ms on GPU flows vs 2.9 ms on RAM flows. GPU processing with RAM flows (H) collapses at 32 logo
   flows; with GPU flows (G) it does not.
-- At very light load a laptop GPU lowers its clock and misses real-time deadlines; on servers lock the GPU clocks
-  (`nvidia-smi -pm 1`, `-lgc`).
+- **GPU clocks.** When a laptop GPU (WSL2 / WDDM) idles in power state P8 and any process starts a burst of wide GPU work
+  (creating `cuda-linear` flows, a large `cudaMemset`, a full-GPU kernel, another function starting or stopping), the
+  P8 → P3 step stops the GPU work of **all** processes for 50–350 ms: live functions miss real-time deadlines and skip
+  indices. Measured: 35 of 70 such events stalled a 7-flow `gen` without a constant light GPU load (worst 368 ms, 290
+  indices skipped), 0 of 70 with `vramflow-func keepwarm` running (worst 22 ms). Its cost: GPU busy 19.5 %, 11.2 W instead
+  of 2.6 W at idle. Operational rule: on laptops and development machines run `vramflow-func keepwarm` (defaults:
+  64 MB every 5 ms; `--duration 0` until stopped) while anything is live; the test harnesses (`functional.py`,
+  `capacity.py`) start it for GPU variants by themselves (`VRAMFLOW_GPU_KEEPWARM=0` turns this off) and record it in every
+  result. On servers lock the GPU clocks (`nvidia-smi -pm 1`, `-lgc`) — **not verified there yet**: rerun
+  `tests/perf/gpu_event_hiccup.py` on the server before relying on it. Details:
+  [`docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md`](docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md).
 
 Full tables and notes: [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
 
