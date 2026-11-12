@@ -221,6 +221,7 @@ void StatsHub::end_tick(std::uint64_t now) {
     e.process_calls = eng_.process_calls - eng_prev_.process_calls;
     e.guard_overrun = eng_.guard_overrun - eng_prev_.guard_overrun;
     e.carry_overrun = eng_.carry_overrun - eng_prev_.carry_overrun;
+    e.cut_batches = eng_.cut_batches - eng_prev_.cut_batches;
     e.clock_steps = eng_.clock_steps - eng_prev_.clock_steps;
     e.clock_backward = eng_.clock_backward - eng_prev_.clock_backward;
     e.step_gaps = eng_.step_gaps - eng_prev_.step_gaps;

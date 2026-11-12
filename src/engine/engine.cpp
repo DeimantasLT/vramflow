@@ -7,7 +7,7 @@
 //   WaitB — „šviežias“ Straggler (neparuoštų būtinų įėjimų miss_run == 0): B laukia jo iki b(c);
 //   WaitC — pernešta per kito tick'o atidarymą (C), arba „pakibęs“ Straggler (miss_run ≥ 1), kurio nelaukiama:
 //           paleidžiamas, jei paruoštas B paleidimo metu ar vėliau iki savo ribos (has_c ? c : b), kitaip — spraga.
-// Vienam indeksui ne daugiau kaip po vieną A, B ir C paleidimą (≤ 3 process kvietimai).
+// Vienam indeksui ≤ 3 process kvietimai (A, B, C) ir retas ketvirtas — paskutinis batch'as ties c(i) (žr. C taisyklę).
 //
 // Taisyklės, kurių plano tekstas nepasako tiesiogiai (sprendimai po peržiūros, 2026-11-12):
 //  * „Laiku“ — įėjimo grain'as paruoštas ne vėliau kaip a(c); tai lemia įėjimo ok / late. Late nuimama po
@@ -32,7 +32,9 @@
 //  * C taisyklė (kaip B): kai bent vienas WaitC vienetas paruoštas (anksčiausias — t_r), C laukia neparuoštų WaitC vienetų ir
 //    prisijungsiančių po pernešimo ne ilgiau kaip min(c, t_r + Wr); paruoštas WaitC vienetas laikomas ne ilgiau kaip Wr
 //    (anksčiau — iki pačios C ribos dėl bet kurio neparuošto ar prisijungiančio). Kol indeksui liko process kvietimų
-//    (≤ 3 iš viso), likę WaitC / prisijungę vėliau paleidžiami kitu C kvietimu; kai nebeliko — spraga ties C riba.
+//    (≤ 3 iš viso), likę WaitC / prisijungę vėliau paleidžiami kitu C kvietimu. Kai kvietimų nebeliko (A + B + ankstyvas
+//    C), vėliau paruošti ar prisijungę iki c(i) vienetai NEIŠMETAMI: jie apdorojami paskutiniu batch'u ties c(i)
+//    (4-as kvietimas, skaitiklis cut_batches). Niekas, kas paruošta iki savo vieneto paskutinės ribos, nėra spraga.
 //    Legacy (viena riba) prisijungę po A — C fazėje iki tos pačios ribos.
 //  * Kiekvienas dalyvaujantis indeksas baigiasi: commit / spraga pagal politiką / skaitiklis su priežastimi
 //    (*_skips, gap_left, commit_errors). Lap'as — atšaukimas + spraga pagal politiką (lapped++).
@@ -407,7 +409,7 @@ struct TickEngine::Impl {
             u.stage = on_time ? Stage::WaitA : Stage::WaitB;
         } else if (r.cuts.has_b && !r.b_done && n < r.cuts.b && fresh(u)) {
             u.stage = Stage::WaitB;  // prisijungė po pernešimo (T2)
-        } else if (!r.c_done && n < c_deadline(r)) {  // legacy (be B) — iki tos pačios vienintelės ribos
+        } else if (n < c_deadline(r)) {  // C (ir po paskutinio C kvietimo — paskutiniu batch'u ties c); legacy — ta pati riba
             u.stage = Stage::WaitC;
         } else {
             ++hub.engine().carry_overrun;  // T2: c ribos jau praėjo
@@ -688,7 +690,12 @@ struct TickEngine::Impl {
         if (!r.c_done) {
             r.c_hold = INT64_MAX;
             launch(r, 2, [&](const Unit& u) { return u.stage == Stage::WaitC && ready(u, at_cut); });
-            if (at_cut || r.calls >= 3) r.c_done = true;  // ≤ 3 process kvietimai indeksui
+            if (at_cut || r.calls >= 3) r.c_done = true;  // ≤ 3 process kvietimai indeksui iki c(i)
+        } else if (at_cut) {
+            // Paskutinis batch'as ties c(i): po trečio kvietimo paruošti / prisijungę iki savo ribos — ne spraga (4-as kvietimas)
+            const std::uint8_t before = r.calls;
+            launch(r, 2, [&](const Unit& u) { return u.stage == Stage::WaitC && ready(u, true); });
+            if (r.calls != before) ++hub.engine().cut_batches;
         }
         if (!at_cut) return;
         for (Unit& u : units)

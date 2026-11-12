@@ -85,7 +85,9 @@ class TickFunction {
 public:
     virtual ~TickFunction() = default;
     virtual void begin_tick(Index, TickContext&) {}  // t_open: šaltiniai paruošia turinį
-    // Visi paruošti vienetai vienu batch'u; ≤ 3 kvietimai indeksui. Funkcija pati daro vieną GPU sync prieš grįždama.
+    // Visi paruošti vienetai vienu batch'u; ≤ 3 kvietimai indeksui (A, B, C) ir retas 4-as — paskutinis batch'as ties c(i)
+    // (vienetai, paruošti po trečio kvietimo, bet iki savo ribos; EngineCounters::cut_batches). Funkcija pati daro vieną
+    // GPU sync prieš grįždama.
     virtual bool process(const Batch&, TickContext&) = 0;  // false → fatal
     virtual void end_unit(const UnitTick&, Outcome, TickContext&) {}  // po commit'o / spragos
     // Kai visi šio indekso vienetai išspręsti, įskaitant prisijungusius po pernešimo (tada — po kito begin_tick).

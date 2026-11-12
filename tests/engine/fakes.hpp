@@ -264,13 +264,14 @@ public:
             if (c.index == i) r.push_back(&c);
         return r;
     }
-    // ≤ 3 process kvietimai indeksui — invariantas.
-    bool at_most_three_per_index() const {
+    // ≤ 4 process kvietimai indeksui — invariantas (A, B, C ir retas paskutinis batch'as ties c(i); anksčiau ≤ 3, tada
+    // po trečio kvietimo paruoštas vienetas buvo išmetamas).
+    bool at_most_four_per_index() const {
         std::vector<Index> idx;
         for (const Call& c : calls) idx.push_back(c.index);
         std::sort(idx.begin(), idx.end());
-        for (std::size_t k = 0; k + 3 < idx.size(); ++k)
-            if (idx[k] == idx[k + 3]) return false;
+        for (std::size_t k = 0; k + 4 < idx.size(); ++k)
+            if (idx[k] == idx[k + 4]) return false;
         return true;
     }
 
@@ -374,7 +375,7 @@ struct Rig {
             CHECK(o.opens == o.commits + o.cancels + o.failed);
             check_run(fn, result, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
         }
-        CHECK(fn.at_most_three_per_index());
+        CHECK(fn.at_most_four_per_index());
     }
     ~Rig() {
         if (ran) check_invariants();

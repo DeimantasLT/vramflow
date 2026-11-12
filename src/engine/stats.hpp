@@ -34,6 +34,9 @@ Health process_health(std::span<const Health> inputs, std::span<const Health> ou
 
 struct EngineCounters {
     std::uint64_t ticks = 0, process_calls = 0, guard_overrun = 0, carry_overrun = 0;
+    // Paskutinis batch'as ties c(i): vienetai, paruošti po trečio process kvietimo, bet iki savo ribos (4-as kvietimas
+    // indeksui; retas — A + B + ankstyvas C jau buvo). Ne praradimas: tokie vienetai niekada neišmetami.
+    std::uint64_t cut_batches = 0;
     std::uint64_t clock_steps = 0, clock_backward = 0, step_gaps = 0, clock_back_ns = 0;  // back — atgalinių šuolių suma
     std::uint64_t held_ns_max = 0;  // kiek ilgiausiai paruoštus vienetus laikė neparuošti (A fazė); maksimumas
     // Saugikliai (sutarties pažeidimai, niekada neturėtų didėti): open_wait grįžo true prieš t_open; laukimo ciklas be

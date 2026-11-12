@@ -94,7 +94,7 @@ TEST_CASE("review4: garsas vėluoja 20 ms kiekvieną kadrą — be tylos, kiti v
     CHECK(r.hub.in(r.eng->in_id(0, 1)).stalls == 0);
     CHECK(r.hub.in(r.eng->in_id(0, 1)).late >= 25);
     CHECK_FALSE(res.any_loss);
-    CHECK(r.fn.at_most_three_per_index());
+    CHECK(r.fn.at_most_four_per_index());
 }
 
 TEST_CASE("review4: Wanted be grain'o iki paskutinės ribos — vienetas tęsia be jo (ne spraga)", "[engine][review4][wanted]") {
@@ -118,4 +118,41 @@ TEST_CASE("review4: Wanted be grain'o iki paskutinės ribos — vienetas tęsia 
         if (e.unit == 0 && e.index == kI) CHECK(e.outcome == Outcome::Ready);
     CHECK(r.hub.in(r.eng->in_id(0, 1)).lost == 1);
     CHECK(res.any_loss);  // garso grain'as prarastas — praradimas (exit 4 griežtame režime)
+}
+
+TEST_CASE("review4: C fazė — po A + B + ankstyvo C atėjęs iki c(i) vienetas apdorojamas paskutiniu batch'u, ne spraga",
+          "[engine][review4][phasec]") {
+    // D = 30 ms: a = T + 5,5, b = T + 17,5, c = T + 30. Indekse kI: u0 laiku (A ties a — kvorumas laukė), u1 T + 10 (B ties
+    // t_r + Wr = T + 15), u2 T + 22 (C ties t_r + Wr = T + 27 — trečias kvietimas), u3 T + 28 (< c). Anksčiau u3 — spraga
+    // ties c (kvietimų limitas 3), nors buvo paruoštas iki savo ribos.
+    constexpr Index kI = 1010;
+    EngineConfig c = Rig::test_config();
+    c.cuts.deadline_ns = 30'000'000;
+    Rig r(4, c);
+    // Netikras rašytojas grain'us pateikia eilės tvarka (vėlesnis padaro ankstesnį matomą), todėl u2 / u3 kito indekso
+    // grain'as ateina T(kI + 1) + 9 ms = T(kI) + 29 — po jų vėlavusių kI grain'ų.
+    const std::int64_t at[4] = {1'200'000, 10'000'000, 22'000'000, 28'000'000};
+    for (int u = 0; u < 4; ++u)
+        r.ins[static_cast<std::size_t>(u)]->arrival = [a = at[u], u](Index j) {
+            if (j == kI) return a;
+            return u >= 2 && j == kI + 1 ? std::int64_t{9'000'000} : std::int64_t{1'200'000};
+        };
+    r.stop_after(kI + 6);
+    r.build();
+    const RunResult res = r.run();
+    CHECK_FALSE(res.any_loss);
+    const std::int64_t want[4] = {5'500'000, 15'000'000, 27'000'000, 30'000'000};
+    for (std::uint32_t u = 0; u < 4; ++u) {
+        INFO("u" << u);
+        const auto* e = r.outs[u]->find(kI);
+        REQUIRE(e != nullptr);
+        CHECK(e->kind == RecordingOutput::Kind::Commit);
+        CHECK(static_cast<std::int64_t>(e->tai) - T(kI) == want[u]);
+    }
+    const auto calls = r.fn.calls_for(kI);
+    REQUIRE(calls.size() == 4);  // A, B, C ir paskutinis batch'as ties c
+    CHECK(calls[3]->phase == 2);
+    CHECK(calls[3]->units == std::vector<std::uint32_t>{3});
+    CHECK(r.hub.engine().cut_batches == 1);
+    CHECK(r.hub.engine().carry_overrun == 0);
 }
