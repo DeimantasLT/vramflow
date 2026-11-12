@@ -60,9 +60,9 @@ constexpr std::uint32_t kFrameFlags = VFGFX_FRAME_CALLER_SYNCED;
 static_assert(MXL_ERR_UNSUPPORTED_OPERATION < VFGFX_ERR_INVALID_ARG, "mxlStatus kodai persidengia su VFGFX_ERR_*");
 
 // Kviečiančios gijos CUDA įrenginio perjungimas laikinai (atstatomas išeinant). cudaSetDevice kviečiamas VISADA (ne tik
-// kai įrenginys kitas): jis padaro pirminį kontekstą dabartiniu, o kviečiančiojo cuCtxCreate kontekstas tame pačiame
-// įrenginyje kitaip būtų naudojamas mūsų stream'ams / atminčiai (sukurtiems pirminiame) — klaida. Kviečiančiojo
-// kontekstą atstato CtxGuard (išorinis apvalkalas).
+// kai įrenginys kitas) — atsargumo dėlei: jis aiškiai padaro pirminį kontekstą dabartiniu, net jei kviečiančiojo
+// cuCtxCreate kontekstas tame pačiame įrenginyje dabartinis. Testu neįrodyta, kad be to būtų klaida (mutantas M27
+// išgyveno: cudart ir taip dirba pirminiame kontekste). Kviečiančiojo kontekstą atstato CtxGuard (išorinis apvalkalas).
 struct DeviceScope {
     int prev = -1;
     bool active = false;
