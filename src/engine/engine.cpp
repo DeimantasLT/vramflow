@@ -119,6 +119,9 @@ struct TickEngine::Impl {
         Index cur = kNoIndex, join = kNoIndex;
         Stage stage = Stage::None;
         bool failed = false, no_content = false, ever_failed = false;
+        // busy — vienetas šiuo metu batch'e (process) arba jo end_unit kvietime: fail_unit tada jo NEužbaigia (užbaigs
+        // kviečiantysis — lygiai vieną kartą); slots_open — jo išėjimų slot'ai atidaryti (fail_unit juos atšaukia prieš release).
+        bool busy = false, slots_open = false;
         std::int64_t ready_at = 0;
         // Atkūrimas (D8): kitas bandymas (monotoninis laikas), dabartinis atidėjimas, paskutinio atsigavimo momentas.
         std::int64_t retry_at = 0, recovered_at = INT64_MIN;
@@ -394,7 +397,9 @@ struct TickEngine::Impl {
         if (why == Outcome::GapClock) ++hub.engine().step_gaps;
         const UnitTick ut{uid(u), c, phase, {}, {}};
         ctx_index = c;
+        u.busy = true;
         fn->end_unit(ut, why, ctx);
+        u.busy = false;
         resolve_unit(u);
     }
 
@@ -487,13 +492,17 @@ struct TickEngine::Impl {
                 ++uc.gaps;
                 if (opened == OpenResult::AlreadyCommitted) ++uc.gaps_clock;
                 const UnitTick ut{uid(u), idx, phase, {}, {}};
+                u.busy = true;
                 fn->end_unit(ut, opened == OpenResult::AlreadyCommitted ? Outcome::Skipped : Outcome::OutputError, ctx);
+                u.busy = false;
                 resolve_unit(u);
                 if (broken != nullptr) fail_broken(u, *broken, "open");
                 broken = nullptr;
                 continue;
             }
             latest_ready = std::max(latest_ready, u.ready_at);
+            u.busy = true;
+            u.slots_open = u.nout != 0;
             batch.push_back(UnitTick{uid(u), idx, phase, std::span<const GrainRef>(grefs.data() + u.g0, u.ng),
                                      std::span<void* const>(slots.data() + u.out0, u.nout)});
         }
@@ -512,7 +521,11 @@ struct TickEngine::Impl {
         if (!ok || ended) {
             for (const UnitTick& ut : batch) {
                 Unit& u = units[ut.unit];
-                for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->cancel();
+                u.busy = false;
+                if (u.stage == Stage::None) continue;  // jau užbaigtas (fail_unit iš process: išėjimai atšaukti)
+                if (u.slots_open)
+                    for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->cancel();
+                u.slots_open = false;
                 u.stage = Stage::None;
                 --pending;
             }
@@ -534,6 +547,13 @@ struct TickEngine::Impl {
         for (const UnitTick& ut : batch) {
             Unit& u = units[ut.unit];
             count_inputs(u, r);
+            if (u.failed) {  // fail_unit iš process(): išėjimai jau atšaukti ir atlaisvinti — tik užbaigiamas (vieną kartą)
+                ++hub.unit(u.hub).gaps;
+                fn->end_unit(ut, Outcome::OutputError, ctx);
+                u.busy = false;
+                resolve_unit(u);
+                continue;
+            }
             bool lap = false;  // T12
             for (std::uint32_t k = 0; k < u.nin && !lap; ++k) {
                 const In& in = ins[u.in0 + k];
@@ -546,6 +566,7 @@ struct TickEngine::Impl {
             Outcome oc = Outcome::Ready;
             if (lap) {  // atšaukiama ir užpildoma pagal politiką — indeksas neliks be įrašo
                 for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->cancel();
+                u.slots_open = false;
                 gap_outputs(u, idx, false, true);
                 ++uc.lapped;
                 oc = Outcome::Lapped;
@@ -567,6 +588,7 @@ struct TickEngine::Impl {
                         all_ok = false;
                     }
                 }
+                u.slots_open = false;
                 if (all_ok) {
                     ++(phase == 0 ? uc.ok : uc.late);
                 } else {
@@ -574,7 +596,8 @@ struct TickEngine::Impl {
                     oc = Outcome::OutputError;
                 }
             }
-            fn->end_unit(ut, oc, ctx);
+            fn->end_unit(ut, oc, ctx);  // busy: fail_unit iš end_unit vieneto neužbaigia antrą kartą
+            u.busy = false;
             resolve_unit(u);
             if (broken != nullptr) fail_broken(u, *broken, "commit");
             broken = nullptr;
@@ -610,11 +633,19 @@ struct TickEngine::Impl {
         char t[160];
         std::snprintf(t, sizeof t, "%s; bandymas po %.0f s", why.c_str(), cfg.retry_min_s > 0 ? u.backoff_s : 0.0);
         emit(EventKind::UnitFailed, u.hub, u.cur, static_cast<std::int64_t>(u.backoff_s * 1000), t);
+        if (u.slots_open) {  // iš process(): atidaryti slot'ai atšaukiami — rašytojas neatlaisvinamas su atviru grain'u
+            for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->cancel();
+            u.slots_open = false;
+        }
         for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->release();
-        if (u.stage != Stage::None) {
+        // Vykdomas vienetas baigiamas OutputError — nebent jis dabar batch'e ar savo end_unit kvietime (busy): tada jį užbaigia
+        // kviečiantysis, lygiai vieną kartą (anksčiau — du kartai: pending persivyniodavo, --duration išleidimas pakibdavo).
+        if (u.stage != Stage::None && !u.busy) {
             ++hub.unit(u.hub).gaps;
             const UnitTick ut{uid(u), u.cur, 0, {}, {}};
+            u.busy = true;
             fn->end_unit(ut, Outcome::OutputError, ctx);
+            u.busy = false;
             resolve_unit(u);
         }
         if (failed_n == units.size()) end_fatal(EndReason::Fatal, 2, "visi vienetai sugedo; " + why);

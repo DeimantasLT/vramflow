@@ -183,7 +183,11 @@ public:
     bool interlaced() const override { return interlaced_; }
     std::uint32_t slot_count() const override { return slots_; }
     bool released = false;  // fail_unit: išėjimas atlaisvintas (po to variklis jo nebekviečia)
-    void release() override { released = true; }
+    bool released_open = false;  // atlaisvintas su atidarytu (necommit'intu, neatšauktu) grain'u — klaida
+    void release() override {
+        if (open_now) released_open = true;
+        released = true;
+    }
     // Atkūrimas (D8): reopen_ok — ar pavyksta (numatyta — taip); laikai — TAI.
     std::function<bool()> reopen_ok;
     std::vector<std::uint64_t> reopen_tai;
@@ -249,6 +253,7 @@ public:
     std::vector<std::int64_t> steps;
     std::function<void(Index, TickContext&)> on_begin_tick, on_end_tick;
     std::function<void(const Batch&, TickContext&)> on_process;
+    std::function<void(const UnitTick&, Outcome, TickContext&)> on_end_unit;  // po įrašo
 
     void begin_tick(Index i, TickContext& ctx) override {
         if (on_begin_tick) on_begin_tick(i, ctx);
@@ -260,8 +265,9 @@ public:
         if (on_process) on_process(b, ctx);
         return true;
     }
-    void end_unit(const UnitTick& u, Outcome o, TickContext&) override {
+    void end_unit(const UnitTick& u, Outcome o, TickContext& ctx) override {
         ends.push_back({u.unit, u.index, o, clk_.now_tai()});
+        if (on_end_unit) on_end_unit(u, o, ctx);
     }
     void end_tick(Index i, TickContext& ctx) override {
         if (on_end_tick) on_end_tick(i, ctx);

@@ -55,3 +55,77 @@ TEST_CASE("review5: A1 — sugedęs pirmas; sveiki B / C fazėse commit'ina savo
     CHECK(r.outs[0]->find(kK + 10) != nullptr);  // paveikto spraga užpildyta pagal politiką (Invalid)
     CHECK(r.outs[0]->find(kK + 10)->kind == RecordingOutput::Kind::Gap);
 }
+
+// --- B5: TickContext::fail_unit iš process() / end_unit — vienetas užbaigiamas LYGIAI vieną kartą -------------------------
+// Anksčiau fail_unit užbaigdavo vykdomą vienetą (end_unit + resolve), o tada jį užbaigdavo ir kviečiantysis: pending
+// persivyniodavo (--duration išleidimas pakibdavo — virtualus laikrodis „nušokdavo“ į begalybę), iš process() — rašytojas
+// atlaisvinamas su atidarytu grain'u. Tikrinamos visos trys kvietimo vietos.
+namespace {
+constexpr Index kF = 1010;
+void check_fail_once(Rig& r, Outcome want) {
+    const RunResult res = r.run();
+    INFO("priežastis " << static_cast<int>(res.reason));
+    CHECK(res.reason == EndReason::Duration);
+    CHECK(res.failed_units == 1);
+    // išleidimas baigėsi laiku (anksčiau — laukimas iki INT64_MAX)
+    CHECK(static_cast<std::int64_t>(r.clk.now_tai()) < T(kF + 200));
+    std::map<Index, int> n0;
+    Outcome got = Outcome::Ready;
+    for (const auto& e : r.fn.ends)
+        if (e.unit == 0) {
+            ++n0[e.index];
+            if (e.index == kF) got = e.outcome;
+        }
+    for (const auto& [i, n] : n0) {
+        INFO("u0 indeksas " << i);
+        CHECK(n == 1);  // kiekvienas indeksas — lygiai vienas end_unit
+        CHECK(i <= kF);  // po gedimo nebedalyvauja
+    }
+    CHECK(n0.count(kF) == 1);
+    CHECK(got == want);
+    CHECK(r.outs[0]->released);
+    CHECK_FALSE(r.outs[0]->released_open);
+    CHECK(r.outs[0]->opens == r.outs[0]->commits + r.outs[0]->cancels + r.outs[0]->failed);
+    const UnitCounters& c = r.hub.unit(r.eng->unit_id(0));
+    CHECK(c.ok + c.late + c.gaps + c.startup == static_cast<std::uint64_t>(n0.size()));  // apskaita — vieną kartą
+    for (Index i = kF; i <= kF + 100; ++i) CHECK(r.outs[1]->find(i) != nullptr);  // kitas vienetas tęsia
+}
+}  // namespace
+
+TEST_CASE("review5: B5 — fail_unit iš process() (vienetas batch'e)", "[engine][review5][service]") {
+    EngineConfig c = Rig::test_config();
+    c.duration_s = 3;
+    Rig r(2, c);
+    r.fn.on_process = [](const Batch& b, TickContext& ctx) {
+        if (b.index != kF) return;
+        for (const UnitTick& u : b.units)
+            if (u.unit == 0) ctx.fail_unit(0, "process");
+    };
+    r.build();
+    check_fail_once(r, Outcome::OutputError);
+    CHECK(r.outs[0]->find(kF) == nullptr);  // slot'as atšauktas, ne commit'intas
+}
+
+TEST_CASE("review5: B5 — fail_unit iš end_unit po commit'o", "[engine][review5][service]") {
+    EngineConfig c = Rig::test_config();
+    c.duration_s = 3;
+    Rig r(2, c);
+    r.fn.on_end_unit = [](const UnitTick& u, Outcome o, TickContext& ctx) {
+        if (u.unit == 0 && u.index == kF && o == Outcome::Ready) ctx.fail_unit(0, "end_unit");
+    };
+    r.build();
+    check_fail_once(r, Outcome::Ready);
+    CHECK(r.outs[0]->find(kF) != nullptr);  // commit'as įvyko prieš gedimą
+}
+
+TEST_CASE("review5: B5 — fail_unit iš end_unit spragos kelyje", "[engine][review5][service]") {
+    EngineConfig c = Rig::test_config();
+    c.duration_s = 3;
+    Rig r(2, c);
+    r.ins[0]->arrival = [](Index j) { return j == kF ? kNever : std::int64_t{1'200'000}; };  // vienas grain'as neateina
+    r.fn.on_end_unit = [](const UnitTick& u, Outcome o, TickContext& ctx) {
+        if (u.unit == 0 && u.index == kF && o != Outcome::Ready) ctx.fail_unit(0, "gap");
+    };
+    r.build();
+    check_fail_once(r, Outcome::GapLate);
+}
