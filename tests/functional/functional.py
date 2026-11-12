@@ -1046,6 +1046,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in golden.TESTS.items()})
     import isolation  # gedimų izoliacijos zondai (fiso_kill, fiso_stall, fiso_composite, fiso_enc)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in isolation.TESTS.items()})
+    import targeted  # tiksliniai migracijos peržiūros testai (fsplit, flate_stall, fcrashloop)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in targeted.TESTS.items()})
     results = []
     for name, fn in tests.items():
         if a.only and name.lower() not in a.only.lower().split(","):
