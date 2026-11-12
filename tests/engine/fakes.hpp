@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 #include "engine/clock.hpp"
@@ -145,7 +147,14 @@ public:
         slot = buf_;
         return OpenResult::Ok;
     }
+    std::function<bool(Index)> fail_commit;  // commit klaida šiam indeksui (grain'as neįrašomas)
+    std::uint64_t failed = 0;
     bool commit() override {
+        if (fail_commit && fail_commit(open_i_)) {
+            ++failed;
+            open_now = false;
+            return false;
+        }
         events.push_back({Kind::Commit, open_i_, GapAction::None, kNoIndex, clk_.now_tai()});
         ++commits;
         last_ = open_i_;
@@ -186,31 +195,6 @@ public:
         return true;
     }
 
-    // Kiekvienas indeksas tarp pirmo ir paskutinio įrašo baigiasi lygiai vienu commit / spraga, arba yra
-    // suskaičiuotas su priežastimi (praleistas, gap_left, commit_errors). Tyli skylė — testo klaida.
-    // last_resolved — paskutinis vieneto išspręstas indeksas (leave politika paskutinių indeksų neįrašo).
-    void check_accounted(const OutCounters& c, std::uint32_t stride = 1, std::uint32_t residue = 0,
-                         Index last_resolved = kNoIndex) const {
-        Index first = kNoIndex, last = kNoIndex, present = 0, prev = kNoIndex;
-        bool dup = false;
-        for (const Event& e : events) {
-            if (e.kind == Kind::Cancel) continue;
-            if (prev != kNoIndex && e.index <= prev) dup = true;
-            prev = e.index;
-            if (first == kNoIndex) first = e.index;
-            last = e.index;
-            ++present;
-        }
-        CHECK_FALSE(dup);
-        if (first == kNoIndex) return;
-        if (last_resolved != kNoIndex && last_resolved > last) last = last_resolved;
-        Index expected = 0;
-        for (Index i = first; i <= last; ++i) expected += i % stride == residue;
-        const std::uint64_t reasons = c.late_skips + c.clock_skips + c.warmup_skips + c.commit_errors + c.gap_left;
-        INFO("išėjimas: indeksai " << first << "…" << last << ", įrašų " << present << ", su priežastimi " << reasons);
-        CHECK(expected - present == reasons);
-    }
-
 private:
     VirtualClock& clk_;
     bool interlaced_;
@@ -237,10 +221,16 @@ public:
     explicit RecordingFunction(VirtualClock& c) : clk_(c) {
         calls.reserve(1 << 12);
         ends.reserve(1 << 16);
+        skips.reserve(1 << 10);
     }
 
+    struct Skip {
+        std::uint32_t unit;
+        Index from, to;
+    };
     std::vector<Call> calls;
     std::vector<End> ends;
+    std::vector<Skip> skips;
     std::vector<std::int64_t> steps;
     std::function<void(Index, TickContext&)> on_begin_tick, on_end_tick;
     std::function<void(const Batch&, TickContext&)> on_process;
@@ -262,6 +252,7 @@ public:
         if (on_end_tick) on_end_tick(i, ctx);
     }
     void on_clock_step(std::int64_t d, TickContext&) override { steps.push_back(d); }
+    void on_skip(std::uint32_t unit, Index from, Index to, TickContext&) override { skips.push_back({unit, from, to}); }
 
     std::vector<const Call*> calls_for(Index i) const {
         std::vector<const Call*> r;
@@ -282,6 +273,54 @@ public:
 private:
     VirtualClock& clk_;
 };
+
+// Per-indeksinė apskaita (kiekviename teste): kiekvienas vieneto dalyvaujantis indeksas [first_index, last_index] baigiasi
+// LYGIAI vienu end_unit arba variklio praleidimu (on_skip); be įrašo gali likti tik ≤ 2 paskutiniai (vykdomi sustabdant).
+// Išėjimui: Ready ↔ Commit; spraga / Lapped ↔ Gap įrašas, nebent politika leave (be įrašo); Skipped — be įrašo; kiekvienas
+// Commit / Gap įrašas turi atitinkamą end_unit.
+inline void check_run(const RecordingFunction& fn, const RunResult& res, std::uint32_t unit, const RecordingOutput* o,
+                      std::uint32_t stride = 1, std::uint32_t residue = 0, bool leave = false) {
+    INFO("vienetas " << unit);
+    if (res.first_index == kNoIndex) return;
+    std::map<Index, Outcome> ends;
+    bool dup = false;
+    for (const auto& e : fn.ends)
+        if (e.unit == unit && !ends.emplace(e.index, e.outcome).second) dup = true;
+    CHECK_FALSE(dup);
+    std::set<Index> skipped;
+    for (const auto& k : fn.skips)
+        if (k.unit == unit)
+            for (Index i = k.from; i < k.to; ++i)
+                if (i % stride == residue && !skipped.insert(i).second) dup = true;
+    CHECK_FALSE(dup);
+    Index resolved = kNoIndex;
+    for (const auto& [i, oc] : ends) resolved = resolved == kNoIndex ? i : std::max(resolved, i);
+    for (Index i : skipped) resolved = resolved == kNoIndex ? i : std::max(resolved, i);
+    std::uint64_t holes = 0, both = 0, tail = 0;
+    for (Index i = res.first_index; i <= res.last_index; ++i) {
+        if (i % stride != residue) continue;
+        const bool e = ends.count(i) != 0, k = skipped.count(i) != 0;
+        if (e && k) ++both;
+        if (!e && !k) ++((resolved == kNoIndex || i > resolved) ? tail : holes);
+    }
+    INFO("indeksai " << res.first_index << "…" << res.last_index);
+    CHECK(holes == 0);
+    CHECK(both == 0);
+    CHECK(tail <= 2);
+    if (o == nullptr) return;
+    std::map<Index, RecordingOutput::Kind> ev;
+    for (const auto& e : o->events)
+        if (e.kind != RecordingOutput::Kind::Cancel) ev[e.index] = e.kind;
+    std::uint64_t bad = 0;
+    for (const auto& [i, oc] : ends) {
+        const auto it = ev.find(i);
+        if (oc == Outcome::Ready) bad += it == ev.end() || it->second != RecordingOutput::Kind::Commit;
+        else if (oc == Outcome::Skipped) bad += it != ev.end();
+        else bad += leave ? it != ev.end() : (it == ev.end() || it->second != RecordingOutput::Kind::Gap);
+    }
+    for (const auto& [i, kind] : ev) bad += ends.count(i) == 0;
+    CHECK(bad == 0);
+}
 
 // N vienetų po vieną įėjimą ir vieną išėjimą (logo forma); laikrodis pradeda ties T(start).
 struct Rig {
@@ -319,7 +358,8 @@ struct Rig {
     }
     RunResult run() {
         ran = true;
-        return eng->run(fn);
+        result = eng->run(fn);
+        return result;
     }
     // Invariantai kiekviename Rig teste (tikrinami automatiškai sunaikinant).
     void check_invariants() const {
@@ -327,11 +367,8 @@ struct Rig {
             const RecordingOutput& o = *outs[u];
             CHECK(o.strictly_increasing());
             CHECK_FALSE(o.open_now);
-            CHECK(o.opens == o.commits + o.cancels);
-            Index lr = kNoIndex;
-            for (const auto& e : fn.ends)
-                if (e.unit == u && (lr == kNoIndex || e.index > lr)) lr = e.index;
-            o.check_accounted(out(u), 1, 0, lr);
+            CHECK(o.opens == o.commits + o.cancels + o.failed);
+            check_run(fn, result, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
         }
         CHECK(fn.at_most_three_per_index());
     }
@@ -350,6 +387,7 @@ struct Rig {
     std::vector<std::unique_ptr<RecordingOutput>> outs;
     std::unique_ptr<TickEngine> eng;
     bool ran = false;
+    RunResult result;
 };
 
 }  // namespace mxlv::engine::test

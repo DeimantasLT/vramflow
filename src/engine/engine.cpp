@@ -21,6 +21,13 @@
 //  * T11: praleidžiami tik indeksai, kurių kito tick'o atidarymas jau praėjo (pavėlavimas < P nieko neišmeta).
 //  * Paruošimo laikas = min(dabar, last_write_tai) — ne stebėjimo momentas (ašis gali būti kitas įėjimas).
 //  * held_ns = A paleidimas − momentas, kai paskutinis į batch'ą patekęs vienetas tapo paruoštas.
+//  * Wanted įėjimo laukiama ne ilgiau kaip iki a(c) (ir tik kol jis Live); vieneto klasę (Quorum / Straggler) lemia tik
+//    Required įėjimai. Vienas vėlus Wanted grain'as kainuoja tik tą indeksą.
+//  * B taisyklė: kai bent vienas Straggler'is paruoštas (anksčiausias — t_r), B laukia tik tų neparuoštų šviežių
+//    Straggler'ių, kurių laukiamas paruošimo laikas T(j) + ewma ≤ t_r + Wr (nežinomas — laukiama), ir ne ilgiau kaip
+//    min(b, t_r + Wr); likę — C fazėje iki savo ribos. Paruoštas Straggler'is laikomas ne ilgiau kaip Wr.
+//  * Prisijungiantys po pernešimo: C nepaleidžiama anksčiau, kol laukiama prisijungiančių (jų indeksas neprarandamas);
+//    legacy (viena riba) prisijungę po A — C fazėje iki tos pačios ribos.
 //  * Kiekvienas dalyvaujantis indeksas baigiasi: commit / spraga pagal politiką / skaitiklis su priežastimi
 //    (*_skips, gap_left, commit_errors). Lap'as — atšaukimas + spraga pagal politiką (lapped++).
 #include "engine/engine.hpp"
@@ -77,6 +84,7 @@ struct TickEngine::Impl {
         std::int64_t next_attach = INT64_MIN, next_alive = INT64_MIN;  // monotoninis laikas
         bool done = false, ok = false;  // einamojo vieneto indekso būsena
         std::int64_t ready_at = 0;
+        Index observe = kNoIndex;  // vienetas buvo Blocked dėl kito įėjimo — šio grain'as patikrinamas kitame tick'e
     };
     struct Out {
         OutputPort* port;
@@ -99,6 +107,7 @@ struct TickEngine::Impl {
         std::uint32_t unresolved = 0, joiners = 0;
         std::uint8_t calls = 0;
         std::int64_t held = 0;
+        std::int64_t b_hold = INT64_MAX;  // B paleidimo riba, kai jau yra paruoštų Straggler'ių (min(b, t_r + Wr))
     };
 
     Impl(const EngineConfig& c, Clock& k, StatsHub& h, const std::atomic<bool>& s)
@@ -139,10 +148,11 @@ struct TickEngine::Impl {
     Index jidx(const Unit& u, const In& in) const {
         return static_cast<Index>(static_cast<std::int64_t>(u.cur) + in.spec.timing.index_offset);
     }
-    // Wanted įėjimas su miss_run ≥ 1 — pakibęs: jo nelaukiama (vienetas tęsia be jo).
-    static bool hung_wanted(const In& in) { return in.spec.need == Need::Wanted && in.st.miss_run() >= 1; }
-    bool waitable(const In& in) const {
-        return !in.done && in.spec.need != Need::Optional && in.st.live() && !hung_wanted(in);
+    // Wanted įėjimo laukiama tik iki A paleidimo (≤ a(c)); po to vienetas tęsia be jo.
+    bool wanted_expired(const Unit& u) const { return recs[u.cur & 1].a_done; }
+    bool waitable(const Unit& u, const In& in) const {
+        return !in.done && in.spec.need != Need::Optional && in.st.live() &&
+               !(in.spec.need == Need::Wanted && wanted_expired(u));
     }
 
     void end_fatal(EndReason r, int code, std::string why) {
@@ -157,7 +167,7 @@ struct TickEngine::Impl {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             const In& in = ins[u.in0 + k];
             if (in.ok || in.spec.need == Need::Optional) continue;
-            if (in.spec.need == Need::Wanted && (in.done || final_cut || hung_wanted(in))) continue;
+            if (in.spec.need == Need::Wanted && (in.done || final_cut || wanted_expired(u))) continue;
             return false;
         }
         return true;
@@ -176,7 +186,19 @@ struct TickEngine::Impl {
         const Rec& r = rec(u.cur);
         if (!r.a_done) return r.cuts.a;
         if (u.stage == Stage::WaitC) return c_deadline(r);
-        return r.cuts.has_b ? r.cuts.b : r.cuts.a;
+        return r.cuts.has_b ? std::min(r.cuts.b, r.b_hold) : r.cuts.a;
+    }
+
+    // Laukiamas vieneto paruošimo laikas: vėliausias T(j) + ewma tarp neparuoštų būtinų įėjimų; INT64_MIN — nežinoma.
+    std::int64_t expected(const Unit& u) const {
+        std::int64_t e = INT64_MIN;
+        for (std::uint32_t k = 0; k < u.nin; ++k) {
+            const In& in = ins[u.in0 + k];
+            if (in.ok || in.done || in.spec.need != Need::Required) continue;
+            if (!in.ewma_set) return INT64_MIN;
+            e = std::max(e, T(jidx(u, in)) + in.ewma);
+        }
+        return e;
     }
 
     // --- įėjimų skaitymas ------------------------------------------------------------------------------------------
@@ -324,7 +346,11 @@ struct TickEngine::Impl {
             if (in.spec.need == Need::Required && !in.ever) startup = true;
         }
         gap_outputs(u, c, startup, false);
-        ++hub.unit(u.hub).gaps;
+        UnitCounters& uc = hub.unit(u.hub);
+        ++(startup ? uc.startup : uc.gaps);  // paleidimo spragos — ne praradimas
+        if (why == Outcome::GapBlocked)  // gyvi broliai — stebimi kitame tick'e (skaitikliai ir būsena, ne turinys)
+            for (std::uint32_t k = 0; k < u.nin; ++k)
+                if (ins[u.in0 + k].st.live() && ins[u.in0 + k].spec.need != Need::Optional) ins[u.in0 + k].observe = jidx(u, ins[u.in0 + k]);
         if (why == Outcome::GapClock) ++hub.engine().step_gaps;
         const UnitTick ut{uid(u), c, phase, {}, {}};
         ctx_index = c;
@@ -360,7 +386,7 @@ struct TickEngine::Impl {
                 else in.done = true;  // Wanted / Optional be rašytojo — tęsiama be jo
                 continue;
             }
-            if (in.st.late() && in.spec.need != Need::Optional && !hung_wanted(in)) on_time = false;
+            if (in.st.late() && in.spec.need == Need::Required) on_time = false;  // klasę lemia tik Required
         }
         if (u.nin == 0) {
             if (u.no_content) return gap_unit(u, Outcome::GapNoContent, 0);
@@ -372,7 +398,7 @@ struct TickEngine::Impl {
             u.stage = on_time ? Stage::WaitA : Stage::WaitB;
         } else if (r.cuts.has_b && !r.b_done && n < r.cuts.b && fresh(u)) {
             u.stage = Stage::WaitB;  // prisijungė po pernešimo (T2)
-        } else if (r.cuts.has_b && !r.c_done && n < c_deadline(r)) {
+        } else if (!r.c_done && n < c_deadline(r)) {  // legacy (be B) — iki tos pačios vienintelės ribos
             u.stage = Stage::WaitC;
         } else {
             ++hub.engine().carry_overrun;  // T2: c ribos jau praėjo
@@ -463,6 +489,7 @@ struct TickEngine::Impl {
                 ++uc.lapped;
                 oc = Outcome::Lapped;
             } else {
+                bool all_ok = true;
                 for (std::uint32_t m = 0; m < u.nout; ++m) {
                     Out& o = outs[u.out0 + m];
                     OutCounters& c = hub.out(o.hub);
@@ -471,10 +498,16 @@ struct TickEngine::Impl {
                         o.gs.on_content(idx, T(idx));
                         hub.out_commit(o.hub).add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, done_at - T(idx))));
                     } else {
-                        ++c.commit_errors;
+                        ++c.commit_errors;  // praradimas (any_loss); indeksas lieka su priežastimi
+                        all_ok = false;
                     }
                 }
-                ++(phase == 0 ? uc.ok : uc.late);
+                if (all_ok) {
+                    ++(phase == 0 ? uc.ok : uc.late);
+                } else {
+                    ++uc.gaps;
+                    oc = Outcome::Skipped;
+                }
             }
             fn->end_unit(ut, oc, ctx);
             resolve_unit(u);
@@ -506,7 +539,7 @@ struct TickEngine::Impl {
         bool dead = false;
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             In& in = ins[u.in0 + k];
-            if (in.ok || in.done || !in.st.live() || in.spec.need == Need::Optional || hung_wanted(in)) continue;
+            if (in.ok || in.done || !in.st.live() || in.spec.need == Need::Optional) continue;
             const bool alive = in.spec.port->writer_alive();
             in.st.on_unready_at_a(alive, hub.in(in.hub));
             if (!alive) {
@@ -548,30 +581,47 @@ struct TickEngine::Impl {
             if (final_cut) finalize_miss(u, 0);
             else u.stage = fresh(u) ? Stage::WaitB : Stage::WaitC;
         }
+        if (final_cut) r.b_done = true;  // be B: prisijungę po A — C fazėje (iki tos pačios ribos)
     }
 
     void fire_b(Rec& r) {
         if (!r.a_done || !r.cuts.has_b || r.b_done || ended) return;
-        bool any = false, all = true;
+        bool any = false, pending = false;
+        std::int64_t t_r = INT64_MAX;  // anksčiausiai paruošto Straggler'io paruošimo laikas
         for_rec(r, [&](const Unit& u) {
             if (u.stage != Stage::WaitB) return;
             any = true;
-            if (!ready(u, false)) all = false;
+            if (ready(u, false)) t_r = std::min(t_r, u.ready_at);
+            else pending = true;
         });
         if (!any) {  // šviežių nėra — B tuščia; pakibę / pernešti (WaitC) tvarkomi C
             r.b_done = true;
             return;
         }
-        const bool at_cut = now() >= r.cuts.b;
-        if (!all && !at_cut) return;
+        const std::int64_t n = now();
+        const bool at_cut = n >= r.cuts.b;
+        bool go = at_cut || !pending;
+        if (!go && t_r != INT64_MAX) {
+            r.b_hold = std::min(r.cuts.b, t_r + cfg.cuts.ready_wait_ns);
+            bool wait = false;
+            for_rec(r, [&](const Unit& u) {
+                if (u.stage == Stage::WaitB && !ready(u, false) && expected(u) <= r.b_hold) wait = true;
+            });
+            go = !wait || n >= r.b_hold;
+        }
+        if (!go) return;
         r.b_done = true;
         const bool final_b = at_cut && !r.cuts.has_c;
         launch(r, 1, [&](const Unit& u) { return ready(u, final_b); });
-        if (!at_cut) return;
         for (Unit& u : units) {
             if (u.stage == Stage::None || u.cur != r.idx) continue;
-            if (r.cuts.has_c && u.stage == Stage::WaitB) u.stage = Stage::WaitC;  // T8: pernešimas
-            else if (!r.cuts.has_c) finalize_miss(u, 1);
+            if (!at_cut) {  // B paleista anksčiau — nesulaukti iki savo ribos C fazėje (has_c ? c : b)
+                if (u.stage == Stage::WaitB) u.stage = Stage::WaitC;
+            } else if (r.cuts.has_c) {
+                if (u.stage == Stage::WaitB) u.stage = Stage::WaitC;  // T8: pernešimas
+            } else {
+                finalize_miss(u, 1);
+            }
         }
     }
 
@@ -585,7 +635,7 @@ struct TickEngine::Impl {
         });
         if (!any) return;
         const bool at_cut = now() >= c_deadline(r);
-        if (!all && !at_cut) return;
+        if (!at_cut && (!all || r.joiners > 0)) return;  // laukiama ir prisijungsiančių (jų indeksas neprarandamas)
         r.c_done = true;
         launch(r, 2, [&](const Unit& u) { return u.stage == Stage::WaitC && ready(u, at_cut); });
         if (!at_cut) return;
@@ -662,12 +712,15 @@ struct TickEngine::Impl {
                 else if (u.cur != seen) multi = true;
             }
             const std::int64_t pivot = choose_pivot();
-            if (ev <= n) ev = n + 1;  // apsauga nuo sukimosi (neturėtų įvykti)
+            if (ev <= n) {  // saugiklis: nėra būsimo įvykio — miegama 100 µs, ne sukamasi (skaičiuojama; neturėtų įvykti)
+                ++hub.engine().spin_guard;
+                ev = n + 100'000;
+            }
             if (pivot >= 0 && cfg.wait == WaitMode::Pivot) {
                 In& in = ins[static_cast<std::size_t>(pivot)];
                 Unit& u = units[in.unit];
                 std::int64_t to = ev - n;
-                if (multi) to = std::min(to, kSliceNs);
+                if (multi || pivot_slice) to = std::min(to, kSliceNs);
                 GrainRef g;
                 const Probe p = in.spec.port->wait(jidx(u, in), static_cast<std::uint64_t>(to), g);
                 if (stop.load(std::memory_order_relaxed)) return;  // T13 — prieš bet kokį sprendimą
@@ -682,9 +735,11 @@ struct TickEngine::Impl {
             if (cfg.wait == WaitMode::Poll && pivot >= 0) t = std::min(t, n + kPollNs);
             if (open_idx != kNoIndex && t == until && cfg.open_wait) {
                 // Tick'o atidarymas — tik per kabliuką (bibliotekos PacingHooks::wait)
-                if (!cfg.open_wait(open_idx, cfg.cuts.expect_ns + cfg.cuts.read_offset_ns, stop) &&
-                    !stop.load(std::memory_order_relaxed) && now() < until)
+                cfg.open_wait(open_idx, cfg.cuts.expect_ns + cfg.cuts.read_offset_ns, stop);
+                if (!stop.load(std::memory_order_relaxed) && now() < until) {  // kabliukas grįžo per anksti — sutarties pažeidimas
+                    ++hub.engine().open_wait_early;
                     clk.sleep_until(static_cast<std::uint64_t>(until), stop);
+                }
             } else {
                 clk.sleep_until(static_cast<std::uint64_t>(t), stop);
             }
@@ -697,10 +752,11 @@ struct TickEngine::Impl {
     // (lygybė — didžiausias įėjimo numeris). Jei A aibės nėra — anksčiausios ribos grupė.
     std::int64_t choose_pivot() {
         std::int64_t pivot = -1;
+        pivot_slice = false;
         auto consider = [&](const Unit& u) {
             for (std::uint32_t k = 0; k < u.nin; ++k) {
                 const auto gk = static_cast<std::int64_t>(u.in0 + k);
-                if (!waitable(ins[static_cast<std::size_t>(gk)])) continue;
+                if (!waitable(u, ins[static_cast<std::size_t>(gk)])) continue;
                 if (pivot < 0 || ins[static_cast<std::size_t>(gk)].ewma >= ins[static_cast<std::size_t>(pivot)].ewma)
                     pivot = gk;
             }
@@ -720,13 +776,33 @@ struct TickEngine::Impl {
         for (Unit& u : units) {
             if (u.stage == Stage::None) continue;
             bool w = false;
-            for (std::uint32_t k = 0; k < u.nin; ++k) w = w || waitable(ins[u.in0 + k]);
+            for (std::uint32_t k = 0; k < u.nin; ++k) w = w || waitable(u, ins[u.in0 + k]);
             if (w) best = std::min(best, deadline(u));
         }
+        // B grupė: ašis — anksčiausiai laukiamas įėjimas (pirmas paruoštas Straggler'is paleidžia Wr laikmatį); kai
+        // laukiamų daugiau nei vienas — laukiama 1 ms gabalais, kad kitų atvykimas būtų pastebėtas laiku.
+        std::uint32_t n_b = 0;
+        std::int64_t best_exp = INT64_MAX;
+        for (Unit& u : units) {
+            if (u.stage != Stage::WaitB || deadline(u) != best) continue;
+            for (std::uint32_t k = 0; k < u.nin; ++k) {
+                const In& in = ins[u.in0 + k];
+                if (!waitable(u, in)) continue;
+                ++n_b;
+                const std::int64_t e = in.ewma_set ? T(jidx(u, in)) + in.ewma : INT64_MIN;
+                if (pivot < 0 || e <= best_exp) {
+                    best_exp = e;
+                    pivot = static_cast<std::int64_t>(u.in0 + k);
+                }
+            }
+        }
+        pivot_slice = n_b > 1;
+        if (pivot >= 0) return pivot;
         for (Unit& u : units)
             if (u.stage != Stage::None && deadline(u) == best) consider(u);
         return pivot;
     }
+    bool pivot_slice = false;
 
     // --- tick'o atidarymas ----------------------------------------------------------------------------------------
     void maintain_inputs() {
@@ -745,6 +821,20 @@ struct TickEngine::Impl {
                 }
                 in.st.on_attach(c);
                 in.ever = true;
+            } else if (s == InState::Live && in.observe != kNoIndex) {
+                // Vienetas buvo Blocked dėl kito įėjimo: šio (gyvo) grain'as tik suskaičiuojamas (ok / late / invalid)
+                const Index j = in.observe;
+                in.observe = kNoIndex;
+                GrainRef g;
+                const Probe p = in.spec.port->probe(j, g);
+                if (p == Probe::Ready) {
+                    const Index h = in.spec.port->head();
+                    const auto lw = static_cast<std::int64_t>(in.spec.port->last_write_tai());
+                    const std::int64_t ready_at = (h == j && lw > 0) ? lw : T(j);  // h > j — atėjo anksčiau už head'ą
+                    in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a);
+                } else if (p == Probe::Invalid) {
+                    in.st.on_invalid_grain(c);
+                }
             } else if (s == InState::Stalled) {
                 const Index h = in.spec.port->head();
                 if (in.st.on_stalled_head(h)) continue;  // T10
@@ -827,6 +917,7 @@ struct TickEngine::Impl {
         for (Unit& u : units) {
             if (u.failed) continue;
             const std::uint64_t n = count_in(from, to, u.stride, u.residue);
+            if (n) fn->on_skip(uid(u), from, to, ctx);
             UnitCounters& uc = hub.unit(u.hub);
             (step_in_tick ? uc.clock_skips : warm ? uc.warmup_skips : uc.late_skips) += n;
             for (std::uint32_t m = 0; m < u.nout; ++m) {
@@ -852,6 +943,10 @@ struct TickEngine::Impl {
 
     RunResult run(TickFunction& f) {
         fn = &f;
+        if (cfg.cuts.rate.num <= 0 || cfg.cuts.rate.den <= 0) {  // dažnis 0 — ribų nėra (kitaip ciklas be galo)
+            end_fatal(EndReason::Fatal, 1, "netinkamas grain'ų dažnis");
+            return res;
+        }
         hub.prepare();
         batch.reserve(units.size());
         sd.check(clk);
@@ -956,6 +1051,10 @@ TickEngine::~TickEngine() = default;
 
 bool TickEngine::add_unit(const UnitSpec& s, std::uint32_t& unit, std::string& why) {
     Impl& d = *d_;
+    if (d.cfg.cuts.rate.num <= 0 || d.cfg.cuts.rate.den <= 0) {
+        why = "netinkamas grain'ų dažnis";
+        return false;
+    }
     if (d.cfg.admit && !d.cfg.admit(s, why)) return false;
     if (s.stride == 0 || s.residue >= s.stride) {
         why = "stride / residue";

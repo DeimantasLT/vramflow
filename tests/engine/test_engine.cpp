@@ -282,7 +282,8 @@ TEST_CASE("engine: šaltinis be turinio → spraga atidarymo metu", "[engine][lo
         if (i % 2 == 1) ctx.no_content(id);
         if (i >= 2005) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
+    check_run(fn, res, id, &out);
     for (Index i = 2000; i <= 2005; ++i) {
         INFO("i = " << i);
         const auto* e = out.find(i);

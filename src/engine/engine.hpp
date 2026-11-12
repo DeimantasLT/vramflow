@@ -88,6 +88,8 @@ public:
     // Kai visi šio indekso vienetai išspręsti, įskaitant prisijungusius po pernešimo (tada — po kito begin_tick).
     virtual void end_tick(Index, TickContext&) {}
     virtual void on_clock_step(std::int64_t, TickContext&) {}
+    // Variklio praleisti indeksai [from, to) vienetui (T11; nepildomi — K-T6). Neperduodami tik stride nedalyvaujantys.
+    virtual void on_skip(std::uint32_t /*unit*/, Index /*from*/, Index /*to*/, TickContext&) {}
     virtual void finish(TickContext&) {}  // sustabdant: eilių išleidimas
 };
 

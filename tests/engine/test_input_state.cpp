@@ -49,10 +49,20 @@ TEST_CASE("input_state: Waiting / Detached → Mismatch", "[engine][input_state]
     CHECK(d.state() == InState::Mismatch);
 }
 
-TEST_CASE("input_state: Live paruoštas iki a(i) → ok++; Late nuimama po 8 iš eilės", "[engine][input_state]") {
+TEST_CASE("input_state: naujai prijungtas — Late nuimama po pirmo laiku atėjusio", "[engine][input_state]") {
     InputState s(3, 8);
     InCounters c{};
     s.on_attach(c);
+    REQUIRE(s.late());
+    s.on_ready(c, true);
+    CHECK_FALSE(s.late());  // bandomasis laikotarpis — vienas grain'as
+    CHECK(c.ok == 1);
+}
+
+TEST_CASE("input_state: po vėlavimo Late nuimama po 8 laiku iš eilės", "[engine][input_state]") {
+    InputState s = live();
+    InCounters c{};
+    s.on_unready_at_a(true, c);
     REQUIRE(s.late());
     for (int k = 0; k < 7; ++k) s.on_ready(c, true);
     CHECK(s.late());  // 7 — dar ne

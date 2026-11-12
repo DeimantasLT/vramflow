@@ -36,6 +36,9 @@ struct EngineCounters {
     std::uint64_t ticks = 0, process_calls = 0, guard_overrun = 0, carry_overrun = 0;
     std::uint64_t clock_steps = 0, clock_backward = 0, step_gaps = 0;
     std::uint64_t held_ns_max = 0;  // kiek ilgiausiai paruoštus vienetus laikė neparuošti (A fazė); maksimumas
+    // Saugikliai (sutarties pažeidimai, niekada neturėtų didėti): open_wait grįžo true prieš t_open; laukimo ciklas be
+    // būsimo įvykio (ev ≤ dabar) — miegama 100 µs, ne sukamasi.
+    std::uint64_t open_wait_early = 0, spin_guard = 0;
 };
 
 // 64 kibirų log-histograma (¼ oktavos, nuo 1 µs iki ~65 ms), 256 B. Vėlavimams p50 / p99.

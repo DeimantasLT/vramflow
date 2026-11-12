@@ -245,11 +245,11 @@ TEST_CASE("engine: open_wait — vienintelis būdas laukti tick'o atidarymo", "[
     fn.on_begin_tick = [&](Index i, TickContext&) {
         if (i >= 2020) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
     CHECK(hooked.size() == 21);
     for (std::size_t n = 0; n < hooked.size(); ++n) CHECK(hooked[n] == 2000 + n);
     CHECK(clk.sleeps == 0);
-    out.check_accounted(hub.out(eng.out_id(id, 0)));
+    check_run(fn, res, id, &out);
 }
 
 // --- 5. Skaitikliai ---------------------------------------------------------------------------------------------
@@ -280,7 +280,7 @@ TEST_CASE("engine: daugiaįėjimis vienetas — laiku atėjęs bazės įėjimas 
     fn.on_end_tick = [&](Index i, TickContext&) {
         if (i >= 1052) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
     const InCounters& b = hub.in(eng.in_id(u0, 0));
     const InCounters& l = hub.in(eng.in_id(u0, 1));
     CHECK(b.ok == 53);
@@ -291,8 +291,8 @@ TEST_CASE("engine: daugiaįėjimis vienetas — laiku atėjęs bazės įėjimas 
     CHECK(rel(o1.find(1010), 1010) == 5'500'000);  // vienkartinis Wr: sluoksnis tada dar buvo Quorum
     for (Index i = 1011; i <= 1052; ++i) CHECK(rel(o1.find(i), i) == 1'200'000);
     for (Index i = 1010; i <= 1052; ++i) CHECK(rel(o0.find(i), i) == 8'000'000);
-    o0.check_accounted(hub.out(eng.out_id(u0, 0)));
-    o1.check_accounted(hub.out(eng.out_id(u1, 0)));
+    check_run(fn, res, u0, &o0);
+    check_run(fn, res, u1, &o1);
 }
 
 TEST_CASE("engine: K = 2…4 įėjimai vienam išėjimui", "[engine][multi]") {
@@ -325,7 +325,7 @@ TEST_CASE("engine: K = 2…4 įėjimai vienam išėjimui", "[engine][multi]") {
         fn.on_end_tick = [&](Index i, TickContext&) {
             if (i >= 1020) stop = true;
         };
-        eng.run(fn);
+        const RunResult res = eng.run(fn);
         for (std::size_t n : nin) CHECK(n == kK);
         const std::int64_t last = std::int64_t{1'000'000} + 100'000 * (kK - 1);
         CHECK(rel(o.find(1014), 1014) == last);  // paskutinis įėjimas nulemia paleidimą
@@ -336,7 +336,7 @@ TEST_CASE("engine: K = 2…4 įėjimai vienam išėjimui", "[engine][multi]") {
         CHECK(hub.in(eng.in_id(u, 1)).lost == 1);
         for (std::uint32_t k = 0; k < kK; ++k)
             if (k != 1) CHECK(hub.in(eng.in_id(u, k)).lost == 0);
-        o.check_accounted(hub.out(eng.out_id(u, 0)));
+        check_run(fn, res, u, &o);
     }
 }
 
@@ -428,6 +428,7 @@ TEST_CASE("engine: sink'o praleidimai suskaičiuoti, any_loss", "[engine][accoun
     std::uint64_t processed = 0;
     for (const auto& e : fn.ends) processed += e.outcome == Outcome::Ready;
     CHECK(processed + hub.unit(eng.unit_id(u)).late_skips == res.last_index - res.first_index + 1);
+    check_run(fn, res, u, nullptr);
 }
 
 // --- 7. Smulkūs ------------------------------------------------------------------------------------------------------
@@ -509,7 +510,7 @@ TEST_CASE("engine: pakibęs Straggler laiko paruoštą ne ilgiau kaip vieną tic
     r.build();
     r.run();
     CHECK(rel(r.outs[0]->find(kI), kI) == 5'500'000);
-    CHECK(rel(r.outs[2]->find(kI), kI) == 15'000'000);  // pirmą kartą abu šviežūs — B riba
+    CHECK(rel(r.outs[2]->find(kI), kI) == 13'000'000);  // abu švieži: paruoštas (8 ms) laikomas ≤ Wr → 8 + 5
     for (Index i = kI + 1; i <= kI + 5; ++i) {
         INFO("i = " << i);
         CHECK(rel(r.outs[0]->find(i), i) == 1'200'000);
@@ -558,20 +559,24 @@ TEST_CASE("engine: enc forma — video grains 2, stride 2, garsas Wanted pakimba
     fn.on_end_tick = [&](Index i, TickContext&) {
         if (i >= 1041) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
+    check_run(fn, res, u, nullptr, 2, 1);
     for (const auto& [i, f] : frames) CHECK(i % 2 == 1);  // tik apatinis laukas
     REQUIRE(frames.count(1029) == 1);
     CHECK(frames[1029].at == 1'300'000);  // garsas — paskutinis
     CHECK(frames[1029].a);
-    REQUIRE(frames.count(1031) == 1);
-    CHECK(frames[1031].phase == 1);
-    CHECK(frames[1031].at == 15'000'000);  // pirmą kartą garso laukiama iki B, tada be jo
-    CHECK_FALSE(frames[1031].a);
-    for (Index i = 1033; i <= 1041; i += 2) {
+    for (Index i = 1031; i <= 1035; i += 2) {  // Wanted laukiama tik iki a(i); trys praleidimai iš eilės → Stalled
         INFO("i = " << i);
         REQUIRE(frames.count(i) == 1);
         CHECK(frames[i].phase == 0);
-        CHECK(frames[i].at == 1'200'000);  // pakibusio Wanted nebelaukiama
+        CHECK(frames[i].at == 5'500'000);
+        CHECK_FALSE(frames[i].a);
+    }
+    for (Index i = 1037; i <= 1041; i += 2) {
+        INFO("i = " << i);
+        REQUIRE(frames.count(i) == 1);
+        CHECK(frames[i].phase == 0);
+        CHECK(frames[i].at == 1'200'000);  // Stalled Wanted nebelaukiama
         CHECK(frames[i].v0);
         CHECK(frames[i].v1);
         CHECK_FALSE(frames[i].a);
@@ -605,13 +610,13 @@ TEST_CASE("engine: Optional įėjimo nelaukiama", "[engine][wanted]") {
     fn.on_end_tick = [&](Index i, TickContext&) {
         if (i >= 1030) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
     for (Index i = 1010; i <= 1030; ++i) {
         INFO("i = " << i);
         CHECK(rel(o.find(i), i) == 1'200'000);
         CHECK(has_opt[i] == (i % 3 != 0));
     }
-    o.check_accounted(hub.out(eng.out_id(u, 0)));
+    check_run(fn, res, u, &o);
 }
 
 TEST_CASE("engine: stride 2 išėjimas — tik lyginiai indeksai, apskaita", "[engine][stride]") {
@@ -635,11 +640,11 @@ TEST_CASE("engine: stride 2 išėjimas — tik lyginiai indeksai, apskaita", "[e
         if (i == 1011) clk.oversleep_once(45'000'000);  // praleidžiami 1012, 1013 → vienetui tik 1012
         if (i >= 1030) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
     for (const auto& e : o.events) CHECK(e.index % 2 == 0);
     CHECK(o.find(1012) == nullptr);
     CHECK(hub.out(eng.out_id(u, 0)).late_skips == 1);
-    o.check_accounted(hub.out(eng.out_id(u, 0)), 2, 0);
+    check_run(fn, res, u, &o, 2, 0);
 }
 
 TEST_CASE("engine: interlaced freeze per variklį — kartojimas ir grįžimas kadro riba", "[engine][freeze]") {
@@ -663,7 +668,7 @@ TEST_CASE("engine: interlaced freeze per variklį — kartojimas ir grįžimas k
     fn.on_end_tick = [&](Index i, TickContext&) {
         if (i >= 1016) stop = true;
     };
-    eng.run(fn);
+    const RunResult res = eng.run(fn);
     const auto* g0 = out.find(1010);
     REQUIRE(g0 != nullptr);
     CHECK(g0->kind == Kind::Gap);
@@ -680,7 +685,7 @@ TEST_CASE("engine: interlaced freeze per variklį — kartojimas ir grįžimas k
     CHECK(c2->kind == Kind::Commit);
     CHECK(hub.out(eng.out_id(u, 0)).gap_frozen == 2);
     CHECK(out.flushes >= 2);
-    out.check_accounted(hub.out(eng.out_id(u, 0)));
+    check_run(fn, res, u, &out);
 }
 
 TEST_CASE("engine: ašies lygybė — pakibęs Late įėjimas su didžiausiu numeriu nelaiko A", "[engine][pivot]") {

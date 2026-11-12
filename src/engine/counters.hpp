@@ -21,8 +21,9 @@ struct OutCounters {
 
 // Vienetui (ir sink'ui, kuris išėjimų neturi): kiekvienas dalyvaujantis indeksas baigiasi lygiai vienu iš
 // ok / late / gaps / lapped / *_skips.
+// startup — spragos, kol būtinas įėjimas dar niekada nebuvo prijungtas (ne praradimas).
 struct UnitCounters {
-    std::uint64_t ok = 0, late = 0, gaps = 0, lapped = 0, late_skips = 0, clock_skips = 0, warmup_skips = 0;
+    std::uint64_t ok = 0, late = 0, gaps = 0, startup = 0, lapped = 0, late_skips = 0, clock_skips = 0, warmup_skips = 0;
 };
 
 }  // namespace mxlv::engine

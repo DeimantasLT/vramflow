@@ -14,7 +14,8 @@ namespace mxlv::engine {
 enum class InState : std::uint8_t { Disabled, Waiting, Live, Stalled, Detached, Mismatch };
 
 // „Laiku“ — įėjimo grain'as paruoštas ne vėliau kaip A riba a(i) = T(i) + Φ + Wr (nesvarbu, kada A iš tikrųjų
-// paleista). Late žymė nuimama tik po late_clear_run laiku atėjusių grain'ų iš eilės (histerezė prieš „plazdėjimą“).
+// paleista). Late žymė nuimama po late_clear_run laiku atėjusių grain'ų iš eilės (histerezė prieš „plazdėjimą“); naujai
+// prijungtam (Waiting / Detached → Live) — po pirmo laiku atėjusio (bandomasis laikotarpis, ne bausmė už vėlavimą).
 class InputState {
 public:
     explicit InputState(std::uint32_t stall_after = 3, std::uint32_t late_clear_run = 8)
@@ -31,6 +32,7 @@ public:
         if (st_ == InState::Detached) ++c.reattached;
         st_ = InState::Live;
         set_late();
+        need_ = 1;
         miss_ = 0;
         head_ = kNoIndex;
     }
@@ -46,7 +48,7 @@ public:
             return;
         }
         ++c.ok;
-        if (late_ && ++ontime_ >= clear_) {
+        if (late_ && ++ontime_ >= need_) {
             late_ = false;
             ontime_ = 0;
         }
@@ -115,6 +117,7 @@ private:
     void set_late() {
         late_ = m_ != 0;
         ontime_ = 0;
+        need_ = clear_;
     }
     void detach(InCounters& c) {
         st_ = InState::Detached;
@@ -123,7 +126,7 @@ private:
         ++c.detaches;
     }
 
-    std::uint32_t m_, clear_;
+    std::uint32_t m_, clear_, need_ = 1;
     InState st_ = InState::Waiting;
     bool late_ = false;
     std::uint32_t miss_ = 0, ontime_ = 0;
