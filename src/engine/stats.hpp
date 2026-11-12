@@ -116,6 +116,8 @@ public:
     const OutCounters& out(std::uint32_t id) const { return out_[id]; }
     EngineCounters& engine() { return eng_; }
     const EngineCounters& engine() const { return eng_; }
+    UnitCounters& unit(std::uint32_t id) { return unit_[id]; }
+    const UnitCounters& unit(std::uint32_t id) const { return unit_[id]; }
     Hist64& in_arrival(std::uint32_t id) { return in_hist_[id]; }
     Hist64& out_commit(std::uint32_t id) { return out_hist_[id]; }
 
@@ -144,6 +146,7 @@ private:
     std::vector<std::string> counter_names_, hist_names_, unit_names_, in_names_, out_names_;
     std::vector<InCounters> in_, in_prev_;
     std::vector<OutCounters> out_, out_prev_;
+    std::vector<UnitCounters> unit_;
     std::vector<std::uint64_t> fn_, fn_prev_;
     std::vector<Hist64> in_hist_, out_hist_, hist_;
     std::vector<InState> in_state_;

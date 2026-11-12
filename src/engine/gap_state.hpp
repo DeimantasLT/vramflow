@@ -39,6 +39,8 @@ private:
     std::int64_t t_good_ = 0;
     Index last_[2] = {kNoIndex, kNoIndex};  // paskutinis galiojantis (turinys ar kopija) pagal paritetą
     Index last_any_ = kNoIndex;
+    Index last_gap_ = kNoIndex;  // paskutinė spraga ir jos veiksmas (kadro ribos taisyklei)
+    GapAction last_act_ = GapAction::None;
 };
 
 }  // namespace mxlv::engine

@@ -103,6 +103,7 @@ HistId StatsHub::register_hist(std::string name) {
 
 std::uint32_t StatsHub::add_unit(std::string name) {
     unit_names_.push_back(std::move(name));
+    unit_.emplace_back();
     return static_cast<std::uint32_t>(unit_names_.size() - 1);
 }
 

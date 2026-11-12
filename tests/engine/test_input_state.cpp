@@ -8,11 +8,11 @@
 using namespace mxlv::engine;
 
 namespace {
-InputState live(std::uint32_t m = 3) {  // prijungtas ir jau įrodęs, kad ateina laiku
-    InputState s(m);
+InputState live(std::uint32_t m = 3) {  // prijungtas ir jau įrodęs, kad ateina laiku (8 iš eilės)
+    InputState s(m, 8);
     InCounters c{};
     s.on_attach(c);
-    s.on_ready_at_a(c);
+    for (int k = 0; k < 8; ++k) s.on_ready(c, true);
     return s;
 }
 }  // namespace
@@ -49,16 +49,34 @@ TEST_CASE("input_state: Waiting / Detached → Mismatch", "[engine][input_state]
     CHECK(d.state() == InState::Mismatch);
 }
 
-TEST_CASE("input_state: Live paruoštas ties A → be Late, ok++", "[engine][input_state]") {
-    InputState s(3);
+TEST_CASE("input_state: Live paruoštas iki a(i) → ok++; Late nuimama po 8 iš eilės", "[engine][input_state]") {
+    InputState s(3, 8);
     InCounters c{};
     s.on_attach(c);
     REQUIRE(s.late());
-    s.on_ready_at_a(c);
+    for (int k = 0; k < 7; ++k) s.on_ready(c, true);
+    CHECK(s.late());  // 7 — dar ne
+    CHECK(s.on_time_run() == 7);
+    s.on_ready(c, true);
     CHECK(s.state() == InState::Live);
     CHECK_FALSE(s.late());
     CHECK(s.miss_run() == 0);
-    CHECK(c.ok == 1);
+    CHECK(c.ok == 8);
+    CHECK(c.late == 0);
+}
+
+TEST_CASE("input_state: plazdėjimas — vienas vėlus grain'as nuline seriją", "[engine][input_state]") {
+    InputState s(3, 8);
+    InCounters c{};
+    s.on_attach(c);
+    for (int k = 0; k < 50; ++k) s.on_ready(c, k % 2 == 0);  // laiku / vėlai pakaitomis
+    CHECK(s.late());
+    CHECK(c.ok == 25);
+    CHECK(c.late == 25);
+    InputState q = live();
+    q.on_ready(c, false);  // vienas vėlus — vėl Late
+    CHECK(q.late());
+    CHECK(q.on_time_run() == 0);
 }
 
 TEST_CASE("input_state: Live neparuoštas ties A, rašytojas negyvas → Detached", "[engine][input_state]") {
@@ -80,13 +98,13 @@ TEST_CASE("input_state: Live neparuoštas ties A, rašytojas gyvas → Live + La
     CHECK(c.detaches == 0);
 }
 
-TEST_CASE("input_state: Live + Late paruoštas iki paskutinės ribos → late++", "[engine][input_state]") {
+TEST_CASE("input_state: Live + Late paruoštas po a(i), iki paskutinės ribos → late++", "[engine][input_state]") {
     InputState s = live();
     InCounters c{};
     s.on_unready_at_a(true, c);
     s.on_missed(c);
     REQUIRE(s.miss_run() == 1);
-    s.on_ready_late(c);
+    s.on_ready(c, false);
     CHECK(s.state() == InState::Live);
     CHECK(s.late());
     CHECK(s.miss_run() == 0);
@@ -112,7 +130,7 @@ TEST_CASE("input_state: du praleidimai + vienas sėkmingas → miss_run == 0", "
     s.on_unready_at_a(true, c);
     s.on_missed(c);
     s.on_missed(c);
-    s.on_ready_late(c);
+    s.on_ready(c, false);
     CHECK(s.miss_run() == 0);
     s.on_missed(c);
     s.on_missed(c);
@@ -128,7 +146,7 @@ TEST_CASE("input_state: get → FLOW_INVALID → Detached", "[engine][input_stat
     CHECK(c.detaches == 1);
 }
 
-TEST_CASE("input_state: TOO_LATE ir OK + INVALID → Live, skaitikliai", "[engine][input_state]") {
+TEST_CASE("input_state: TOO_LATE ir OK + INVALID → Live, skaitikliai, miss_run = 0", "[engine][input_state]") {
     InputState s = live();
     InCounters c{};
     s.on_too_late(c);
@@ -136,6 +154,18 @@ TEST_CASE("input_state: TOO_LATE ir OK + INVALID → Live, skaitikliai", "[engin
     CHECK(s.state() == InState::Live);
     CHECK(c.too_late == 1);
     CHECK(c.invalid == 1);
+    // Atėjęs INVALID / TOO_LATE grain'as — rašytojas gamina: ne praleidimas ir nutraukia praleidimų seriją
+    s.on_missed(c);
+    s.on_missed(c);
+    s.on_invalid_grain(c);
+    CHECK(s.miss_run() == 0);
+    CHECK_FALSE(s.on_missed(c));
+    s.on_missed(c);
+    s.on_too_late(c);
+    CHECK(s.miss_run() == 0);
+    CHECK(s.state() == InState::Live);
+    CHECK(c.lost == 4);
+    CHECK(c.stalls == 0);
 }
 
 TEST_CASE("input_state: Stalled, head padidėjo → Live + Late", "[engine][input_state]") {

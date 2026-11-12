@@ -13,7 +13,8 @@ set_target_properties(mxlv_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(MXLV_BUILD_TESTS)
   add_executable(mxlv-engine-unit tests/engine/test_cuts.cpp tests/engine/test_input_state.cpp
                  tests/engine/test_gap_state.cpp tests/engine/test_engine.cpp
-                 tests/engine/test_engine_timing.cpp tests/engine/test_stats.cpp)
+                 tests/engine/test_engine_timing.cpp tests/engine/test_stats.cpp
+                 tests/engine/test_engine_rules.cpp)
   vramflow_warnings(mxlv-engine-unit)
   target_link_libraries(mxlv-engine-unit PRIVATE mxlv_engine mxl::mxl Catch2::Catch2WithMain)
   set_target_properties(mxlv-engine-unit PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")

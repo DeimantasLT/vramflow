@@ -12,8 +12,14 @@ GapAction GapState::decide(Index i, std::int64_t t_index_ns, bool interlaced, st
         case GapPolicy::Black: return GapAction::Black;
         case GapPolicy::Freeze: break;
     }
-    if (!has_good_ || t_index_ns - t_good_ > hold_ns) return GapAction::Black;  // K-T4; hold pasibaigė
+    if (!has_good_) return GapAction::Black;  // K-T4
     const Index src = interlaced ? last_[i & 1] : last_any_;
+    if (t_index_ns - t_good_ > hold_ns) {
+        // hold pasibaigė. Interlaced: perjungiama tik kadro riba — apatinis laukas (nelyginis i) kartojamas, jei
+        // viršutinis (i − 1) dar buvo kartojimas; kitaip kadras būtų sustingęs viršus + juodas apačia.
+        const bool finish_frame = interlaced && (i & 1) == 1 && last_gap_ == i - 1 && last_act_ == GapAction::Repeat;
+        if (!finish_frame) return GapAction::Black;
+    }
     if (src == kNoIndex || src >= i) return GapAction::Black;
     // Šaltinis turi būti dar ring'e su atsarga (planas D4: step ≤ 2 ≤ slotCount − 2)
     if (slot_count < 2 || i - src > slot_count - 2) return GapAction::Black;
@@ -37,6 +43,8 @@ void GapState::on_content(Index i, std::int64_t t_index_ns) {
 
 void GapState::on_gap(Index i, GapAction done) {
     in_gap_ = true;
+    last_gap_ = i;
+    last_act_ = done;
     if (done == GapAction::Repeat || done == GapAction::Black) {
         last_[i & 1] = i;
         last_any_ = i;

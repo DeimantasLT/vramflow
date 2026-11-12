@@ -120,3 +120,25 @@ TEST_CASE("gap_state: may_resume (K-T5)", "[engine][gap]") {
     CHECK(v.may_resume(7, true));
     CHECK(v.may_resume(8, true));
 }
+
+TEST_CASE("gap_state: freeze → black interlaced tik kadro riba", "[engine][gap]") {
+    GapState g;
+    g.policy = GapPolicy::Freeze;
+    g.hold_ns = 1'000'000'000;
+    g.on_content(98, T(98));
+    g.on_content(99, T(99));
+    g.on_content(100, T(100));  // paskutinis tikras — viršutinis 100; nuo 101 nieko
+    Index from = 0;
+    for (Index i = 101; i <= 150; ++i) REQUIRE(gap(g, i, true, 10, from) == GapAction::Repeat);
+    // T(151) − T(100) = 1,02 s > hold, bet 151 — apatinis kadro (150, 151) laukas: kadras baigiamas kartojimu
+    CHECK(gap(g, 151, true, 10, from) == GapAction::Repeat);
+    CHECK(from == 149);
+    CHECK(gap(g, 152, true, 10, from) == GapAction::Black);  // juoda — nuo lyginio
+    CHECK(gap(g, 153, true, 10, from) == GapAction::Black);
+    // Progresyvus — be kadro taisyklės
+    GapState p;
+    p.policy = GapPolicy::Freeze;
+    p.on_content(100, T(100));
+    for (Index i = 101; i <= 150; ++i) REQUIRE(gap(p, i, false, 10, from) == GapAction::Repeat);
+    CHECK(gap(p, 151, false, 10, from) == GapAction::Black);
+}

@@ -3,6 +3,8 @@
 #pragma once
 // Variklio testų pakaitalai (planas §9 V4): ScriptedInput (rašytojas pagal scenarijų virtualiu laiku), RecordingOutput,
 // RecordingFunction. Viskas vienoje gijoje; vektoriai rezervuojami iš anksto (alokacijų testas V6).
+#include <catch2/catch_test_macros.hpp>
+
 #include <algorithm>
 #include <cstdint>
 #include <functional>
@@ -34,6 +36,7 @@ public:
     std::function<bool(Index)> invalid;    // OK + INVALID
     std::function<bool(Index)> lapped_at;  // lap patikra
     std::function<void(Index j, std::uint64_t timeout)> on_wait;
+    std::function<bool(std::uint64_t now)> gone;  // flow atkurtas / ištrintas → probe grąžina Gone
     bool mismatch_flag = false;
     std::uint32_t slots = 10;
 
@@ -66,6 +69,7 @@ public:
     }
     Probe probe(Index j, GrainRef& out) override {
         ++probes;
+        if (gone && gone(clk_.now_tai())) return Probe::Gone;
         const Index h = head();
         if (h == kNoIndex || j > h) return Probe::NotYet;
         if (j + slots < h + 2) return Probe::TooLate;
@@ -182,6 +186,31 @@ public:
         return true;
     }
 
+    // Kiekvienas indeksas tarp pirmo ir paskutinio įrašo baigiasi lygiai vienu commit / spraga, arba yra
+    // suskaičiuotas su priežastimi (praleistas, gap_left, commit_errors). Tyli skylė — testo klaida.
+    // last_resolved — paskutinis vieneto išspręstas indeksas (leave politika paskutinių indeksų neįrašo).
+    void check_accounted(const OutCounters& c, std::uint32_t stride = 1, std::uint32_t residue = 0,
+                         Index last_resolved = kNoIndex) const {
+        Index first = kNoIndex, last = kNoIndex, present = 0, prev = kNoIndex;
+        bool dup = false;
+        for (const Event& e : events) {
+            if (e.kind == Kind::Cancel) continue;
+            if (prev != kNoIndex && e.index <= prev) dup = true;
+            prev = e.index;
+            if (first == kNoIndex) first = e.index;
+            last = e.index;
+            ++present;
+        }
+        CHECK_FALSE(dup);
+        if (first == kNoIndex) return;
+        if (last_resolved != kNoIndex && last_resolved > last) last = last_resolved;
+        Index expected = 0;
+        for (Index i = first; i <= last; ++i) expected += i % stride == residue;
+        const std::uint64_t reasons = c.late_skips + c.clock_skips + c.warmup_skips + c.commit_errors + c.gap_left;
+        INFO("išėjimas: indeksai " << first << "…" << last << ", įrašų " << present << ", su priežastimi " << reasons);
+        CHECK(expected - present == reasons);
+    }
+
 private:
     VirtualClock& clk_;
     bool interlaced_;
@@ -288,7 +317,27 @@ struct Rig {
             if (i >= last) stop = true;
         };
     }
-    RunResult run() { return eng->run(fn); }
+    RunResult run() {
+        ran = true;
+        return eng->run(fn);
+    }
+    // Invariantai kiekviename Rig teste (tikrinami automatiškai sunaikinant).
+    void check_invariants() const {
+        for (std::uint32_t u = 0; u < outs.size(); ++u) {
+            const RecordingOutput& o = *outs[u];
+            CHECK(o.strictly_increasing());
+            CHECK_FALSE(o.open_now);
+            CHECK(o.opens == o.commits + o.cancels);
+            Index lr = kNoIndex;
+            for (const auto& e : fn.ends)
+                if (e.unit == u && (lr == kNoIndex || e.index > lr)) lr = e.index;
+            o.check_accounted(out(u), 1, 0, lr);
+        }
+        CHECK(fn.at_most_three_per_index());
+    }
+    ~Rig() {
+        if (ran) check_invariants();
+    }
     const OutCounters& out(std::uint32_t u) const { return hub.out(eng->out_id(u, 0)); }
     const InCounters& in(std::uint32_t u) const { return hub.in(eng->in_id(u, 0)); }
 
@@ -300,6 +349,7 @@ struct Rig {
     std::vector<std::unique_ptr<ScriptedInput>> ins;
     std::vector<std::unique_ptr<RecordingOutput>> outs;
     std::unique_ptr<TickEngine> eng;
+    bool ran = false;
 };
 
 }  // namespace mxlv::engine::test

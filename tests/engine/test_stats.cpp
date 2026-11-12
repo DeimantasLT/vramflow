@@ -60,6 +60,7 @@ public:
     void publish(const Snapshot&) override {
         std::unique_lock<std::mutex> lk(m);
         ++entered;
+        cv.notify_all();
         cv.wait(lk, [&] { return released; });
     }
     void release() {
@@ -167,21 +168,25 @@ TEST_CASE("stats: tick'as neblokuojamas", "[engine][stats]") {
         const std::uint32_t o = hub.add_output("out0");
         hub.add_unit("u0");
         hub.prepare();
-        std::int64_t worst_ns = 0;
-        for (int k = 0; k <= 1000; ++k) {
-            hub.out(o).ok += 50;
-            const auto t0 = std::chrono::steady_clock::now();
-            hub.end_tick(static_cast<std::uint64_t>(k) * kSec);  // kiekvienas kvietimas — naujas intervalas
-            const auto dt = std::chrono::steady_clock::now() - t0;
-            worst_ns = std::max<std::int64_t>(worst_ns, std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count());
+        // Be sieninio laikrodžio: publish užstringa ir laiko vieną kopiją; variklio gija turi baigti visus 1000
+        // end_tick (jei laukų — testas pakibtų), o kiekviena kita eilutė suskaičiuojama dropped_lines.
+        hub.end_tick(0);  // intervalo pradžia
+        hub.out(o).ok += 50;
+        hub.end_tick(kSec);  // 1-a eilutė → publikavimo gija įstringa publish'e
+        {
+            std::unique_lock<std::mutex> lk(sink.m);
+            REQUIRE(sink.cv.wait_for(lk, std::chrono::seconds(5), [&] { return sink.entered == 1; }));
         }
-        INFO("blogiausias end_tick " << worst_ns << " ns");
-        CHECK(worst_ns < 1'000'000);
-        CHECK(hub.dropped_lines() > 0);
+        for (int k = 2; k <= 1000; ++k) {
+            hub.out(o).ok += 50;
+            hub.end_tick(static_cast<std::uint64_t>(k) * kSec);  // kiekvienas kvietimas — naujas intervalas
+        }
+        CHECK(sink.entered == 1);
+        CHECK(hub.dropped_lines() == 998);  // 2-a eilutė laukia buferyje, 3…1000 — praleistos
         sink.release();
         hub.stop();
     }
-    CHECK(sink.entered >= 1);
+    CHECK(sink.entered == 2);  // atleidus — išleista ir laukusi eilutė
 }
 
 namespace {

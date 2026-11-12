@@ -85,7 +85,7 @@ public:
     // Visi paruošti vienetai vienu batch'u; ≤ 3 kvietimai indeksui. Funkcija pati daro vieną GPU sync prieš grįždama.
     virtual bool process(const Batch&, TickContext&) = 0;  // false → fatal
     virtual void end_unit(const UnitTick&, Outcome, TickContext&) {}  // po commit'o / spragos
-    // Kai visi šio indekso vienetai išspręsti (su pernešimu — gali būti po kito tick'o begin_tick).
+    // Kai visi šio indekso vienetai išspręsti, įskaitant prisijungusius po pernešimo (tada — po kito begin_tick).
     virtual void end_tick(Index, TickContext&) {}
     virtual void on_clock_step(std::int64_t, TickContext&) {}
     virtual void finish(TickContext&) {}  // sustabdant: eilių išleidimas
@@ -97,6 +97,7 @@ enum class WaitMode : std::uint8_t { Pivot, Poll };
 struct EngineConfig {
     CutConfig cuts = default_cuts({50, 1});  // dažnis, ro, Wr, D, G
     std::uint32_t stall_after = 3;           // 0 — pertraukiklis ir Late žymės išjungti (legacy)
+    std::uint32_t late_clear_run = 8;        // Late nuimama po tiek laiku (≤ a(i)) atėjusių grain'ų iš eilės
     GapPolicy on_loss = GapPolicy::Invalid;
     std::int64_t hold_ns = 1'000'000'000;
     StartMode start = StartMode::Immediate;
@@ -133,6 +134,7 @@ public:
     // Statistikos ir testų prieiga (StatsHub numeriai; įėjimo būsena).
     std::uint32_t in_id(std::uint32_t unit, std::uint32_t input) const;
     std::uint32_t out_id(std::uint32_t unit, std::uint32_t output) const;
+    std::uint32_t unit_id(std::uint32_t unit) const;
     InState in_state(std::uint32_t unit, std::uint32_t input) const;
     bool in_late(std::uint32_t unit, std::uint32_t input) const;
 
