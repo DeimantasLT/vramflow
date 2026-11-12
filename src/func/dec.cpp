@@ -35,6 +35,7 @@ extern "C" {
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
 #include "media/media_ref.hpp"
+#include "timing/clock_queue.hpp"
 
 namespace mxlv::func {
 namespace {
@@ -56,13 +57,9 @@ struct DecFrame {
     AVFrame* f;
 };
 
-// Paskutinio laikrodžio šuolio monotoninis laikas. UDP įėjimas ateina realiu (monotoniniu) laiku, o tick'as — pagal
-// TAI: šuolis atgal priverčia tick'ą laukti, ir eilė persipildo. Tokie perpildymai per 3 s po šuolio — aplinkos įvykis.
-std::atomic<std::int64_t> g_clock_event_mono{INT64_MIN / 2};
-std::int64_t mono_ns() {
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-bool after_clock_event() { return mono_ns() - g_clock_event_mono.load() < 3'000'000'000ll; }
+// UDP įėjimas ateina realiu (monotoniniu) laiku, o tick'as — pagal TAI: laikrodžio šuolis atgal priverčia tick'ą laukti, ir
+// eilė persipildo. Kiek perpildymų priskiriama laikrodžiui — timing::ClockQueueBudget (tik tiek, kiek paaiškina pats
+// šuolis, vieną kartą; darbininko išmetimai perklasifikuojami kadro tick'e).
 
 struct DecStream {
     int idx = 0;
@@ -179,9 +176,8 @@ void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<
             while (s.q.size() > 60) {  // jitter eilės riba (2,4 s) — tik apsauga nuo atminties augimo
                 av_frame_free(&s.q.front().f);
                 s.q.pop_front();
-                if (!s.playing.load()) ++s.startup_overflow_drops;          // zondavimo pliūpsnis, srautas dar negroja
-                else if (after_clock_event()) ++s.clock_overflow_drops;    // tick'as laukė dėl laikrodžio šuolio atgal
-                else ++s.overflow_drops;
+                if (!s.playing.load()) ++s.startup_overflow_drops;  // zondavimo pliūpsnis, srautas dar negroja
+                else ++s.overflow_drops;  // laikrodžio šuolio pasekmė perklasifikuojama kadro tick'e (ClockQueueBudget)
             }
         }
         av_packet_unref(pkt);
@@ -288,6 +284,8 @@ int run_dec(const Opts& o) {
         std::vector<media::ChromaMode> job_mode;
         std::vector<media::SplitJob> part;
         std::uint64_t t_wake = 0;
+        std::vector<timing::ClockQueueBudget> cq;  // srautui: laikrodžio šuolio paaiškinti kadrai
+        std::vector<std::uint64_t> ov_seen;          // darbininko overflow_drops praeitame kadro tick'e
 
         DecFn(const Opts& o_, Stats& st_, std::vector<std::unique_ptr<DecStream>>& ds_, std::vector<std::int64_t>& anchor_,
               std::vector<AVFrame*>& cur_, std::vector<std::int64_t>& cur_n_, std::vector<int>& ur_, std::vector<std::uint64_t>& fp_, bool cpu_,
@@ -300,12 +298,14 @@ int run_dec(const Opts& o) {
             job_src.reserve(o.flows);
             job_mode.reserve(o.flows);
             part.reserve(o.flows);
+            const auto frame_ns = static_cast<std::int64_t>(1'000'000'000LL * o.fmt.frame_rate.den / o.fmt.frame_rate.num);
+            cq.assign(o.flows, timing::ClockQueueBudget(frame_ns));
+            ov_seen.assign(o.flows, 0);
         }
 
         void begin_tick(engine::Index i, engine::TickContext& ctx) override {
             t_wake = now_tai();
             const int p = inter ? static_cast<int>(i & 1) : 0;  // progresyviam kiekvienas grain'as — naujas kadras
-            const bool clock_recent = ctx.clock_event_recent(3'000'000'000ull);
             int pitch_y = -1, pitch_uv = -1;
             for (std::uint32_t n = 0; n < o.flows; ++n) {
                 DecStream& s = *ds[n];
@@ -332,12 +332,19 @@ int run_dec(const Opts& o) {
                         }
                         anchor[n] = 0;
                     }
-                    // per daug sukaupta → seniausi išmetami; riba +1 s sugeria dekoderio pliūpsnius
-                    while (static_cast<int>(s.q.size()) > o.playout_frames + fps_i) {
+                    // Laikrodžio šuolio atgal sukaupti kadrai (ne daugiau, nei jis paaiškina, vieną kartą) — išmetami, eilė grįžta
+                    // į gylį; per daug sukaupta virš ribos (+1 s sugeria dekoderio pliūpsnius) — seniausi išmetami: perpildymas.
+                    const timing::ClockQueueBudget::Tick qt =
+                        cq[n].on_frame_tick(s.q.size(), static_cast<std::uint64_t>(o.playout_frames),
+                                            static_cast<std::uint64_t>(o.playout_frames + fps_i), s.overflow_drops - ov_seen[n]);
+                    for (std::uint64_t k = 0; k < qt.clock_drop + qt.overrun_drop; ++k) {
                         av_frame_free(&s.q.front().f);
                         s.q.pop_front();
-                        st.flows[n].inc(in_warm ? "warmup_overrun_frames" : (clock_recent ? "clock_overrun_frames" : "overrun_frames"));
+                        st.flows[n].inc(in_warm ? "warmup_overrun_frames" : (k < qt.clock_drop ? "clock_overrun_frames" : "overrun_frames"));
                     }
+                    s.overflow_drops -= qt.reclassify;
+                    s.clock_overflow_drops += qt.reclassify;
+                    ov_seen[n] = s.overflow_drops;
                     if (!s.q.empty()) {
                         cur[n] = s.q.front().f;
                         cur_n[n] = s.q.front().n;
@@ -437,13 +444,12 @@ int run_dec(const Opts& o) {
                 st.add_hist("split_ms", t_done - t_wake);
                 st.add_hist("out_lateness", t_done - mxlIndexToTimestamp(&r, i));
             }
-            // Kito tick'o laukti ilgiau nei 2 laukus — laikrodis šoko atgal: žymima PRIEŠ laukimą, kad darbininkų eilių
-            // perpildymas laukimo metu būtų priskirtas šuoliui (darbininkai — after_clock_event())
-            if (mxlIndexToTimestamp(&r, i + 1) > t_done + 2 * (mxlIndexToTimestamp(&r, 1) - mxlIndexToTimestamp(&r, 0)))
-                g_clock_event_mono = mono_ns();
         }
 
-        void on_clock_step(std::int64_t, engine::TickContext&) override { g_clock_event_mono = mono_ns(); }
+        // Variklio aptiktas laikrodžio žingsnis: atgal — eilėje susikaups ne daugiau kaip ceil(|Δ| / kadras) kadrų
+        void on_clock_step(std::int64_t d, engine::TickContext&) override {
+            for (auto& b : cq) b.on_step(d);
+        }
     };
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Legacy, o.read_offset_us * 1000);
     if (inter) ecfg.skip_align = 2;  // pradėti ir po praleidimo tęsti nuo viršutinio lauko
@@ -489,8 +495,8 @@ int run_dec(const Opts& o) {
         f.inc("send_eagain", s.send_eagain);
         f.inc("clock_overflow_drops", s.clock_overflow_drops);
         f.inc("startup_overflow_drops", s.startup_overflow_drops);
-        // A17 (planas V13): suminė „laikrodžio nuolaida“ pašalinta — perpildymai laikrodžiui priskiriami tik per
-        // clock_event_recent(3 s) (clock_overrun_frames, clock_overflow_drops). Raktas lieka (0) — santraukos raktų aibė.
+        // A17 (planas V13): suminė „laikrodžio nuolaida“ pašalinta — laikrodžiui priskiriama tik tai, ką paaiškina pats šuolis
+        // atgal (timing::ClockQueueBudget: clock_overrun_frames, clock_overflow_drops). Raktas lieka (0) — raktų aibė.
         for (const char* k : {"overrun_frames", "overflow_drops"})
             if (f.c.count(k) && !f.c[k]) f.c.erase(k);
         f.inc("clock_drift_dropped_frames", 0);

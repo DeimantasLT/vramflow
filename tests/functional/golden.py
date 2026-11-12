@@ -277,6 +277,17 @@ def fgold_composite(out):
                    ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED) for tag, impl, storage in variants()]
 
 
+def dec_clock_rule(sd, frame_ms=40.0):
+    """dec PASS taisyklė laikrodžiui (planas V13 / A17, timing::ClockQueueBudget): kiekvieno srauto laikrodžiui priskirti
+    išmetimai (clock_overrun_frames + clock_overflow_drops) ≤ ceil(clock_back_ms / kadras) + clock_steps — tai, ką gali
+    paaiškinti patys žingsniai atgal; daugiau — perkrova, paslėpta kaip laikrodis. Grąžina neatitikimų sąrašą."""
+    proc = (sd or {}).get("proc") or {}
+    budget = -(-proc.get("clock_back_ms", 0) // frame_ms) + proc.get("clock_steps", 0)
+    return [f"srautas {n}: laikrodžiui {f.get('clock_overrun_frames', 0) + f.get('clock_overflow_drops', 0)} > {budget:.0f}"
+            for n, f in enumerate(flows_of(sd))
+            if f.get("clock_overrun_frames", 0) + f.get("clock_overflow_drops", 0) > budget]
+
+
 def fgold_dec(out):
     res = []
     for tag, impl, storage in variants():
@@ -297,6 +308,9 @@ def fgold_dec(out):
         loss = {k: fsum(sd, k) for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "decode_errors",
                                          "pkts_corrupt", "send_eagain", "clock_overflow_drops") if fsum(sd, k)}
         kchecks = [keys_check(role, r[role]) for role in ("dec", "verify-dec")]
+        clk = dec_clock_rule(sd)
+        if clk:
+            loss["laikrodis"] = clk
         ok = (sd is not None and sv is not None and samples > 0 and fsum(sv, "dec_bitexact") > 0 and not bad and not loss
               and pv.get("verification_errors", 1) == 0 and all(x == 0 for x in r["rc"].values()) and all(k[0] for k in kchecks))
         res.append(F.result(tid, "PASS" if ok else "FAIL",

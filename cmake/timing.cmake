@@ -10,7 +10,7 @@ set_target_properties(mxlv_timing PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(MXLV_BUILD_TESTS)
   add_executable(mxlv-timing-unit tests/unit/test_timing_index.cpp tests/unit/test_source_clock.cpp
-                 tests/unit/test_audio_timeline.cpp)
+                 tests/unit/test_audio_timeline.cpp tests/unit/test_clock_queue.cpp)
   vramflow_warnings(mxlv-timing-unit)
   target_link_libraries(mxlv-timing-unit PRIVATE mxlv_timing mxl::mxl Catch2::Catch2WithMain)
   set_target_properties(mxlv-timing-unit PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
