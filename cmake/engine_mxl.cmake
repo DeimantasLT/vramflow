@@ -5,7 +5,7 @@
 # lieka be MXL. Įtraukiama iš func.cmake (reikia mxlv_flows / mxlv_runtime).
 add_library(mxlv_engine_mxl STATIC src/engine/mxl_ports.cpp)
 vramflow_warnings(mxlv_engine_mxl)
-target_link_libraries(mxlv_engine_mxl PUBLIC mxlv_engine mxlv_runtime mxlv_flows mxl::mxl)
+target_link_libraries(mxlv_engine_mxl PUBLIC mxlv_engine mxlv_engine_sysclock mxlv_runtime mxlv_flows mxl::mxl)
 set_target_properties(mxlv_engine_mxl PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(MXLV_BUILD_TESTS)

@@ -1828,3 +1828,59 @@ TEST_CASE("gfx_writer: kviečiančiojo CUDA kontekstas atstatomas po bibliotekos
     CHECK(current() == ctx);
     cuCtxDestroy(ctx);
 }
+
+// --- V14: bendras ritmo vykdytojas ------------------------------------------------------------------------------------
+
+namespace {
+std::size_t task_count() {
+    std::size_t n = 0;
+    for ([[maybe_unused]] const auto& e : std::filesystem::directory_iterator("/proc/self/task")) ++n;
+    return n;
+}
+}  // namespace
+
+// Visi to paties (grain'ų dažnis, offset_ns, GPU) rašytojai be laiko kabliukų dalijasi viena ritmo gija (planas V14, A10):
+// 32 vfgfx_start_pacing prideda lygiai vieną giją procesui, o kiekvienas rašytojas commit'ina kiekvieną indeksą (be
+// praleidimų ir klaidų). on_commit kabliukas laiko nekeičia, todėl rašytojo į atskirą variklį neperkelia.
+TEST_CASE("gfx_writer: 32 rašytojai — viena ritmo gija", "[gfx_writer][mxl][shared]") {
+    const bool cuda_store = GENERATE(false, true);
+    if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
+    constexpr int kW = 32;
+    Domain d(91);
+    std::vector<FlowId> fid(kW);
+    std::vector<vfgfx_writer> w(kW, nullptr);
+    std::vector<std::unique_ptr<Recorder>> rec;
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    for (int k = 0; k < kW; ++k) {
+        REQUIRE(vfgfx_writer_create(d.inst, def(fid[k].id, 128, 72, true).c_str(), storage_opts(cuda_store).c_str(), &w[k]) == 0);
+        rec.push_back(std::make_unique<Recorder>());
+        gi::PacingHooks hk;
+        Recorder* rp = rec.back().get();
+        hk.on_commit = [rp](std::uint64_t i) { rp->add(i); };
+        REQUIRE(gi::set_pacing_hooks(w[k], hk) == 0);
+        REQUIRE(vfgfx_submit(w[k], &f.f) == 0);
+    }
+    const std::size_t before = task_count();
+    for (int k = 0; k < kW; ++k) REQUIRE(vfgfx_start_pacing(w[k], 0) == 0);
+    std::this_thread::sleep_for(100ms);
+    const std::size_t during = task_count();
+    std::this_thread::sleep_for(500ms);
+    for (int k = 0; k < kW; ++k) REQUIRE(vfgfx_stop_pacing(w[k]) == 0);
+    CHECK(during == before + 1);
+    CHECK(task_count() == before);  // paskutinis stop sustabdo ir bendrą giją
+    std::uint64_t lo = 0, hi = ~0ull;
+    for (int k = 0; k < kW; ++k) {
+        INFO("rašytojas " << k);
+        const auto all = rec[k]->snapshot();
+        REQUIRE(all.size() >= 25);
+        expect_strictly_consecutive(all);
+        lo = std::max(lo, all.front());
+        hi = std::min(hi, all.back());
+        const auto st = gi::pacing_stats(w[k]);
+        CHECK(st.late_skips == 0);
+        CHECK(st.errors == 0);
+        CHECK(st.committed == all.size());
+    }
+    CHECK(hi >= lo + 25);  // bendras langas: kiekvienas iš 32 commit'ino kiekvieną [lo, hi] indeksą
+    for (int k = 0; k < kW; ++k) vfgfx_writer_destroy(w[k]);
+}

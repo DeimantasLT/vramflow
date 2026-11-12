@@ -12,9 +12,13 @@
 
 namespace vramflow::gfx::internal {
 
-// Tušti (nullptr / tuščias std::function) laukai — numatytoji elgsena (mxlv::func::wait_until / now_tai).
+// Tušti (nullptr / tuščias std::function) laukai — numatytoji elgsena (bendro variklio SystemClock: mxlGetTime /
+// mxlSleepUntil). Rašytojas su laiko kabliukais (now arba wait) gauna savo variklį (savo ritmo giją): now -> variklio Clock,
+// wait -> EngineConfig::open_wait (planas V14). on_commit / fail_commit / after_convert laiko nekeičia — rašytojas lieka
+// bendroje (dažnis, offset, GPU) ritmo gijoje; jie kviečiami ritmo gijoje, laikant VISŲ grupės narių lat_m (kabliukas
+// neturi kviesti šios bibliotekos funkcijų).
 struct PacingHooks {
-    // Kaip func::wait_until: laukia iki indekso laiko + offset; true — laikrodis šoko atgal.
+    // Laukia iki indekso laiko + offset (tick'o atidarymas); true — laikrodis šoko atgal.
     std::function<bool(std::uint64_t index, std::int64_t offset_ns, const std::atomic<bool>& stop)> wait;
     // „Dabar“ (TAI ns) — iš jo skaičiuojamas einamasis indeksas.
     std::function<std::uint64_t()> now;

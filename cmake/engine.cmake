@@ -10,6 +10,13 @@ target_include_directories(mxlv_engine PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(mxlv_engine PUBLIC mxlv_timing Threads::Threads)
 set_target_properties(mxlv_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# Tikras laikrodis (SystemClock: mxlGetTime, CLOCK_MONOTONIC_RAW, mxlSleepUntil) — atskirai nuo mxlv_engine_mxl, kad jį
+# linkuotų ir libvramflow-gfx (bendras ritmo vykdytojas, V14) be runtime / InputSlot.
+add_library(mxlv_engine_sysclock STATIC src/engine/system_clock.cpp)
+vramflow_warnings(mxlv_engine_sysclock)
+target_link_libraries(mxlv_engine_sysclock PUBLIC mxlv_engine mxl::mxl)
+set_target_properties(mxlv_engine_sysclock PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 if(MXLV_BUILD_TESTS)
   add_executable(mxlv-engine-unit tests/engine/test_cuts.cpp tests/engine/test_input_state.cpp
                  tests/engine/test_gap_state.cpp tests/engine/test_engine.cpp

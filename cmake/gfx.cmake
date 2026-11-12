@@ -63,7 +63,8 @@ if(MXLV_BUILD_MEDIA)
 endif()
 
 # libvramflow-gfx: viešas C ABI (include/vramflow/gfx.h) — RGBA -> standartinis MXL v210a flow, rankinis ir ritmo režimai.
-# Reikia MXL srauto pagalbininkų (mxlv_flows, R4: statinė PIC biblioteka iš flows.cpp) ir abiejų konvertavimo variantų.
+# Reikia MXL srauto pagalbininkų (mxlv_flows, R4: statinė PIC biblioteka iš flows.cpp), abiejų konvertavimo variantų ir
+# bendro tick variklio (mxlv_engine + SystemClock: ritmo vykdytojas, planas V14; statiškai, eksportuojami tik vfgfx_*).
 # Tas pats gfx_writer.cpp kompiliuojamas du kartus: į .so ir į statinę biblioteką testams (testai naudoja vidinius kabliukus; .so eksportuoja tik vfgfx_*, žr. vramflow-gfx.map).
 if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   include(GNUInstallDirs)
@@ -71,7 +72,7 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   vramflow_warnings(mxlv_gfx_writer)
   target_include_directories(mxlv_gfx_writer PUBLIC ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   target_include_directories(mxlv_gfx_writer SYSTEM PUBLIC ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
-  target_link_libraries(mxlv_gfx_writer PUBLIC mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
+  target_link_libraries(mxlv_gfx_writer PUBLIC mxl::mxl mxlv_flows mxlv_engine_sysclock mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
   set_target_properties(mxlv_gfx_writer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
   # Versija ir ABI epocha — vienintelis šaltinis include/vramflow/gfx.h (VFGFX_VERSION_*, VFGFX_ABI_VERSION). SONAME
@@ -91,7 +92,7 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   target_include_directories(vramflow-gfx PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   target_include_directories(vramflow-gfx SYSTEM PRIVATE ${MXL_SOURCE_DIR}/lib/payload-backends/cuda-linear)
   # mxl::mxl PUBLIC: antraštė gfx.h įtraukia <mxl/mxl.h>, vartotojas gauna jo include kelią.
-  target_link_libraries(vramflow-gfx PUBLIC mxl::mxl PRIVATE mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
+  target_link_libraries(vramflow-gfx PUBLIC mxl::mxl PRIVATE mxlv_flows mxlv_engine_sysclock mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
   target_include_directories(vramflow-gfx INTERFACE $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
   target_link_options(vramflow-gfx PRIVATE -Wl,--version-script=${CMAKE_SOURCE_DIR}/cmake/vramflow-gfx.map)
   set_target_properties(vramflow-gfx PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib" VERSION ${VFGFX_VERSION} SOVERSION ${VFGFX_SOVERSION})

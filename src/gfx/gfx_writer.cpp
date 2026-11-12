@@ -5,16 +5,25 @@
 // Konvertavimas: cuda-linear saugykla -> CUDA kernel'is (gfx::cuda), host saugykla -> CPU (gfx::cpu); rezultatas
 // bitas į bitą lygus gfx::ref etalonui. Ritmo režimas: vfgfx_submit / vfgfx_submit_at iškart konvertuoja kadrą į du
 // paruoštus laukus (paritetai 0 ir 1; progresyviam rastrui — vieną grain'ą) vienoje iš paruoštų aibių; ritmo gija kas
-// indeksą (func::wait_until) tik KOPIJUOJA „dabartinės“ aibės atitinkamo pariteto lauką į slot'ą ir commit'ina (be
+// indeksą tik KOPIJUOJA „dabartinės“ aibės atitinkamo pariteto lauką į slot'ą ir commit'ina (be
 // pakartotinio konvertavimo). Aibės: 2 (submit) + kQueueCap (submit_at eilė; išskiriamos tingiai, pirmą kartą
 // prireikus). Laisva aibė = ne dabartinė ir ne eilėje; konvertuojama tik į laisvą (po sub_m — vienu metu vienas
 // konvertuotojas), o dabartinę / eilę po lat_m keičia submit, submit_at ir ritmo gija (aktyvuoja eilės įrašus), todėl
 // submit niekada nerašo į aibę, iš kurios ritmo gija skaito.
 //
-// Vėlavimo taisyklė (kaip func::gen): gija pabudo vėlai -> indeksas, kurio laukia, VIS TIEK įrašomas (vėlyvas commit;
-// skaitytojas sprendžia, ar per vėlu), o po commit'o, jei einamasis indeksas aplenkė kitą, jo laukai praleidžiami
-// (late_skips) ir tęsiama nuo einamojo — jokio „catch-up“ srauto. Laikrodis šoko atgal -> wait_until palaukia, kol
-// laikas pasivys (i tik didėja: tas pats indeksas du kartus neįrašomas, o kitą indeksą wait_until atidėja iki jo laiko).
+// Bendras ritmo vykdytojas (planas docs/planai/2026-11-12-tick-variklis.md V14, §6 D1): visi rašytojai su tuo pačiu
+// (grain'ų dažnis, offset_ns, CUDA įrenginys) dalijasi VIENA ritmo gija — bendro tick variklio (mxlv::engine::TickEngine)
+// šaltinio vienetu „pace“. Kiekviename tick'e c (atidaromas T(c) + offset_ns) PaceGroup::tick visiems nariams, kurių
+// pace_next <= c, atidaro slot'ą, D2D kopijas deda į VIENĄ grupės stream'ą ir daro VIENĄ sync (host saugykla — memcpy ir
+// commit iškart), tada commit'ina. Rašytojas su testų laiko kabliukais (PacingHooks::now / wait) gauna savo variklį
+// (savo grupę): now -> variklio Clock (HookClock), wait -> EngineConfig::open_wait. Narystė dinamiška (start / stop
+// pacing) ir gyvena grupėje, ne variklyje: variklis tiksi, kol grupė turi narių; paskutinis stop sustabdo giją.
+//
+// Vėlavimo taisyklė (kaip func::gen), kiekvienam rašytojui atskirai: gija pabudo vėlai -> indeksas, kurio rašytojas laukė
+// (pace_next), VIS TIEK įrašomas (vėlyvas commit; skaitytojas sprendžia, ar per vėlu), o po commit'o, jei einamasis indeksas
+// aplenkė kitą, jo laukai praleidžiami (late_skips) ir tęsiama nuo einamojo — jokio „catch-up“ srauto (variklio paties
+// praleisti tick'ai tik pažadina vėliau). Laikrodis šoko atgal -> variklis miega iki tick'o laiko naujoje laiko juostoje
+// (i tik didėja: tas pats indeksas du kartus neįrašomas).
 //
 // Kviečiančiojo CUDA darbų tvarka (gfx.h „CUDA FRAMES“): cuda_stream -> įvykis kviečiančiojo stream'e +
 // cudaStreamWaitEvent mūsų s_conv (laukiama TIK to stream'o ankstesnių darbų, kviečiančiojo stream'as neblokuojamas);
@@ -30,13 +39,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "common/format.hpp"
+#include "engine/engine.hpp"
+#include "engine/system_clock.hpp"
 #include "func/flows.hpp"
 #include "gfx/cpu/gfx_cpu.hpp"
 #include "gfx/gfx_kernels.hpp"
@@ -49,6 +62,7 @@
 namespace gfx = vramflow::gfx;
 namespace func = mxlv::func;
 namespace gi = vramflow::gfx::internal;
+namespace eng = mxlv::engine;
 
 namespace {
 
@@ -208,6 +222,8 @@ struct Pending {  // submit_at eilės įrašas: aibė `set` tampa dabartine nuo 
     int set;
 };
 
+struct PaceGroup;  // bendras ritmo vykdytojas (žemiau)
+
 }  // namespace
 
 struct vfgfx_writer_s {
@@ -222,7 +238,6 @@ struct vfgfx_writer_s {
     int conv_dev = -1;     // host saugykla: įrenginys CUDA kadrų atsisiuntimui (deviceUuid arba -1 = numatytasis); s_conv kuriamas tik tada
     int fields = 1;  // paruoštų grain'ų skaičius vienoje aibėje (2 interlaced, 1 progresyviam)
     cudaStream_t s_conv = nullptr;  // create / write / submit (po conv_m); host saugykloje kuriamas tingiai (convert)
-    cudaStream_t s_pace = nullptr;  // tik ritmo gija
     cudaEvent_t ev_caller = nullptr;  // cuda_stream keliui (po conv_m), kuriamas tingiai
     std::atomic<bool> cuda_used{false};  // writer'is jau naudoja CUDA kviečiančiojo gijoje (CtxGuard reikalingas)
 
@@ -247,8 +262,8 @@ struct vfgfx_writer_s {
     std::uint64_t pace_next = 0;  // ritmo metu: pirmas indeksas, kurio turinio gija dar nepasirinko
 
     std::atomic<bool> pacing{false};
-    std::atomic<bool> stop{false};
-    std::thread th;
+    std::shared_ptr<PaceGroup> group;  // ritmo metu: grupė, kurios narys (keičia tik op_m turėtojas)
+    bool pace_dead = false;            // ritmo kelyje išimtis: rašytojas nebeaptarnaujamas iki stop (po grupės m)
     std::atomic<std::int64_t> offset_ns{0};
     gi::PacingHooks hooks;
     std::mutex st_m;
@@ -426,12 +441,7 @@ struct vfgfx_writer_s {
         return 0;
     }
 
-    ~vfgfx_writer_s() {  // visi keliai (įskaitant create išimtis) išvalo viską; release/free_all idempotentiški
-        stop.store(true);
-        if (th.joinable()) th.join();
-        out.release(inst);
-        free_all();
-    }
+    ~vfgfx_writer_s();  // visi keliai (įskaitant create išimtis) išvalo viską; release/free_all idempotentiški
 
     std::uint64_t now() const { return hooks.now ? hooks.now() : func::now_tai(); }
     std::uint64_t current_index() const { return mxlTimestampToIndex(&rate, now()); }
@@ -526,96 +536,76 @@ struct vfgfx_writer_s {
         queue.clear();
     }
 
-    void pace_loop();
-    void pace_loop_body();
+    // --- ritmo vykdytojo dalys vienam rašytojui (kviečia tik grupės gija, po grupės m ir šio lat_m) ---
+    // Indekso i turinio pasirinkimas ir slot'as: host — kopija ir commit iškart (false); cuda-linear — true ir D2D
+    // kopijos aprašas (dst, src, bytes): grupė visas kopijas paleidžia vienu batch'u, vienas sync, tada pace_commit.
+    // Klaidos — į perr / errors.
+    bool pace_copy(std::uint64_t i, void*& dst, const void*& src, std::size_t& bytes);
+    void pace_commit(std::uint64_t i);                       // po kopijos: commit, on_commit kabliukas, skaitikliai
+    void pace_copy_failed(const char* what, cudaError_t e);  // kopija / sync nepavyko: slot'as atšaukiamas
+    void pace_advance();                                     // vėlavimo taisyklė: praleisti laukai neįrašomi (late_skips)
+    void pace_kill(const char* what);                        // išimtis ritmo kelyje: rašytojas nebeaptarnaujamas
     void free_all();
 };
 
-void vfgfx_writer_s::pace_loop() {
-    try {
-        pace_loop_body();
-    } catch (const std::exception& e) {
-        set_pace_error(std::string("pacing thread ended: ") + e.what());
-        bump(&gi::PacingStats::errors);
-    } catch (...) {
-        set_pace_error("pacing thread ended: unknown exception");
-        bump(&gi::PacingStats::errors);
+bool vfgfx_writer_s::pace_copy(std::uint64_t i, void*& dst_out, const void*& src_out, std::size_t& bytes) {
+    activate(i, i);
+    pace_next = i + 1;  // nuo šiol submit_at indeksui i — per vėlu (turinys pasirinktas)
+    if (!has) {
+        bump(&gi::PacingStats::no_frame);
+        return false;
     }
-    out.cancel();
+    mxlStatus st = MXL_STATUS_OK;
+    std::uint32_t* dst = out.open(i, st);
+    if (!dst) {
+        bump(&gi::PacingStats::errors);
+        set_pace_error("OpenGrainSlot " + std::to_string(i) + " status " + std::to_string(st));
+        return false;
+    }
+    const std::uint8_t* src = prep[cur][r.interlaced ? (i & 1) : 0];
+    const std::size_t gb = gfx::grain_bytes(r);
+    if (cuda_store) {  // kopija ir commit — grupės batch'e (po vieno sync)
+        dst_out = dst;
+        src_out = src;
+        bytes = gb;
+        return true;
+    }
+    std::memcpy(dst, src, gb);
+    pace_commit(i);
+    return false;
 }
 
-void vfgfx_writer_s::pace_loop_body() {
-    DeviceScope dev(device);  // gija nauja: numatytasis įrenginys 0; čia įrenginys pastovus iki gijos pabaigos
-    std::uint64_t i = 0;
-    {
-        std::lock_guard<std::mutex> l(lat_m);
-        i = pace_next;  // start_pacing: start_index() (restartas niekada nekartoja commit'into indekso)
+void vfgfx_writer_s::pace_copy_failed(const char* what, cudaError_t e) {
+    cudaGetLastError();
+    set_pace_error(std::string(what) + ": " + cudaGetErrorString(e));
+    out.cancel();
+    bump(&gi::PacingStats::errors);
+}
+
+void vfgfx_writer_s::pace_commit(std::uint64_t i) {
+    if (commit_open(true) != 0) {
+        out.cancel();
+        bump(&gi::PacingStats::errors);
+        return;
     }
-    const std::size_t gb = gfx::grain_bytes(r);
-    // Laikrodžio šuolis atgal — tik tikras TAI šuolis CLOCK_MONOTONIC_RAW atžvilgiu (func::ClockWatch), ne „tolimas
-    // tikslas“: offset'o keitimas restarte ar rankinis rašymas į priekį tikslą nustumia toli be jokio šuolio (peržiūros 6 p.).
-    func::ClockWatch cw;
-    cw.stepped();
-    while (!stop.load()) {
-        bool back = false;
-        if (hooks.wait) {
-            back = hooks.wait(i, offset_ns.load(), stop);  // testo laiko šaltinis pats praneša apie šuolį
-        } else {
-            func::wait_until(rate, i, offset_ns.load(), stop);
-            const std::uint64_t before = cw.back_ns;
-            cw.stepped();
-            back = cw.back_ns > before;
-        }
-        if (stop.load()) break;
-        if (back) bump(&gi::PacingStats::clock_backward);
-        bool wrote = false;
-        {
-            std::lock_guard<std::mutex> l(lat_m);
-            activate(i, i);
-            pace_next = i + 1;  // nuo šiol submit_at indeksui i — per vėlu (turinys pasirinktas)
-            if (!has) {
-                bump(&gi::PacingStats::no_frame);
-            } else {
-                mxlStatus st = MXL_STATUS_OK;
-                std::uint32_t* dst = out.open(i, st);
-                if (!dst) {
-                    bump(&gi::PacingStats::errors);
-                    set_pace_error("OpenGrainSlot " + std::to_string(i) + " status " + std::to_string(st));
-                } else {
-                    const std::uint8_t* src = prep[cur][r.interlaced ? (i & 1) : 0];
-                    bool ok = true;
-                    if (cuda_store) {
-                        cudaError_t e = cudaMemcpyAsync(dst, src, gb, cudaMemcpyDeviceToDevice, s_pace);
-                        if (e == cudaSuccess) e = cudaStreamSynchronize(s_pace);
-                        if (e != cudaSuccess) {
-                            cudaGetLastError();
-                            ok = false;
-                            set_pace_error(std::string("D2D: ") + cudaGetErrorString(e));
-                        }
-                    } else {
-                        std::memcpy(dst, src, gb);
-                    }
-                    if (ok && commit_open(true) == 0) {
-                        wrote = true;
-                        clear_pace_error();
-                        if (hooks.on_commit) hooks.on_commit(i);
-                    } else {
-                        out.cancel();
-                        bump(&gi::PacingStats::errors);
-                    }
-                }
-            }
-        }
-        if (wrote) bump(&gi::PacingStats::committed);
-        ++i;
-        const std::uint64_t ni = due_index();
-        if (ni > i) {  // pavėlavome: praleisti laukai neįrašomi, tęsiama nuo einamojo (kaip gen)
-            bump(&gi::PacingStats::late_skips, ni - i);
-            i = ni;
-            std::lock_guard<std::mutex> l(lat_m);
-            pace_next = i;  // praleistiems indeksams submit_at — per vėlu
-        }
+    clear_pace_error();
+    if (hooks.on_commit) hooks.on_commit(i);
+    bump(&gi::PacingStats::committed);
+}
+
+void vfgfx_writer_s::pace_advance() {
+    const std::uint64_t ni = due_index();
+    if (ni > pace_next) {  // pavėlavome: praleisti laukai neįrašomi, tęsiama nuo einamojo (kaip gen)
+        bump(&gi::PacingStats::late_skips, ni - pace_next);
+        pace_next = ni;  // praleistiems indeksams submit_at — per vėlu
     }
+}
+
+void vfgfx_writer_s::pace_kill(const char* what) {
+    set_pace_error(std::string("pacing thread ended: ") + (what ? what : "unknown exception"));
+    bump(&gi::PacingStats::errors);
+    out.cancel();
+    pace_dead = true;
 }
 
 void vfgfx_writer_s::free_all() {
@@ -635,9 +625,322 @@ void vfgfx_writer_s::free_all() {
         if (s_conv) cudaStreamDestroy(s_conv);
         if (ev_caller) cudaEventDestroy(ev_caller);
     }
-    if (s_pace) cudaStreamDestroy(s_pace);
-    s_conv = s_pace = nullptr;
+    s_conv = nullptr;
     ev_caller = nullptr;
+}
+
+// --- Bendras ritmo vykdytojas (V14) -------------------------------------------------------------------------------------
+namespace {
+
+// Rašytojo su testų laiko kabliukais (PacingHooks::now / wait) laikrodis. „Dabar“ — kabliuko laikas (be jo — TAI), bet ne
+// mažiau nei paskutinis pasiektas laukimo tikslas: grįžęs iš kabliuko wait(i) (arba miegas iki tikslo) tick'as atidaromas,
+// net jei kabliuko „dabar“ stovi vietoje (kaip anksčiau: ritmo gija pasitikėjo kabliuko laukimu). Monotoninis laikas ir
+// tikras miegas — SystemClock. Visus metodus kviečia tik grupės (variklio) gija.
+class HookClock final : public eng::Clock {
+public:
+    explicit HookClock(std::function<std::uint64_t()> now) : now_(std::move(now)) {}
+    std::uint64_t now_tai() const override { return std::max(now_ ? now_() : sys_.now_tai(), floor_); }
+    std::int64_t now_mono_raw() const override { return sys_.now_mono_raw(); }
+    void sleep_until(std::uint64_t tai_ns, const std::atomic<bool>& stop) override {
+        sys_.sleep_until(tai_ns, stop);
+        if (!stop.load()) reached(tai_ns);
+    }
+    void reached(std::uint64_t tai_ns) { floor_ = std::max(floor_, tai_ns); }
+
+private:
+    std::function<std::uint64_t()> now_;
+    eng::SystemClock sys_;
+    std::uint64_t floor_ = 0;
+};
+
+// Viena ritmo gija (grain'ų dažnis, offset_ns, CUDA įrenginys) rašytojams be laiko kabliukų arba vienam rašytojui su jais
+// (owner). Nariai keičiami po m; tick'as laiko m visą apdorojimo laiką, todėl po leave_pacing gija nario nebeliečia.
+// Užraktų tvarka: registras -> m -> narių lat_m (didėjančia adresų tvarka) -> st_m / err_m.
+struct PaceGroup {
+    mxlRational rate{50, 1};
+    std::int64_t offset = 0;
+    int device = -1;                 // cuda-linear narių įrenginys; -1 — host saugykla (gija CUDA neliečia)
+    vfgfx_writer owner = nullptr;    // != nullptr — rašytojo su laiko kabliukais savas variklis
+    std::function<bool(std::uint64_t, std::int64_t, const std::atomic<bool>&)> wait_hook;
+    std::unique_ptr<eng::Clock> clock;
+    HookClock* hclock = nullptr;     // == clock, kai owner
+
+    std::mutex m;
+    std::vector<vfgfx_writer> members;  // didėjančia adresų tvarka
+    std::atomic<bool> stop{false};
+    std::atomic<bool> back{false};      // laikrodžio šuolis atgal nuo paskutinio tick'o (clock_backward)
+    cudaStream_t stream = nullptr;      // visų narių D2D kopijos; kuria ir naikina grupės gija
+    std::thread th;
+
+    // Tick'o darbiniai masyvai (tik grupės gija, po m)
+    struct Pend {
+        vfgfx_writer w;
+        std::uint64_t i;
+    };
+    std::vector<std::unique_lock<std::mutex>> locks;
+    std::vector<Pend> pend;
+    std::vector<void*> dsts;
+    std::vector<const void*> srcs;
+    std::vector<std::size_t> sizes;
+
+    cudaError_t copy_batch();  // visos šio rato D2D kopijos į stream (vienas kvietimas) + vienas sync
+
+    void run();
+    void tick(std::uint64_t c);
+    void kill_all(const char* what);
+};
+
+// Variklio funkcija: vienas šaltinio vienetas be variklio valdomų išėjimų (planas §7 lentelė: „ritmo gija — visų kopijos
+// viename stream'e, vienas sync“); rašytojų slot'us atidaro, kopijuoja ir commit'ina PaceGroup::tick.
+struct PacerFn final : eng::TickFunction {
+    PaceGroup& g;
+    explicit PacerFn(PaceGroup& gg) : g(gg) {}
+    bool process(const eng::Batch& b, eng::TickContext&) override {
+        g.tick(b.index);
+        return true;
+    }
+    // Be wait kabliuko šuolį atgal aptinka variklis (StepDetector: TAI prieš CLOCK_MONOTONIC_RAW, > 5 ms — kaip ClockWatch).
+    void on_clock_step(std::int64_t delta_ns, eng::TickContext&) override {
+        if (delta_ns < 0 && !g.wait_hook) g.back.store(true);
+    }
+};
+
+struct PaceRegistry {
+    std::mutex m;
+    std::vector<std::shared_ptr<PaceGroup>> groups;
+};
+// Sąmoningai nesunaikinamas: proceso pabaigoje statinių objektų naikinimas negali stabdyti / jungti ritmo gijų.
+PaceRegistry& registry() {
+    static auto* r = new PaceRegistry;
+    return *r;
+}
+
+// Išimtis vieno rašytojo kelyje (pvz. on_commit kabliukas) sustabdo tik jį (gfx.h: rašytojai nepriklausomi).
+template <class F>
+void pace_guard(vfgfx_writer w, F&& f) {
+    try {
+        f();
+    } catch (const std::exception& e) {
+        try {
+            w->pace_kill(e.what());
+        } catch (...) {
+            w->pace_dead = true;
+        }
+    } catch (...) {
+        try {
+            w->pace_kill(nullptr);
+        } catch (...) {
+            w->pace_dead = true;
+        }
+    }
+}
+
+void PaceGroup::kill_all(const char* what) {
+    std::lock_guard<std::mutex> gl(m);
+    for (vfgfx_writer w : members) {
+        if (w->pace_dead) continue;
+        std::lock_guard<std::mutex> l(w->lat_m);
+        try {
+            w->pace_kill(what);
+        } catch (...) {
+            w->pace_dead = true;
+        }
+    }
+}
+
+void PaceGroup::tick(std::uint64_t c) {
+    std::lock_guard<std::mutex> gl(m);
+    const bool stepped = back.exchange(false);
+    locks.clear();
+    for (vfgfx_writer w : members) locks.emplace_back(w->lat_m);
+    if (stepped)
+        for (vfgfx_writer w : members)
+            if (!w->pace_dead) w->bump(&gi::PacingStats::clock_backward);
+    // Ratas: kiekvienas narys, kurio pace_next <= c, rašo vieną indeksą. Antras ratas — tik po vėlyvo pabudimo, kai
+    // praleidimas nustūmė pace_next iki c (vėluojantis indeksas įrašytas, tada einamasis — kaip ankstesnė gija).
+    for (bool more = true; more;) {
+        pend.clear();
+        dsts.clear();
+        srcs.clear();
+        sizes.clear();
+        for (vfgfx_writer w : members) {
+            if (w->pace_dead || w->pace_next > c) continue;
+            const std::uint64_t i = w->pace_next;
+            bool queued = false;
+            void* dst = nullptr;
+            const void* src = nullptr;
+            std::size_t bytes = 0;
+            pace_guard(w, [&] { queued = w->pace_copy(i, dst, src, bytes); });
+            if (queued) {
+                pend.push_back(Pend{w, i});
+                dsts.push_back(dst);
+                srcs.push_back(src);
+                sizes.push_back(bytes);
+            } else if (!w->pace_dead) {
+                pace_guard(w, [&] { w->pace_advance(); });
+            }
+        }
+        if (!pend.empty()) {
+            const cudaError_t e = copy_batch();
+            for (const Pend& p : pend) {
+                pace_guard(p.w, [&] {
+                    if (e == cudaSuccess) p.w->pace_commit(p.i);
+                    else p.w->pace_copy_failed("D2D", e);
+                });
+                if (!p.w->pace_dead) pace_guard(p.w, [&] { p.w->pace_advance(); });
+            }
+        }
+        more = false;
+        for (vfgfx_writer w : members)
+            if (!w->pace_dead && w->pace_next <= c) more = true;
+    }
+    locks.clear();
+}
+
+cudaError_t PaceGroup::copy_batch() {
+    // Vienas cudaMemcpyBatchAsync visoms kopijoms: WSL2 kiekvienas cudaMemcpyAsync — atskiras pateikimas (32 atskiros
+    // kopijos G variante pakėlė commit'o vėlavimą p50 iki ~5 ms). Jei batch'as nepalaikomas — po vieną.
+    cudaError_t e = cudaErrorNotSupported;
+    if (dsts.size() > 1) {
+        cudaMemcpyAttributes attr{};
+        attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+        std::size_t attr_idx = 0;
+        e = cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
+        if (e != cudaSuccess) cudaGetLastError();
+    }
+    if (e != cudaSuccess) {
+        e = cudaSuccess;
+        for (std::size_t k = 0; k < dsts.size() && e == cudaSuccess; ++k)
+            e = cudaMemcpyAsync(dsts[k], srcs[k], sizes[k], cudaMemcpyDeviceToDevice, stream);
+    }
+    const cudaError_t es = cudaStreamSynchronize(stream);  // vienas sync visoms šio rato D2D kopijoms
+    return e != cudaSuccess ? e : es;
+}
+
+void PaceGroup::run() {
+    DeviceScope dev(device);  // gija nauja: numatytasis įrenginys 0; čia įrenginys pastovus iki gijos pabaigos
+    try {
+        if (device >= 0) {
+            const cudaError_t e = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+            if (e != cudaSuccess) {
+                stream = nullptr;
+                cudaGetLastError();
+                throw std::runtime_error(std::string("cudaStreamCreate: ") + cudaGetErrorString(e));
+            }
+        }
+        // Tick'as c atidaromas T(c) + offset_ns (expect = offset, ro = 0, viena riba). offset — briaunos poslinkis
+        // (expect_ns), ne ro: variklio pirmas tick'as = due_index(dabar − expect), todėl ir |offset| > P / 2 pradeda nuo
+        // pirmo nepraėjusio indekso (su ro = +60 ms variklis pradėtų 2 indeksais vėliau). Šaltinio vienetas be išėjimų —
+        // variklis jo nelaiko ir spragų nerašo (spragų politika ritmui — V17). Variklio praleisti tick'ai (T11) tik
+        // pažadina vėliau: vėlavimo taisyklę kiekvienam rašytojui taiko tick() (pace_advance).
+        eng::EngineConfig cfg = eng::EngineConfig::legacy({rate.numerator, rate.denominator}, 0, 0);
+        cfg.cuts.expect_ns = offset;
+        cfg.start = eng::StartMode::Immediate;
+        cfg.warmup_s = 0;
+        cfg.out_fail_fatal = 0;
+        if (wait_hook)
+            cfg.open_wait = [this](eng::Index i, std::int64_t off, const std::atomic<bool>& s) {
+                if (wait_hook(i, off, s)) back.store(true);  // testo laiko šaltinis pats praneša apie šuolį atgal
+                if (!s.load()) hclock->reached(mxlIndexToTimestamp(&rate, i) + static_cast<std::uint64_t>(off));
+                return true;
+            };
+        eng::StatsHub hub;
+        eng::TickEngine e(cfg, *clock, hub, stop);
+        eng::UnitSpec u;
+        u.name = "pace";
+        std::uint32_t id = 0;
+        std::string why;
+        if (!e.add_unit(u, id, why)) throw std::runtime_error("add_unit: " + why);
+        PacerFn fn(*this);
+        const eng::RunResult res = e.run(fn);
+        if (res.reason == eng::EndReason::Fatal) throw std::runtime_error(res.fatal);
+    } catch (const std::exception& ex) {
+        kill_all(ex.what());
+    } catch (...) {
+        kill_all(nullptr);
+    }
+    if (stream) {
+        cudaStreamDestroy(stream);
+        stream = nullptr;
+    }
+}
+
+// Įstoja į grupę (rašytojas su laiko kabliukais — į savo naują). Kviečiama po op_m, pacing == true, pace_next nustatytas.
+void join_pacing(vfgfx_writer w) {
+    const bool own = static_cast<bool>(w->hooks.now) || static_cast<bool>(w->hooks.wait);
+    const std::int64_t off = w->offset_ns.load();
+    PaceRegistry& reg = registry();
+    std::lock_guard<std::mutex> rl(reg.m);
+    std::shared_ptr<PaceGroup> g;
+    if (!own)
+        for (const auto& x : reg.groups)
+            if (!x->owner && x->rate.numerator == w->rate.numerator && x->rate.denominator == w->rate.denominator &&
+                x->offset == off && x->device == w->device) {
+                g = x;
+                break;
+            }
+    const bool fresh = !g;
+    if (fresh) {
+        g = std::make_shared<PaceGroup>();
+        g->rate = w->rate;
+        g->offset = off;
+        g->device = w->device;
+        if (own) {
+            g->owner = w;
+            g->wait_hook = w->hooks.wait;
+            auto hc = std::make_unique<HookClock>(w->hooks.now);
+            g->hclock = hc.get();
+            g->clock = std::move(hc);
+        } else {
+            g->clock = std::make_unique<eng::SystemClock>();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> gl(g->m);
+        g->members.insert(std::lower_bound(g->members.begin(), g->members.end(), w), w);
+        w->pace_dead = false;
+    }
+    w->group = g;
+    if (!fresh) return;
+    reg.groups.push_back(g);
+    try {
+        g->th = std::thread([p = g.get()] { p->run(); });
+    } catch (...) {
+        reg.groups.pop_back();
+        w->group.reset();
+        throw;
+    }
+}
+
+// Palieka grupę; paskutinis narys sustabdo ir sujungia jos giją. Grįžus gija šio rašytojo nebeliečia.
+void leave_pacing(vfgfx_writer w) {
+    std::shared_ptr<PaceGroup> g = std::move(w->group);
+    w->group.reset();
+    if (!g) return;
+    bool last = false;
+    {
+        PaceRegistry& reg = registry();
+        std::lock_guard<std::mutex> rl(reg.m);
+        {
+            std::lock_guard<std::mutex> gl(g->m);
+            g->members.erase(std::remove(g->members.begin(), g->members.end(), w), g->members.end());
+            last = g->members.empty();
+        }
+        if (last) reg.groups.erase(std::remove(reg.groups.begin(), reg.groups.end(), g), reg.groups.end());
+    }
+    if (last) {
+        g->stop.store(true);
+        if (g->th.joinable()) g->th.join();
+    }
+    w->out.cancel();  // kaip anksčiau gijos pabaigoje (atviro slot'o po tick'o nelieka)
+}
+
+}  // namespace
+
+vfgfx_writer_s::~vfgfx_writer_s() {
+    if (group) leave_pacing(this);
+    out.release(inst);
+    free_all();
 }
 
 template <class F>
@@ -721,8 +1024,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         }
         w->device = uuid_dev >= 0 ? uuid_dev : 0;
         DeviceScope ds(w->device);
-        if (cudaStreamCreateWithFlags(&w->s_conv, cudaStreamNonBlocking) != cudaSuccess ||
-            cudaStreamCreateWithFlags(&w->s_pace, cudaStreamNonBlocking) != cudaSuccess) {
+        if (cudaStreamCreateWithFlags(&w->s_conv, cudaStreamNonBlocking) != cudaSuccess) {
             cudaGetLastError();
             w->free_all();
             w->out.release(inst);
@@ -770,7 +1072,6 @@ static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
     std::lock_guard<std::mutex> l(w->op_m);
     if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "pacing is already running");
     w->offset_ns.store(offset_ns);
-    w->stop.store(false);
     {
         std::lock_guard<std::mutex> ll(w->lat_m);  // submit_at mato nuoseklią porą (pacing, pace_next)
         w->pace_next = w->start_index();
@@ -778,7 +1079,7 @@ static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
         w->collapse_past();  // eilė išlieka per stop / start; praėję įrašai sutraukiami
     }
     try {
-        w->th = std::thread([w] { w->pace_loop(); });
+        join_pacing(w);
     } catch (...) {
         w->pacing.store(false);
         return w->fail(VFGFX_ERR_STATE, "could not start the pacing thread");
@@ -871,8 +1172,7 @@ static int stop_pacing_impl(vfgfx_writer w) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
     if (!w->pacing.load()) return 0;
-    w->stop.store(true);
-    if (w->th.joinable()) w->th.join();
+    leave_pacing(w);  // sinchroniškai: grįžus grupės gija šio rašytojo nebeliečia
     w->pacing.store(false);
     return 0;
 }

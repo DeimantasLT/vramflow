@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 // Variklio MXL prievadai (planas §7 mxl_ports.hpp, V7) — vienintelė vieta, kur variklis kalba su MXL.
-//   SystemClock    — mxlGetTime (TAI), CLOCK_MONOTONIC_RAW, mxlSleepUntil ≤ 50 ms gabalais (A27, M14);
+//   SystemClock    — engine/system_clock.hpp (čia įtraukiama);
 //   MxlVideoInput  — ant runtime::InputSlot: head() be sisteminio kvietimo (M8), probe = get(timeout 0),
 //                    wait = blokuojantis get ant flow'o futex (M1, M2), writer_alive = mxlIsFlowActive (M9);
 //   MxlVideoOutput — ant func::VideoOut: commit, K3 spragos (Invalid — commit_invalid; Repeat / Black — kopija per
@@ -19,18 +19,12 @@
 #include "engine/audio_frames.hpp"
 #include "engine/clock.hpp"
 #include "engine/ports.hpp"
+#include "engine/system_clock.hpp"
 #include "func/flows.hpp"
 #include "gfx/raster.hpp"
 #include "runtime/input_slot.hpp"
 
 namespace mxlv::engine {
-
-class SystemClock final : public Clock {
-public:
-    std::uint64_t now_tai() const override;
-    std::int64_t now_mono_raw() const override;
-    void sleep_until(std::uint64_t tai_ns, const std::atomic<bool>& stop) override;
-};
 
 class MxlVideoInput final : public InputPort {
 public:
