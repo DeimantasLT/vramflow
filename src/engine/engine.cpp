@@ -21,8 +21,11 @@
 //  * T11: praleidžiami tik indeksai, kurių kito tick'o atidarymas jau praėjo (pavėlavimas < P nieko neišmeta).
 //  * Paruošimo laikas = min(dabar, last_write_tai) — ne stebėjimo momentas (ašis gali būti kitas įėjimas).
 //  * held_ns = A paleidimas − momentas, kai paskutinis į batch'ą patekęs vienetas tapo paruoštas.
-//  * Wanted įėjimo laukiama ne ilgiau kaip iki a(c) (ir tik kol jis Live); vieneto klasę (Quorum / Straggler) lemia tik
-//    Required įėjimai. Vienas vėlus Wanted grain'as kainuoja tik tą indeksą.
+//  * Wanted įėjimas (enc garsas) laukiamas kaip Required: ta pati Late histerezė ir vieneto klasė (Quorum / Straggler),
+//    B / C fazės, ašis. Skirtumas tik vieneto paskutinėje riboje (has_c ? c : b): nesulaukus Wanted, vienetas apdorojamas be
+//    jo (ptr == nullptr; enc — tyla), ne spraga; Wanted be rašytojo (ne Live / negyvas ties A / Gone / klaida) — tęsiama be jo.
+//    Nuolat vėluojantis Wanted į B / C perkelia tik savo vienetą; vienas vėlus grain'as kainuoja tik tą indeksą (+ vienkartinis
+//    kvorumo laikymas iki a(c), kaip ir Required).
 //  * B taisyklė: kai bent vienas Straggler'is paruoštas (anksčiausias — t_r), B laukia tik tų neparuoštų šviežių
 //    Straggler'ių, kurių laukiamas paruošimo laikas T(j) + ewma ≤ t_r + Wr (nežinomas — laukiama), ir ne ilgiau kaip
 //    min(b, t_r + Wr); likę — C fazėje iki savo ribos. Paruoštas Straggler'is laikomas ne ilgiau kaip Wr.
@@ -155,12 +158,8 @@ struct TickEngine::Impl {
     Index jidx(const Unit& u, const In& in) const {
         return static_cast<Index>(static_cast<std::int64_t>(u.cur) + in.spec.timing.index_offset);
     }
-    // Wanted įėjimo laukiama tik iki A paleidimo (≤ a(c)); po to vienetas tęsia be jo.
-    bool wanted_expired(const Unit& u) const { return recs[u.cur & 1].a_done; }
-    bool waitable(const Unit& u, const In& in) const {
-        return !in.done && in.spec.need != Need::Optional && in.st.live() &&
-               !(in.spec.need == Need::Wanted && wanted_expired(u));
-    }
+    // Laukiamas įėjimas: Required ir Wanted (Wanted — iki vieneto paskutinės ribos), kol Live ir neišspręstas.
+    static bool waitable(const In& in) { return !in.done && in.spec.need != Need::Optional && in.st.live(); }
 
     void end_fatal(EndReason r, int code, std::string why) {
         if (ended) return;
@@ -174,16 +173,16 @@ struct TickEngine::Impl {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             const In& in = ins[u.in0 + k];
             if (in.ok || in.spec.need == Need::Optional) continue;
-            if (in.spec.need == Need::Wanted && (in.done || final_cut || wanted_expired(u))) continue;
+            if (in.spec.need == Need::Wanted && (in.done || final_cut)) continue;  // paskutinė riba — be jo
             return false;
         }
         return true;
     }
-    // Šviežias — nė vienas neparuoštas būtinas įėjimas dar nepraleido paskutinės ribos (miss_run == 0).
+    // Šviežias — nė vienas neparuoštas laukiamas (Required / Wanted) įėjimas dar nepraleido paskutinės ribos (miss_run == 0).
     bool fresh(const Unit& u) const {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             const In& in = ins[u.in0 + k];
-            if (!in.ok && !in.done && in.spec.need == Need::Required && in.st.miss_run() >= 1) return false;
+            if (!in.ok && !in.done && in.spec.need != Need::Optional && in.st.miss_run() >= 1) return false;
         }
         return true;
     }
@@ -196,12 +195,13 @@ struct TickEngine::Impl {
         return r.cuts.has_b ? std::min(r.cuts.b, r.b_hold) : r.cuts.a;
     }
 
-    // Laukiamas vieneto paruošimo laikas: vėliausias T(j) + ewma tarp neparuoštų būtinų įėjimų; INT64_MIN — nežinoma.
+    // Laukiamas vieneto paruošimo laikas: vėliausias T(j) + ewma tarp neparuoštų laukiamų (Required / Wanted) įėjimų;
+    // INT64_MIN — nežinoma.
     std::int64_t expected(const Unit& u) const {
         std::int64_t e = INT64_MIN;
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             const In& in = ins[u.in0 + k];
-            if (in.ok || in.done || in.spec.need != Need::Required) continue;
+            if (in.ok || in.done || in.spec.need == Need::Optional) continue;
             if (!in.ewma_set) return INT64_MIN;
             e = std::max(e, T(jidx(u, in)) + in.ewma);
         }
@@ -395,7 +395,7 @@ struct TickEngine::Impl {
                 else in.done = true;  // Wanted / Optional be rašytojo — tęsiama be jo
                 continue;
             }
-            if (in.st.late() && in.spec.need == Need::Required) on_time = false;  // klasę lemia tik Required
+            if (in.st.late() && in.spec.need != Need::Optional) on_time = false;  // klasę lemia Required ir Wanted
         }
         if (u.nin == 0) {
             if (u.no_content) return gap_unit(u, Outcome::GapNoContent, 0);
@@ -484,9 +484,9 @@ struct TickEngine::Impl {
             end_fatal(EndReason::Fatal, 2, "TickFunction::process grąžino false");
             return;
         }
-        // Wanted įėjimai, nesulaukti paleidimo metu: vienas neblokuojantis bandymas po apdorojimo (dar prieš apskaitą ir
-        // end_unit). Grain'as, atėjęs kol funkcija apdorojo (enc: garsas iškart po video), pasiekia end_unit per tą patį
-        // UnitTick::in ir skaičiuojamas ok / late, ne lost. Laukimo nėra — Wanted vis tiek laukiama tik iki a(c).
+        // Wanted įėjimai, nesulaukti paleidimo metu (paskutinė riba): vienas neblokuojantis bandymas po apdorojimo (dar prieš
+        // apskaitą ir end_unit). Grain'as, atėjęs kol funkcija apdorojo, pasiekia end_unit per tą patį UnitTick::in ir
+        // skaičiuojamas ok / late, ne lost. Laukimo nėra.
         for (const UnitTick& ut : batch) {
             Unit& u = units[ut.unit];
             for (std::uint32_t k = 0; k < u.nin; ++k) {
@@ -811,7 +811,7 @@ struct TickEngine::Impl {
         auto consider = [&](const Unit& u) {
             for (std::uint32_t k = 0; k < u.nin; ++k) {
                 const auto gk = static_cast<std::int64_t>(u.in0 + k);
-                if (!waitable(u, ins[static_cast<std::size_t>(gk)])) continue;
+                if (!waitable(ins[static_cast<std::size_t>(gk)])) continue;
                 if (pivot < 0 || ins[static_cast<std::size_t>(gk)].ewma >= ins[static_cast<std::size_t>(pivot)].ewma)
                     pivot = gk;
             }
@@ -831,7 +831,7 @@ struct TickEngine::Impl {
         for (Unit& u : units) {
             if (u.stage == Stage::None) continue;
             bool w = false;
-            for (std::uint32_t k = 0; k < u.nin; ++k) w = w || waitable(u, ins[u.in0 + k]);
+            for (std::uint32_t k = 0; k < u.nin; ++k) w = w || waitable(ins[u.in0 + k]);
             if (w) best = std::min(best, deadline(u));
         }
         // B / C grupė: ašis — anksčiausiai laukiamas įėjimas (pirmas paruoštas vienetas paleidžia Wr laikmatį). Pirmenybė:
@@ -847,7 +847,7 @@ struct TickEngine::Impl {
             const bool fr = fresh(u);
             for (std::uint32_t k = 0; k < u.nin; ++k) {
                 const In& in = ins[u.in0 + k];
-                if (!waitable(u, in)) continue;
+                if (!waitable(in)) continue;
                 ++n_b;
                 const std::int64_t e = in.ewma_set ? T(jidx(u, in)) + in.ewma : INT64_MIN;
                 const int rank = (fr ? 0 : 2) + (e >= tnow ? 0 : 1);

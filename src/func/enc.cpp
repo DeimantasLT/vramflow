@@ -414,8 +414,10 @@ int run_enc(const Opts& o) {
             if (stop.load()) rc = kStoppedWaiting;
             else { st.fatal = err; rc = kExitInputs; }
         }
-    // Garsas — variklio Wanted įėjimas (MxlAudioInput): laukiamas tik iki a(i), vieneto klasės nelemia, variklio gijos
-    // niekada nemigdo (anksčiau read_audio(wait) laukdavo iki T + --deadline-ms — vienas srautas be garso vėlindavo visus).
+    // Garsas — variklio Wanted įėjimas (MxlAudioInput): laukiamas kaip video (Late histerezė, B / C fazės) iki vieneto
+    // paskutinės ribos, tada kadras koduojamas be jo (tyla); nuolat vėluojantis garsas į B / C perkelia tik savo srautą,
+    // kiti — A fazėje. Variklio gijos niekada nemigdo (anksčiau read_audio(wait) laukdavo iki T + --deadline-ms — vienas
+    // srautas be garso vėlindavo visus; po migracijos — tik iki a(i), todėl realaus laiko garsas ~T + P buvo visada tyla).
     // Pradinis laukimas — kaip anksčiau (AudioIn::open pagal --input-wait-ms); reader'is perduodamas prievadui.
     const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};
     std::vector<engine::MxlAudioInput> ports_audio;
@@ -458,7 +460,7 @@ int run_enc(const Opts& o) {
     const std::uint64_t test_drop_from = now_tai() + static_cast<std::uint64_t>(o.test_drop_after_s * 1e9);
     std::uint64_t F = mxlGetCurrentIndex(&rate) / gpf + 1;
     // Kadro (vieneto indeksas i_bot) garsas į item.l / item.r (true — yra). Niekada nelaukia. engine — variklio Wanted
-    // įėjimo rezultatas šiam indeksui (nullptr — nesulaukta iki a(i) ir po apdorojimo); be jo (kadras atmestas) — vienas
+    // įėjimo rezultatas šiam indeksui (nullptr — nesulaukta iki paskutinės ribos ir po apdorojimo); be jo (kadras atmestas) — vienas
     // neblokuojantis bandymas. Kadro mėginiai sveikaisiais skaičiais: 1080i50 / 25p — 1920, 50p — 960, 29,97 — 1601 / 1602.
     auto take_audio = [&](std::uint32_t n, engine::Index i_bot, Item& item, const engine::GrainRef* engine_ref) {
         engine::MxlAudioInput& p = ports_audio[n];
@@ -741,7 +743,7 @@ int run_enc(const Opts& o) {
         engine::UnitSpec u;
         u.name = flow_id(o.in_role, o.flow_base + n);
         u.in.push_back(engine::InputSpec{&ports_in[n], {}, static_cast<std::uint8_t>(gpf), engine::Need::Required, engine::InMode::Exact});
-        if (n < ports_audio.size())  // garsas: Wanted — vieneto klasės nelemia, laukiamas tik iki a(i)
+        if (n < ports_audio.size())  // garsas: Wanted — laukiamas kaip Required iki paskutinės ribos, tada be jo (tyla)
             u.in.push_back(engine::InputSpec{&ports_audio[n], {}, 1, engine::Need::Wanted, engine::InMode::Exact});
         u.stride = static_cast<std::uint32_t>(gpf);
         u.residue = static_cast<std::uint32_t>(gpf - 1);

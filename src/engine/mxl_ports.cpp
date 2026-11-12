@@ -106,11 +106,11 @@ Index MxlAudioInput::head() {
     return fr_.last_ready(rt.headIndex);
 }
 
-std::uint64_t MxlAudioInput::last_write_tai() {
-    if (rd_ == nullptr) return 0;
-    mxlFlowRuntimeInfo rt{};
-    return mxlFlowReaderGetRuntimeInfo(rd_, &rt) == MXL_STATUS_OK ? rt.lastWriteTime : 0;
-}
+// 0 — nežinoma: variklis paruošimo laiku laiko stebėjimo momentą. MXL tęstinio flow'o rašytojas (PosixContinuousFlowWriter,
+// MXL 1.1 / PR #653) runtime.lastWriteTime NEATNAUJINA — lieka flow sukūrimo laikas. Jį grąžinus, kiekvienas garso grain'as
+// atrodė atėjęs „laiku“ (≤ a(i)): Late histerezė nuolat vėluojančiam garsui kas 8 kadrus nusiimdavo, ir A vėl laukdavo iki
+// a(i) visų srautų (favsync_late_audio[G]: kitų srautų vėlavimo mediana 6,6 ms vietoj 2,2 ms); ewma — neigiamas.
+std::uint64_t MxlAudioInput::last_write_tai() { return 0; }
 
 Probe MxlAudioInput::get(Index j, std::uint64_t timeout_ns, GrainRef& out) {
     out = GrainRef{};

@@ -158,4 +158,96 @@ def favsync_restart(out):
     return res
 
 
-TESTS = {"favsync_drop": favsync_drop, "favsync_restart": favsync_restart}
+def late_audio_run(out, sub, impl, storage, enc, port, D, late_ms, n=4):
+    """N srautų: video — vienas gen, garsas — srautui 0 atskiras gen su --audio-late-ms late_ms (realaus laiko rašytojo
+    modelis: kadro garsas baigiamas ~T + P), kitiems — įprastas. Įrašomas srauto 0 TS (av_offset)."""
+    d = F.fresh_domain(sub)
+    v = F.vcommon(impl, storage)
+    gv = F.FProc(out, f"{sub}/v", "gen", d, "--flows", n, "--duration", D + 40, *v)
+    g0 = F.FProc(out, f"{sub}/a0", "gen", d, "--flows", 1, "--video", 0, "--audio", 1, "--audio-late-ms", late_ms,
+                 "--duration", D + 40, *v)
+    gr = F.FProc(out, f"{sub}/ar", "gen", d, "--flows", n - 1, "--flow-base", 1, "--video", 0, "--audio", 1, "--duration", D + 40, *v)
+    e = cap = None
+    re_ = None
+    av_json = pathlib.Path(out) / sub / "av.json"
+    ts = pathlib.Path(out) / sub / "out.ts"
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, k) for k in range(n)] + [F.role_flow_id(3, k) for k in range(n)]):
+            return {"err": "gen flow'ai neatsirado"}
+        cap = subprocess.Popen([sys.executable, str(AV_OFFSET), str(ts), "--capture-port", str(port), "--seconds", str(D + 3),
+                                "--json", str(av_json)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(0.5)
+        ea = ["--encoder", enc, "--audio", 1, "--port-base", port] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
+        e = F.FProc(out, sub, "enc", d, "--flows", n, "--duration", D, "--warmup", 2, *ea, *v)
+        re_ = e.wait(timeout=D + 60)
+        cap.wait(timeout=D + 120)
+    finally:
+        if cap is not None and cap.poll() is None:
+            cap.kill()
+        for pr in (e, g0, gr, gv):
+            if pr is not None:
+                pr.term()
+    se = F.vsummary(e, "enc")
+    if se is None:
+        return {"err": f"nėra enc santraukos (exit={re_})"}
+    try:
+        av = json.loads(av_json.read_text())
+    except (OSError, ValueError):
+        av = {}
+    return {"exit": re_, "enc": se, "av": av}
+
+
+def median_lateness(flow):
+    """Srauto kadrų vėlavimo (frame lateness) sekundžių maksimumų mediana, ms (lateness_s)."""
+    xs = sorted(v / 1000.0 for _, v in flow.get("lateness_s") or [])
+    return xs[len(xs) // 2] if xs else None
+
+
+def favsync_late_audio(out):
+    """Garsas kiekvieną kadrą vėluoja 20 ms (gen --audio-late-ms 20: kadro garsas baigiamas ties T + P, kaip realaus laiko
+    rašytojo), N = 4 srautai, vėluoja tik srauto 0 garsas. Reikalavimai: srautas 0 — 0 tylių kadrų (audio_underrun_frames == 0,
+    audio_silence_samples == 0), A/V poslinkis ≤ 1 AAC kadras, srauto vėlavimas ≥ 20 ms (scenarijus tikras); kiti srautai —
+    vėlavimas nepakitęs: jų sekundžių maksimumų mediana ≤ kontrolinio paleidimo (be vėlavimo) + 1 ms; abu exit 0."""
+    res = []
+    D = 20
+    for k, (tag, impl, storage, enc) in enumerate(variants()):
+        tid = f"favsync_late_audio[{tag}]"
+        port = 26000 + 20 * k
+        late = late_audio_run(out, f"favsync-late-{tag}", impl, storage, enc, port, D, 20)
+        ctrl = late_audio_run(out, f"favsync-late-ctrl-{tag}", impl, storage, enc, port + 10, D, 0)
+        if late.get("err") or ctrl.get("err"):
+            res.append(F.result(tid, "FAIL", why=f"vėluojantis: {late.get('err')}; kontrolinis: {ctrl.get('err')}"))
+            continue
+        fl, fc = late["enc"].get("flows") or [], ctrl["enc"].get("flows") or []
+        av = late["av"]
+        f0 = fl[0] if fl else {}
+        bad = []
+        if late["exit"] != 0 or ctrl["exit"] != 0:
+            bad.append(f"exit vėluojantis={late['exit']} kontrolinis={ctrl['exit']}")
+        for key in ("audio_underrun_frames", "audio_silence_samples"):
+            if f0.get(key, 0):
+                bad.append(f"srautas 0 {key}={f0.get(key)} (laukta 0)")
+        if len(av.get("pairs") or []) < D - 4 or av.get("offset_max_abs_ms") is None or av["offset_max_abs_ms"] > AAC_FRAME_MS:
+            bad.append(f"A/V: porų {len(av.get('pairs') or [])}, maks. |Δ| {av.get('offset_max_abs_ms')} ms > {AAC_FRAME_MS:.1f}")
+        if av.get("audio_pts_backward", 1) != 0 or av.get("decode_errors", 1) != 0:
+            bad.append(f"A/V: audio_pts_backward={av.get('audio_pts_backward')} decode_errors={av.get('decode_errors')}")
+        m0 = median_lateness(f0)
+        if m0 is None or m0 < 20.0:
+            bad.append(f"srauto 0 vėlavimo mediana {m0} ms < 20 (garsas nevėlavo?)")
+        others = []
+        for n in range(1, min(len(fl), len(fc))):
+            a, b = median_lateness(fl[n]), median_lateness(fc[n])
+            others.append((n, a, b))
+            if a is None or b is None or a > b + 1.0:
+                bad.append(f"srauto {n} vėlavimo mediana {a} ms > kontrolinio {b} + 1 ms")
+        res.append(F.result(tid, "FAIL" if bad else "PASS",
+                            why=f"{'; '.join(bad) or 'be tylos, A/V ≤ 1 AAC kadras, kiti nepaveikti'} | srautas 0: "
+                                f"underrun={f0.get('audio_underrun_frames', 0)} silence={f0.get('audio_silence_samples', 0)} "
+                                f"frames_encoded={f0.get('frames_encoded')} vėlavimo mediana {m0} ms; A/V maks. |Δ| "
+                                f"{av.get('offset_max_abs_ms')} ms vid. {av.get('offset_mean_ms')} ms porų {len(av.get('pairs') or [])}; "
+                                f"kiti (srautas, mediana, kontrolinio): {others}",
+                            enc=late["enc"], ctrl=ctrl["enc"]))
+    return res
+
+
+TESTS = {"favsync_drop": favsync_drop, "favsync_restart": favsync_restart, "favsync_late_audio": favsync_late_audio}

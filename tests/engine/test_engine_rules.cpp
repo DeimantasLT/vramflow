@@ -571,11 +571,14 @@ TEST_CASE("engine: enc forma — video grains 2, stride 2, garsas Wanted pakimba
     REQUIRE(frames.count(1029) == 1);
     CHECK(frames[1029].at == 1'300'000);  // garsas — paskutinis
     CHECK(frames[1029].a);
-    for (Index i = 1031; i <= 1035; i += 2) {  // Wanted laukiama tik iki a(i); trys praleidimai iš eilės → Stalled
+    // Wanted laukiama kaip Required iki vieneto paskutinės ribos (test_config: b = T + 15, C nėra), tada apdorojama be jo
+    // (anksčiau — A fazė ties a(i) = T + 5,5): 1031 — B (šviežias), 1033 / 1035 — C (pakibęs, miss_run ≥ 1); trys
+    // praleidimai iš eilės → Stalled
+    for (Index i = 1031; i <= 1035; i += 2) {
         INFO("i = " << i);
         REQUIRE(frames.count(i) == 1);
-        CHECK(frames[i].phase == 0);
-        CHECK(frames[i].at == 5'500'000);
+        CHECK(frames[i].phase == (i == 1031 ? 1 : 2));
+        CHECK(frames[i].at == 15'000'000);
         CHECK_FALSE(frames[i].a);
     }
     for (Index i = 1037; i <= 1041; i += 2) {

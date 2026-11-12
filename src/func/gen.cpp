@@ -44,6 +44,13 @@ struct GenFn final : engine::TickFunction {
     std::uint64_t first = ~0ull, last = 0;
     std::uint64_t t_wake = 0;
     std::vector<std::uint32_t> flow_of;  // batch'o eilė → flow numeris
+    // --audio-late-ms: grain'o garsas rašomas ne iškart po video commit'o, o pirmo tick'o atidarymo metu, kai praėjo
+    // T(i) + audio_late_ms (realaus laiko garso rašytojo modelis: grain'o garsas baigiamas jo periodo pabaigoje, T(i) + P).
+    struct PendingAudio {
+        std::uint32_t unit;
+        std::uint64_t index;
+    };
+    std::vector<PendingAudio> pending;
 
     GenFn(const Opts& o_, Stats& st_, bool cpu_, bool host_gpu_, ThreadPool& pool_, std::vector<media::GenJob>& jobs_,
           std::vector<std::uint32_t*>& host_dst_, std::vector<std::uint32_t*>& scratch_, cudaStream_t stream_,
@@ -51,9 +58,33 @@ struct GenFn final : engine::TickFunction {
         : o(o_), st(st_), cpu(cpu_), host_gpu(host_gpu_), pool(pool_), jobs(jobs_), host_dst(host_dst_), scratch(scratch_),
           stream(stream_), aout(aout_), grain(grain_), dim(dim_), inter(inter_), gbytes(gbytes_), warm(warm_) {
         flow_of.reserve(o.flows);
+        pending.reserve(static_cast<std::size_t>(o.flows) * 8);
     }
 
-    void begin_tick(engine::Index, engine::TickContext&) override { t_wake = now_tai(); }
+    void begin_tick(engine::Index, engine::TickContext&) override {
+        t_wake = now_tai();
+        if (pending.empty()) return;
+        const mxlRational r = mxl_rate(grain);
+        std::size_t keep = 0;
+        for (const PendingAudio& p : pending) {
+            if (mxlIndexToTimestamp(&r, p.index) + std::uint64_t{o.audio_late_ms} * 1'000'000 <= t_wake) write_audio(p.unit, p.index);
+            else pending[keep++] = p;
+        }
+        pending.resize(keep);
+    }
+
+    // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
+    void write_audio(std::uint32_t n, std::uint64_t i) {
+        const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
+        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
+        constexpr double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
+        const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
+            const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
+            return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
+        });
+        if (as == MXL_STATUS_OK) st.flows[n].inc("audio_blocks");
+        else st.flows[n].inc("audio_write_errors");
+    }
 
     // Variklio praleisti indeksai (T11): eilutė su TAI laiku (tik pirmam vienetui — visi praleidžia tuos pačius) —
     // izoliacijos testai aukštupio praradimus priskiria tik gedimo langui (kaip ir vėlius commit'us).
@@ -121,17 +152,8 @@ struct GenFn final : engine::TickFunction {
         const std::uint32_t n = ut.unit;
         if (o.video) st.flows[n].inc("fields_written");
         if (n >= aout.size()) return;
-        // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
-        const std::uint64_t i = ut.index;
-        const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
-        const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
-        constexpr double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
-        const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
-            const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
-            return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
-        });
-        if (as == MXL_STATUS_OK) st.flows[n].inc("audio_blocks");
-        else st.flows[n].inc("audio_write_errors");
+        if (o.audio_late_ms) pending.push_back({n, ut.index});
+        else write_audio(n, ut.index);
     }
 
     void end_tick(engine::Index i, engine::TickContext&) override {

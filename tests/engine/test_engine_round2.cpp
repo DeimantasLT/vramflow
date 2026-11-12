@@ -59,7 +59,9 @@ TEST_CASE("round2: vienas vėlus Wanted grain'as kainuoja tik tą indeksą", "[e
         if (i >= 1011 && !a) ++without;
     CHECK(without == 1);
     CHECK_FALSE(with_audio[1031]);
-    CHECK(at[1031] == 5'500'000);  // Wanted laukiama tik iki a(i)
+    // Wanted laukiama kaip Required iki vieneto paskutinės ribos (test_config: D = 15 → b = T + 15, C nėra); garsas T + 19 —
+    // vėliau, todėl apdorojama be jo ties b (anksčiau — ties a(i) = T + 5,5, nes Wanted buvo laukiama tik iki A).
+    CHECK(at[1031] == 15'000'000);
     CHECK(with_audio[1033]);
     CHECK(at[1033] == 1'300'000);  // kitas — vėl su garsu, laukiama iki jo
     CHECK(hub.in(eng.in_id(u, 1)).stalls == 0);

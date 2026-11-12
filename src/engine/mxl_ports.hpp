@@ -64,7 +64,7 @@ public:
     bool attach_poll(std::uint64_t now_tai) override;
     bool mismatch(std::string&) const override { return false; }
     Index head() override;
-    std::uint64_t last_write_tai() override;
+    std::uint64_t last_write_tai() override;  // visada 0: tęstinio flow'o lastWriteTime MXL neatnaujina (žr. .cpp)
     Probe probe(Index j, GrainRef& out) override;
     Probe wait(Index j, std::uint64_t timeout_ns, GrainRef& out) override;
     bool writer_alive() override;

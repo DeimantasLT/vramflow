@@ -51,6 +51,9 @@ struct Opts {
     std::uint32_t complexity = 2;
     bool audio = false;
     bool video = true;
+    // gen: grain'o garsas rašomas ne anksčiau kaip T(i) + audio_late_ms (pirmo tick'o atidarymo metu po jo; 0 — iškart po
+    // video commit'o, t. y. ~P anksčiau, nei jį baigtų realaus laiko rašytojas). 20 — realaus laiko garso modelis 50 Hz.
+    std::uint32_t audio_late_ms = 0;
     // logo
     std::string logo = "builtin";
     int logo_x = -1, logo_y = -1;  // < 0 — numatytoji vieta nuo rastro (viršutinis dešinys kampas; 1080: 1488, 64)

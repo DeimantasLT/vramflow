@@ -68,6 +68,8 @@ int main(int argc, char** argv) {
     common(g, o);
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
+    g->add_option("--audio-late-ms", o.audio_late_ms,
+                  "garsas rašomas ne anksčiau kaip T(i) + N ms (realaus laiko garso rašytojo modelis; 0 — iškart po video)");
     auto* gg = app.add_subcommand("gfxgen", "N × K sintetinių v210a grafikos šaltinių (tik libvramflow-gfx)");
     common(gg, o);
     gg->add_option("--layers", o.layers, "sluoksnių (flow'ų) skaičius šaltiniui, 1…8")->check(CLI::Range(1u, 8u));
