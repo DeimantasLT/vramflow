@@ -24,7 +24,8 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
 enum class SkipScope { Process, PerFlow };
 
 // Variklio rezultatas ir skaitikliai → Stats (first / last_index, clock_steps, clock_backward, *_skips). Raktai, kurių
-// reikšmė 0, nerašomi (kaip anksčiau — „įvykio“ skaitikliai atsiranda tik padidinti), išskyrus clock_steps.
+// reikšmė 0, nerašomi (kaip anksčiau — „įvykio“ skaitikliai atsiranda tik padidinti); clock_steps — tik Process (gen
+// santraukoje jis visada buvo, kitų funkcijų — ne).
 void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, const engine::RunResult& r, std::uint32_t units,
                 SkipScope scope, Stats& st);
 

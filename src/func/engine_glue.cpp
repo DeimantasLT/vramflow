@@ -36,7 +36,7 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
     if (r.first_index != engine::kNoIndex) st.first_index = r.first_index;
     if (r.last_index != engine::kNoIndex) st.last_index = r.last_index;
     const engine::EngineCounters& e = hub.engine();
-    st.proc["clock_steps"] = e.clock_steps;
+    if (scope == SkipScope::Process) st.proc["clock_steps"] = e.clock_steps;  // gen visada turėjo; logo ir kt. — ne (raktų aibė)
     if (e.clock_backward) st.proc["clock_backward"] += e.clock_backward;
     auto put = [](std::map<std::string, std::uint64_t>& m, const char* k, std::uint64_t v) {
         if (v) m[k] += v;
