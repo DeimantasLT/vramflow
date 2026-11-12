@@ -58,6 +58,9 @@ public:
     virtual bool flush_gaps() = 0;                                       // vienas sync fazei (host — nieko)
     virtual bool interlaced() const = 0;
     virtual std::uint32_t slot_count() const = 0;
+    // Sugedusio vieneto (K17, K-T11) išėjimas atlaisvinamas: žemupys mato flow dingusį (Gone / Detached), ne amžiną INVALID.
+    // Po release() variklis prievado nebekviečia.
+    virtual void release() {}
 };
 
 }  // namespace mxlv::engine

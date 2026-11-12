@@ -3,6 +3,7 @@
  "runs": 6,
  "required": {
   "top": [
+   "any_loss",
    "composite",
    "duration_s",
    "exit_code",
@@ -15,6 +16,7 @@
    "proc",
    "role",
    "run_id",
+   "strict_exit",
    "versions"
   ],
   "proc": [],

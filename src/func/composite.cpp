@@ -375,6 +375,7 @@ int run_composite(const Opts& o) {
     ports_out.reserve(N);
     for (auto& slot : in) ports_in.emplace_back(slot, inst);
     for (auto& v : out) ports_out.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    set_release(ports_out, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
     engine::SystemClock clk;
     engine::StatsHub hub;
     engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
@@ -390,9 +391,11 @@ int run_composite(const Opts& o) {
     CompositeFn fn(o, st, hub, eng, in, cpu, host_gpu, has_base, K, per, lx, ly, lop, lay, out_r, s_in, s_out, pool, stream,
                    warm_tai_after(o.warmup_s));
     bool engine_loss = false;
+    std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
         engine_loss = res.any_loss;
+        failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -414,14 +417,12 @@ int run_composite(const Opts& o) {
     for (auto& v : out) v.release(inst);
     for (auto& v : in) v.release();
     mxlDestroyInstance(inst);
-    // praradimai = pajėgumo / tiekimo klaida (exit 4), jei nebuvo fatalios
-    if (!rc)
-        for (auto& f : st.flows)
-            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid"})
-                if (f.c.count(k) && f.c[k]) rc = 4;
-    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
-    if (!rc && engine_loss) rc = 4;
-    return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
+    // praradimai (pajėgumo / tiekimo) ir variklio (RunResult::any_loss): griežtame režime exit 4, tarnyboje — tik santraukoje
+    bool loss = engine_loss;
+    for (auto& f : st.flows)
+        for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid"})
+            if (f.c.count(k) && f.c[k]) loss = true;
+    return finish(exit_code_for(o, rc, loss, failed, st));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (exit 0)
 }
 
 }  // namespace mxlv::func

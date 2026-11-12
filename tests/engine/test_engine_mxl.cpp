@@ -448,3 +448,26 @@ TEST_CASE("engine_mxl: 8 flow'ai, vienas rašytojas nužudytas", "[engine_mxl][r
     for (auto& o : outs) o->release(d.inst);
     for (auto& o : src) o->release(d.inst);
 }
+
+TEST_CASE("engine_mxl: open INVALID_ARG — AlreadyCommitted tik jau įrašytam indeksui, kitaip klaida (skaičiuojama)", "[engine_mxl]") {
+    // Anksčiau kiekvienas INVALID_ARG buvo „jau commit'intas“ (laikrodis atgal, M11) — ir amžinai, jei priežastis kita.
+    Domain d(9);
+    VideoOut o;
+    std::string err;
+    REQUIRE(o.create(d.inst, func::video_def(func::kRoleLogo, 9, 1, k1080i), "", err, k1080i));
+    o.id = func::flow_id(func::kRoleLogo, 9);
+    MxlVideoOutput port(o, host_copy(), nullptr, nullptr);
+    REQUIRE(commit_pattern(port, o, 100));
+    REQUIRE(commit_pattern(port, o, 101));
+    void* slot = nullptr;
+    CHECK(port.open(100, slot) == OpenResult::AlreadyCommitted);  // šis prievadas jį įrašė — laikrodis atgal
+    CHECK(port.invalid_arg_errors == 0);
+    MxlVideoOutput fresh(o, host_copy(), nullptr, nullptr);  // nieko neįrašęs prievadas (pvz. po perkrovimo)
+    CHECK(fresh.open(100, slot) == OpenResult::Error);
+    CHECK(fresh.invalid_arg_errors == 1);
+    bool released = false;
+    port.release_fn = [&] { released = true; };
+    port.release();
+    CHECK(released);
+    o.release(d.inst);
+}

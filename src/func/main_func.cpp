@@ -6,6 +6,7 @@
 
 #include <cstdio>
 
+#include "func/engine_glue.hpp"
 #include "func/func_common.hpp"
 
 namespace mxlv::func {
@@ -30,8 +31,20 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--flow-base", o.flow_base);
     c->add_option("--run-seed", o.run_seed);
     c->add_option("--duration", o.duration_s,
-                  "trukmė, s (numatyta 30). gen, logo, composite, enc, dec: 0 — veikti iki sustabdymo (SIGINT / SIGTERM; "
-                  "tarnybos režimas, K-T8); verify, gfxgen: 0 — baigti iškart");
+                  "trukmė, s. gen, gfxgen, logo, composite, enc, dec: numatyta 0 — veikti iki sustabdymo (SIGINT / SIGTERM; "
+                  "tarnybos režimas, K-T8); verify: numatyta 30, 0 — baigti iškart");
+    c->add_option("--strict-exit", o.strict_exit,
+                  "auto (numatyta): griežtas, kai --duration > 0 (praradimas → exit 4, sugedęs vienetas → 2), tarnyboje — "
+                  "tvarkingas sustabdymas → 0 | on | off")
+        ->check(CLI::IsMember({"auto", "on", "off"}));
+    c->add_option("--drain-ms", o.drain_ms, "sustabdant: eilių išleidimo riba, ms (numatyta 500; antras signalas — iškart)");
+    c->add_option("--rt-priority", o.rt_priority, "variklio gijai SCHED_FIFO prioritetas 1…99 (0 — ne; numatyta)")
+        ->check(CLI::Range(0, 99));
+    c->add_option("--cpu-affinity", o.cpu_affinity, "variklio gijos CPU sąrašas, pvz. 2 arba 0,2-3 (numatyta — nekeisti)")
+        ->check([](const std::string& s) {
+            std::vector<int> v;
+            return mxlv::func::parse_cpu_list(s, v) ? std::string{} : std::string("netinkamas CPU sąrašas: ") + s;
+        });
     c->add_option("--warmup", o.warmup_s);
     c->add_option("--out", o.out);
     c->add_option("--device-uuid", o.device_uuid);
@@ -49,6 +62,7 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--test-out-error", o.test_out_error)->check(CLI::IsMember({"open", "commit"}))->group("");
     c->add_option("--test-out-error-after", o.test_out_error_after_s)->group("");
     c->add_option("--test-out-error-count", o.test_out_error_count)->group("");
+    c->add_option("--test-out-error-flow", o.test_out_error_flow)->group("");
 }
 // Įėjimus skaitančios funkcijos (logo, composite, verify, enc): laukimas ir formato pasikeitimas po re-attach (planas §P6).
 void inputs(CLI::App* c, Opts& o) {
@@ -178,6 +192,7 @@ int main(int argc, char** argv) {
         }
     }
     if (o.impl == "cpu") o.storage = "host";  // CPU variantas visada su host flow'ais
+    if (o.duration_s < 0) o.duration_s = app.got_subcommand("verify") ? 30 : 0;  // K-T8: funkcijos — tarnyba
     if (app.got_subcommand("clip")) return run_clip(o, clip_frames, o.fmt.raster.interlaced ? clip_first & ~1ull : clip_first);
     if (app.got_subcommand("ref-crc")) return run_ref_crc(o, ref_path);
     if (app.got_subcommand("split-raw")) return run_split_raw(o, conv_in, conv_out, conv_chroma == "frame");

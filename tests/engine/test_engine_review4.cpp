@@ -156,3 +156,48 @@ TEST_CASE("review4: C fazė — po A + B + ankstyvo C atėjęs iki c(i) vienetas
     CHECK(r.hub.engine().cut_batches == 1);
     CHECK(r.hub.engine().carry_overrun == 0);
 }
+
+TEST_CASE("review4: fail_unit — vienas išėjimas sugenda, kiti N − 1 nepaliesti (K17, K-T11)", "[engine][review4][service]") {
+    constexpr Index kI = 1010;
+    Rig r(4);
+    r.outs[2]->fail_commit = [](Index i) { return i >= kI; };
+    r.stop_after(kI + 30);
+    r.build();
+    const RunResult res = r.run();
+    CHECK(res.reason == EndReason::Stopped);
+    CHECK(res.exit_code == 0);  // exit politika — funkcijos (exit_code_for: griežtai 2, tarnyboje 0)
+    CHECK(res.failed_units == 1);
+    CHECK(r.outs[2]->released);
+    CHECK(r.out(2).commit_errors == 3);
+    CHECK(res.any_loss);
+    for (std::uint32_t u : {0u, 1u, 3u}) {
+        INFO("u" << u);
+        CHECK_FALSE(r.outs[u]->released);
+        CHECK(r.out(u).commit_errors == 0);
+        for (Index i = kI; i <= kI + 30; ++i) {
+            const auto* e = r.outs[u]->find(i);
+            REQUIRE(e != nullptr);
+            CHECK(e->kind == RecordingOutput::Kind::Commit);
+            CHECK(static_cast<std::int64_t>(e->tai) - T(i) == 1'200'000);  // kitų laikas nepakito
+        }
+    }
+    // sugedęs vienetas po gedimo nebeatidaromas: jokių įvykių po kI + 2
+    for (const auto& e : r.outs[2]->events) CHECK(e.index <= kI + 2);
+}
+
+TEST_CASE("review4: TickContext::fail_unit iš funkcijos — vienetas baigiamas, išėjimas atlaisvinamas", "[engine][review4][service]") {
+    constexpr Index kI = 1010;
+    Rig r(2);
+    r.fn.on_begin_tick = [](Index i, TickContext& ctx) {
+        if (i == kI) ctx.fail_unit(0, "testas");
+    };
+    r.stop_after(kI + 10);
+    r.build();
+    const RunResult res = r.run();
+    CHECK(res.reason == EndReason::Stopped);
+    CHECK(res.failed_units == 1);
+    CHECK(res.failed_why == "testas");
+    CHECK(r.outs[0]->released);
+    CHECK(r.outs[0]->find(kI) == nullptr);
+    CHECK(r.outs[1]->find(kI + 10) != nullptr);
+}

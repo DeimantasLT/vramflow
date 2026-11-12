@@ -74,6 +74,7 @@ struct Stream {
     std::string error;
     // statistika (rašo darbininkas; skaitoma po join)
     std::uint64_t frames_encoded = 0, packets_video = 0, packets_audio = 0, bytes_video = 0, mux_errors = 0, encode_errors = 0;
+    std::uint64_t drain_until = 0, drain_dropped = 0;  // sustabdant: išleidimo riba (TAI), neišleisti kadrai
     Histogram encode_ms;
     // Garso laiko juosta (PTS iš kadro indekso): srauto būsena, ne funkcijos static — keli srautai vienoje gijoje nesusimaišo.
     mxlv::timing::AudioTimeline audio_tl;
@@ -261,6 +262,10 @@ void worker(Ctx& cx, Stream& s) {
             std::unique_lock lk(s.m);
             s.cv.wait(lk, [&] { return !s.q.empty() || s.done; });
             if (s.q.empty()) break;
+            if (s.done && (fast_stop_flag().load() || now_tai() > s.drain_until)) {  // --drain-ms praėjo / antras signalas
+                s.drain_dropped += s.q.size();
+                break;  // likusius atlaisvina out: blokas
+            }
             it = std::move(s.q.front());
             s.q.pop_front();
         }
@@ -299,8 +304,12 @@ void worker(Ctx& cx, Stream& s) {
             while (s.audio_tl.ready()) encode_audio(ac, fifo, oc, pkt, s, s.audio_tl.take());
         }
     }
+    if (fast_stop_flag().load()) goto trailer;  // antras signalas: be koderių išleidimo
     avcodec_send_frame(vc, nullptr);
-    while (avcodec_receive_packet(vc, pkt) == 0) {
+    // Koderio išleidimas (x264 lookahead — iki dešimčių kadrų) — taip pat ne ilgiau kaip --drain-ms ir nutraukiamas antru
+    // signalu (kiekvienas receive_packet koduoja kadrą)
+    while (!fast_stop_flag().load() && (s.drain_until == 0 || now_tai() <= s.drain_until) &&
+           avcodec_receive_packet(vc, pkt) == 0) {
         pkt->stream_index = 0;
         av_packet_rescale_ts(pkt, vc->time_base, oc->streams[0]->time_base);
         av_interleaved_write_frame(oc, pkt);
@@ -313,6 +322,7 @@ void worker(Ctx& cx, Stream& s) {
             av_interleaved_write_frame(oc, pkt);
         }
     }
+trailer:
     av_write_trailer(oc);
 out:
     {  // likusius kadrus atlaisvinti
@@ -325,8 +335,12 @@ out:
         avformat_free_context(oc);
     }
     if (fifo) av_audio_fifo_free(fifo);
-    avcodec_free_context(&vc);
-    avcodec_free_context(&ac);
+    // Antras signalas (greitas išėjimas, ≤ 200 ms): koderių uždarymas (x264 lookahead / gijų sujungimas — dešimtys ms) praleidžiamas,
+    // atmintį atlaisvina proceso pabaiga.
+    if (!fast_stop_flag().load()) {
+        avcodec_free_context(&vc);
+        avcodec_free_context(&ac);
+    }
     av_packet_free(&pkt);
 }
 
@@ -757,9 +771,11 @@ int run_enc(const Opts& o) {
     fn.push_audio_only = push_audio_only;
     fn.audio_of_dropped = audio_of_dropped;
     bool engine_loss = false;
+    std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
         engine_loss = res.any_loss;
+        failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -773,10 +789,13 @@ int run_enc(const Opts& o) {
             st.last_index = res.last_index - ((res.last_index + 1) % gpf);  // kadro paskutinis (apatinis) laukas, ne viršutinis
         }
     }
+    // Sustabdymas (D8): darbininkai išleidžia eilę ne ilgiau kaip --drain-ms (antras signalas — iškart); kas liko — atmetama.
+    const std::uint64_t drain_until = now_tai() + std::uint64_t{o.drain_ms} * 1'000'000;
     for (auto& s : streams) {
         {
             std::lock_guard g(s->m);
             s->done = true;
+            s->drain_until = drain_until;
         }
         s->cv.notify_one();
     }
@@ -792,6 +811,7 @@ int run_enc(const Opts& o) {
             st.flows[n].inc("audio_skipped_samples", s.audio_tl.skipped_samples());
         }
         st.flows[n].inc("encode_errors", s.encode_errors);
+        if (s.drain_dropped) st.flows[n].inc("drain_dropped_frames", s.drain_dropped);  // įvykio raktas: sustabdant neišleista
         st.flows[n].inc("mux_errors", s.mux_errors);
         st.hist["encode_ms"].merge(s.encode_ms);
         if (!s.error.empty() && !rc) { st.fatal = "srautas " + std::to_string(n) + ": " + s.error; rc = 2; }
@@ -814,14 +834,13 @@ int run_enc(const Opts& o) {
     mxlDestroyInstance(inst);
     for (auto* fr : cx.frames) av_buffer_unref(&fr);
     av_buffer_unref(&cx.hw);
-    if (!rc)
-        for (auto& f : st.flows)
-            for (const char* k : {"late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
-                                  "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors"})
-                if (f.c.count(k) && f.c[k]) rc = 4;
-    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
-    if (!rc && engine_loss) rc = 4;
-    return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
+    // praradimai (ir garso, kodavimo) ir variklio (RunResult::any_loss): griežtame režime exit 4, tarnyboje — tik santraukoje
+    bool loss = engine_loss;
+    for (auto& f : st.flows)
+        for (const char* k : {"late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
+                              "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors"})
+            if (f.c.count(k) && f.c[k]) loss = true;
+    return finish(exit_code_for(o, rc, loss, failed, st));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (exit 0)
 }
 
 }  // namespace mxlv::func

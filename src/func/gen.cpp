@@ -231,6 +231,7 @@ int run_gen(const Opts& o) {
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(vout.size());
     for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    set_release(ports, vout, inst);  // sugedęs vienetas — jo video flow'as atlaisvinamas (K-T11)
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
     for (auto& p : ports) optr.push_back(&p);
@@ -246,8 +247,12 @@ int run_gen(const Opts& o) {
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
     }
     GenFn fn(o, st, cpu, host_gpu, pool, jobs, host_dst, scratch, stream, aout, grain, dim, inter, gbytes, warm_tai_after(o.warmup_s));
+    bool loss = false;
+    std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        loss = res.any_loss;  // praleisti indeksai, išėjimo klaidos — gen taip pat (anksčiau gen exit jų nerodė)
+        failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -266,6 +271,7 @@ int run_gen(const Opts& o) {
     for (auto& v : vout) v.release(inst);
     for (auto& a : aout) a.release(inst);
     mxlDestroyInstance(inst);
+    rc = exit_code_for(o, rc, loss, failed, st);  // --strict-exit: kaip kitos funkcijos
     st.exit_code = rc;
     write_summary(o, "gen", st);
     std::fprintf(stderr, "[gen] baigta, exit %d %s\n", rc, st.fatal.c_str());

@@ -186,15 +186,25 @@ std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r) {
     return g;
 }
 
+// INVALID_ARG — AlreadyCommitted (laikrodis atgal, M11) TIK indeksui ≤ paskutinio šio prievado įrašyto; kitaip tai išėjimo
+// klaida (skaičiuojama; ilgalaikė — vienetas sugenda), ne amžinas tylus „jau commit'intas“.
 OpenResult MxlVideoOutput::open(Index i, void*& slot) {
     mxlStatus st{};
     std::uint32_t* p = out_.open(i, st);
-    if (p == nullptr) return st == MXL_ERR_INVALID_ARG ? OpenResult::AlreadyCommitted : OpenResult::Error;  // M11
+    if (p == nullptr) {
+        if (st == MXL_ERR_INVALID_ARG && last_ != kNoIndex && i <= last_) return OpenResult::AlreadyCommitted;  // M11
+        if (st == MXL_ERR_INVALID_ARG) ++invalid_arg_errors;
+        return OpenResult::Error;
+    }
     slot = p;
     return OpenResult::Ok;
 }
 
-bool MxlVideoOutput::commit() { return out_.commit() == MXL_STATUS_OK; }
+bool MxlVideoOutput::commit() {
+    if (out_.commit() != MXL_STATUS_OK) return false;
+    last_ = out_.last_committed;
+    return true;
+}
 
 void MxlVideoOutput::cancel() { out_.cancel(); }
 
@@ -209,6 +219,12 @@ bool MxlVideoOutput::copy_commit(Index i, const void* src) {
 }
 
 bool MxlVideoOutput::fill_gap(Index i, GapAction a, Index repeat_from) {
+    const bool ok = fill(i, a, repeat_from);
+    if (ok && a != GapAction::None) last_ = last_ == kNoIndex ? i : std::max(last_, i);
+    return ok;
+}
+
+bool MxlVideoOutput::fill(Index i, GapAction a, Index repeat_from) {
     switch (a) {
         case GapAction::None: return true;
         case GapAction::Invalid: return out_.commit_invalid(i) == MXL_STATUS_OK;

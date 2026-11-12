@@ -42,7 +42,8 @@ struct UnitSpec {
 
 // Skipped — išėjimo indeksas jau commit'intas (laikrodis atgal, M11): ne klaida ir ne praradimas.
 // OutputError — išėjimo open / commit klaida: indeksas be įrašo, commit_errors++ (praradimas); out_fail_fatal kartų iš
-// eilės tam pačiam išėjimui — variklis baigia fatalu (exit 2), kaip prieš migraciją.
+// eilės tam pačiam išėjimui — sugenda TIK tas vienetas (fail_unit: jo išėjimai atlaisvinami, kiti N − 1 tęsia); kai sugenda
+// visi vienetai — fatalu (exit 2).
 enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError };
 const char* to_string(Outcome);
 
@@ -112,7 +113,12 @@ struct EngineConfig {
     std::int64_t input_wait_ns = 0;  // 0 — neribotai
     double duration_s = 0, warmup_s = 5;
     std::uint32_t skip_align = 1;    // dec interlaced: 2 (po praleidimo tęsti nuo viršutinio lauko)
-    std::uint32_t out_fail_fatal = 3;  // tiek open / commit klaidų iš eilės vienam išėjimui → fatalu (exit 2); 0 — niekada
+    std::uint32_t out_fail_fatal = 3;  // tiek open / commit klaidų iš eilės vienam išėjimui → vienetas sugenda; 0 — niekada
+    // Variklio gija (planas A19, D8): SCHED_FIFO prioritetas (0 — nekeisti) ir CPU rinkinys (tuščias — nekeisti). Taikoma
+    // run() pradžioje PO statistikos gijos paleidimo — ji (ir kitos jau sukurtos gijos) RT nepaveldi. Nepavykus (nėra
+    // teisių) — įspėjimas RunResult::warn, darbas tęsiamas.
+    int rt_priority = 0;
+    std::vector<int> cpu_affinity;
     std::function<bool(const UnitSpec&, std::string& why)> admit;  // P4; tuščias — priimti
     // Bibliotekos PacingHooks::wait: jei nustatytas, tick'as atidaromas juo, ne Clock::sleep_until.
     std::function<bool(Index, std::int64_t offset_ns, const std::atomic<bool>& stop)> open_wait;
@@ -128,8 +134,11 @@ struct RunResult {
     Index first_index = kNoIndex, last_index = kNoIndex;
     // Bent vienas tikras praradimas: vieneto spraga (be laikrodžio ir šaltinio „nėra turinio“ spragų), lap'as, late_skips,
     // įėjimo lost, išėjimo commit_errors. Laikrodžio įvykiai (clock_skips, GapClock, AlreadyCommitted) — ne praradimas.
-    // Funkcijos jį naudoja exit kodui 4 (kaip praradimų raktai prieš migraciją).
+    // Funkcijos jį naudoja exit kodui 4 griežtame režime (--strict-exit).
     bool any_loss = false;
+    std::uint32_t failed_units = 0;  // fail_unit (ilgalaikė išėjimo klaida arba funkcijos sprendimas); visi — Fatal, exit 2
+    std::string failed_why;          // pirmo sugedusio vieneto priežastis (santraukai)
+    std::string warn;                // ne fatalūs įspėjimai (pvz. --rt-priority be teisių)
 };
 
 class TickEngine {
@@ -147,6 +156,7 @@ public:
     std::uint32_t out_id(std::uint32_t unit, std::uint32_t output) const;
     std::uint32_t unit_id(std::uint32_t unit) const;
     InState in_state(std::uint32_t unit, std::uint32_t input) const;
+    bool unit_failed(std::uint32_t unit) const;
     bool in_late(std::uint32_t unit, std::uint32_t input) const;
 
 private:

@@ -322,6 +322,7 @@ int run_logo(const Opts& o_in) {
         ports_in.emplace_back(in[n], inst);
         ports_out.emplace_back(out[n], engine::host_copy(), nullptr, nullptr);
     }
+    set_release(ports_out, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
     engine::SystemClock clk;
     engine::StatsHub hub;
     engine::TickEngine eng(engine_config(o, kLogoTiming, o.read_offset_us * 1000), clk, hub, stop);
@@ -340,9 +341,11 @@ int run_logo(const Opts& o_in) {
     LogoFn fn(o, st, hub, eng, cpu, host_gpu, inter, dim, gbytes, inject_word, pool, dlogo, hlogo, stream, s_in, s_out,
               warm_tai_after(o.warmup_s));
     bool engine_loss = false;
+    std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
         engine_loss = res.any_loss;
+        failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -364,15 +367,14 @@ int run_logo(const Opts& o_in) {
         in[n].release();
     }
     mxlDestroyInstance(inst);
-    // praradimai = pajėgumo / tiekimo klaida (exit 4), jei nebuvo fatalios; missing_fields — įėjimo spraga (gamintojas dingo)
-    if (!rc)
-        for (auto& f : st.flows)
-            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields",
-                                  "output_errors"})
-                if (f.c.count(k) && f.c[k]) rc = 4;
-    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
-    if (!rc && engine_loss) rc = 4;
-    return finish(rc);
+    // praradimai (pajėgumo / tiekimo; missing_fields — įėjimo spraga) ir variklio (RunResult::any_loss, ir išėjimo klaidos):
+    // griežtame režime exit 4, tarnyboje — tik santraukoje (exit_code_for, --strict-exit)
+    bool loss = engine_loss;
+    for (auto& f : st.flows)
+        for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields",
+                              "output_errors"})
+            if (f.c.count(k) && f.c[k]) loss = true;
+    return finish(exit_code_for(o, rc, loss, failed, st));
 }
 
 }  // namespace mxlv::func

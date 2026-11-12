@@ -1083,6 +1083,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in isolation.TESTS.items()})
     import targeted  # tiksliniai migracijos peržiūros testai (fsplit, flate_stall, fcrashloop)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in targeted.TESTS.items()})
+    import service  # tarnybos gyvavimo ciklas (fsvc_run, fsvc_loss, fsvc_second_signal, fsvc_fail_unit)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in service.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():

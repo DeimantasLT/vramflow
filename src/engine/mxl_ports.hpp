@@ -114,9 +114,19 @@ public:
     bool flush_gaps() override { return true; }  // kopijos jau sinchronizuotos fill_gap metu
     bool interlaced() const override { return out_.raster.interlaced; }
     std::uint32_t slot_count() const override { return out_.layout.slotCount; }
+    void release() override {
+        if (release_fn) release_fn();
+    }
+
+    // Funkcija nustato: išėjimo flow atlaisvinimas (VideoOut::release su savo mxlInstance) sugedus vienetui.
+    std::function<void()> release_fn;
+    // open → INVALID_ARG indeksui, didesniam už paskutinį šio prievado įrašytą (ne laikrodis atgal): skaičius (santraukai).
+    std::uint64_t invalid_arg_errors = 0;
 
 private:
     bool copy_commit(Index i, const void* src);
+    bool fill(Index i, GapAction a, Index repeat_from);
+    Index last_ = kNoIndex;  // paskutinis šio prievado commit'intas (turinys arba spraga) indeksas
     func::VideoOut& out_;
     GrainCopy copy_;
     std::function<bool()> flush_;

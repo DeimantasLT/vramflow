@@ -37,8 +37,16 @@ struct Opts {
     vramflow::VideoFormat fmt = vramflow::kFmt1080i50;
     std::uint32_t flow_base = 0;
     std::uint64_t run_seed = 0x4C52544D584C4756ull;
-    double duration_s = 30;
+    // Trukmė, s (planas D8, K-T8): 0 — veikti iki sustabdymo (tarnyba; numatyta funkcijoms); < 0 — nenurodyta (main_func:
+    // verify — 30 s, kitos — 0). > 0 — matavimo režimas.
+    double duration_s = -1;
     double warmup_s = 5;
+    // Exit kodas (D8): auto — griežtas, kai --duration > 0 (bet kuris praradimas → 4, sugedęs vienetas → 2), švelnus tarnybos
+    // režime (tvarkingas sustabdymas → 0; praradimai — tik santraukoje / statistikoje); on / off — priverstinai.
+    std::string strict_exit = "auto";
+    std::uint32_t drain_ms = 500;  // sustabdant: darbininkų eilių (enc) išleidimo riba; antras signalas — nutraukia iškart
+    int rt_priority = 0;           // SCHED_FIFO variklio gijai (0 — ne); be teisių — įspėjimas, darbas tęsiamas
+    std::string cpu_affinity;      // variklio gijos CPU sąrašas „0,2-3“ (tuščia — nekeisti)
     std::string out = ".";
     std::string device_uuid;
     // Paleidimas ir sustabdymas (planas §P6). run_id — šio paleidimo nuoma `<domain>.vramflow/<run_id>.lease` (tuščia —
@@ -95,6 +103,7 @@ struct Opts {
     std::string test_out_error;
     double test_out_error_after_s = 3;
     std::uint32_t test_out_error_count = 0;
+    int test_out_error_flow = -1;  // tik šio flow'o (0…N − 1) išėjimas; < 0 — visi
     // Testinė (paslėpta) gedimo vėlinimo injekcija (logo): process() A fazėje užmiega tiek ms, kai tame indekse kurio nors
     // vieneto įėjimo nėra (spraga atidarant — GapBlocked). Izoliacijos vartų „dantų“ meta-testui (tests/functional/isolation.py fiso_teeth):
     // funkcija, kuri dėl sugedusio įėjimo vėluoja ir sveikiems, vartuose turi būti FAIL. 0 — išjungta.
@@ -150,6 +159,8 @@ struct Stats {
     std::uint64_t first_index = ~0ull, last_index = 0;
     std::string fatal;
     int exit_code = 0;
+    int strict = -1;        // exit_code_for: 1 — griežtas, 0 — švelnus; < 0 — nerašoma (ne variklio funkcija)
+    bool any_loss = false;  // exit_code_for: bent vienas praradimas
     void add_hist(const char* k, std::uint64_t ns) { hist[k].add(ns); }
 };
 
@@ -159,6 +170,8 @@ bool parse_xy(const std::string& s, int& x, int& y);                            
 
 std::string storage_options(const Opts& o, int dev);  // writer'io opcijos pagal --storage
 std::atomic<bool>& stop_flag();
+// Antras SIGINT / SIGTERM (D8, A25): greitas išėjimas — eilių išleidimas (--drain-ms) nutraukiamas, flow'ai atlaisvinami.
+std::atomic<bool>& fast_stop_flag();
 void install_signals();
 int cuda_device(const std::string& uuid);  // -1 nerasta
 std::string cuda_options(int dev);         // cuda-linear writer'io opcijos

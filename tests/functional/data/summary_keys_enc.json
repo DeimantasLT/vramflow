@@ -3,6 +3,7 @@
  "runs": 6,
  "required": {
   "top": [
+   "any_loss",
    "duration_s",
    "encoder",
    "exit_code",
@@ -17,6 +18,7 @@
    "role",
    "run_id",
    "streams",
+   "strict_exit",
    "versions"
   ],
   "proc": [],

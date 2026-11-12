@@ -60,19 +60,30 @@ TEST_CASE("review3: vienkartinė commit klaida — OutputError", "[engine][revie
     CHECK(m.count(Outcome::Skipped) == 0);
 }
 
-TEST_CASE("review3: ilgalaikė išėjimo klaida — fatalu, exit 2, pranešimas su išėjimo vardu", "[engine][review3][output]") {
+TEST_CASE("review3: ilgalaikė išėjimo klaida — sugenda tik tas vienetas; visi — fatalu, exit 2", "[engine][review3][output]") {
     constexpr Index kI = 1010;
     SECTION("open") {
+        // Anksčiau — visas procesas fatalu (exit 2) po 3 klaidų iš eilės; dabar (planas D8, K17, K-T11) sugenda tik u1: jo
+        // išėjimas atlaisvinamas, u0 tęsia iki stop_after.
         Rig r(2);
         r.outs[1]->fail_open = [](Index i) { return i >= kI; };
         r.stop_after(kI + 50);
         r.build();
         const RunResult res = r.run();
-        CHECK(res.reason == EndReason::Fatal);
-        CHECK(res.exit_code == 2);
-        CHECK(res.fatal.find("u1/out0") != std::string::npos);
-        CHECK(res.last_index < kI + 10);  // baigiasi iškart po ribos (3 iš eilės), ne po stop_after
+        CHECK(res.reason == EndReason::Stopped);
+        CHECK(res.exit_code == 0);
+        CHECK(res.failed_units == 1);
+        CHECK(res.failed_why.find("u1/out0") != std::string::npos);
+        CHECK(res.last_index >= kI + 50);
         CHECK(r.out(1).commit_errors == 3);
+        CHECK(r.outs[1]->released);
+        CHECK_FALSE(r.outs[0]->released);
+        CHECK(r.eng->unit_failed(1));
+        for (Index i = kI; i <= kI + 50; ++i) {
+            const auto* e = r.outs[0]->find(i);
+            REQUIRE(e != nullptr);
+            CHECK(e->kind == RecordingOutput::Kind::Commit);
+        }
     }
     SECTION("commit") {
         Rig r(1);
@@ -80,9 +91,11 @@ TEST_CASE("review3: ilgalaikė išėjimo klaida — fatalu, exit 2, pranešimas 
         r.stop_after(kI + 50);
         r.build();
         const RunResult res = r.run();
-        CHECK(res.reason == EndReason::Fatal);
+        CHECK(res.reason == EndReason::Fatal);  // vienintelis vienetas sugedo — visi
         CHECK(res.exit_code == 2);
         CHECK(res.fatal.find("u0/out0") != std::string::npos);
+        CHECK(res.fatal.find("visi vienetai") != std::string::npos);
+        CHECK(r.outs[0]->released);
     }
     SECTION("klaidos ne iš eilės — ne fatalu") {
         Rig r(1);

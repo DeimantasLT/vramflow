@@ -316,7 +316,10 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--flow-base B` | First flow number (to run several independent groups in one domain) |
 | `--impl gpu\|cpu`, `--storage cuda-linear\|host` | Variant, see section 1 |
 | `--device-uuid GPU-…` | GPU to use (default: device 0) |
-| `--duration S`, `--warmup S` | Run time (default 30 s; `0` — run until `SIGINT` / `SIGTERM` for `gen`, `logo`, `composite`, `enc`, `dec`); warm-up seconds are left out of the statistics |
+| `--duration S`, `--warmup S` | Run time. Default `0` — a service: run until `SIGINT` / `SIGTERM` (`gen`, `gfxgen`, `logo`, `composite`, `enc`, `dec`; `verify` keeps 30 s). `S > 0` — a measurement run. Warm-up seconds are left out of the statistics |
+| `--strict-exit auto\|on\|off` | Exit code policy (see *Exit code and summary*); `auto` (default) is strict for `--duration S > 0` and lenient in service mode |
+| `--drain-ms N` | On stop: how long worker queues (`enc`) may drain, default 500; a second signal stops at once |
+| `--rt-priority N`, `--cpu-affinity LIST` | Engine thread only: `SCHED_FIFO` priority 1–99 and CPU list such as `2` or `0,2-3` (default: unchanged). Without the privilege the run continues with a warning |
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 | `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
@@ -418,10 +421,24 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
 
 ### Exit code and summary
 
-Exit code `0` means everything was correct. `1` — wrong options or configuration, `2` — setup failed (CUDA, MXL, an output
-flow owned by another run) or an output kept failing (3 open / commit errors in a row on one output; the message names the
-output), `3` — verification errors, `4` — something was lost (late, missing, a single output error, inputs did not appear
-within `--input-wait-ms`), `6` — an input came back with another format (`--on-format-change exit`). Every run writes
+Exit codes of the functions on the shared tick engine (`gen`, `logo`, `composite`, `enc`, `dec`). Strict — `--strict-exit on`,
+or `auto` with `--duration S > 0` (test and measurement runs); lenient — `off`, or `auto` in service mode (`--duration 0`):
+
+| Situation | strict | lenient |
+|---|---:|---:|
+| Clean end (duration over or `SIGINT` / `SIGTERM`), nothing lost | 0 | 0 |
+| Something was lost (gap, late, skipped index, lost input grain, single output error) | 4 | 0 |
+| One unit failed (3 open / commit errors in a row on its output): only it stops, its output flow is released, the other units keep running | 2 | 0 |
+| All units failed | 2 | 2 |
+| Wrong options or configuration | 1 | 1 |
+| Setup or run-time failure (CUDA, MXL, an output flow owned by another run) | 2 | 2 |
+| Inputs did not appear within `--input-wait-ms` | 4 | 4 |
+| An input came back with another format (`--on-format-change exit`) | 6 | 6 |
+| Stopped while still waiting for inputs | 0 | 0 |
+
+`verify` exits `3` on verification errors. In service mode losses are reported in the summary only: `any_loss` and
+`strict_exit` (top level) and the counters; failed units — `failed_units` (proc) and `unit_failed` (per flow). A second
+`SIGINT` / `SIGTERM` skips draining (`--drain-ms`) and exits at once, after releasing the output flows. Every run writes
 `summary-<command>.json` with counters (fields written, read, lost, late, invalid, verification errors), a latency histogram,
 the run ID and the software / GPU versions.
 
@@ -429,7 +446,7 @@ Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`,
 
 | Counter | Meaning |
 |---|---|
-| `output_errors` (per flow) | Opening or committing an output grain failed; the index has no grain. Counted as a loss (exit `4`); 3 in a row on one output end the run with exit `2` |
+| `output_errors` (per flow) | Opening or committing an output grain failed; the index has no grain. Counted as a loss (exit `4` when strict); 3 in a row on one output fail that unit alone (`unit_failed`, output flow released; exit `2` when strict or when all units failed). An open refused with `MXL_ERR_INVALID_ARG` is "already written" (clock stepped back) only for an index this output already wrote; otherwise it is an output error |
 | `clock_backward` (process) | The output index was already written — the clock went back (MXL refuses to write an index twice). Not an error, not a loss |
 | `late_fields` → `missing_fields` | An input that stopped delivering (alive but stuck, e.g. `SIGSTOP`) costs 3 `late_fields` (the engine waits for it up to the deadline 3 times), after that it is *stalled* and every further index is `missing_fields` (no wait at all) until it delivers again |
 | `read_errors` (per flow) | Replaces the old `read_status_<code>` keys: any unexpected read status of an input. The status code itself is no longer in the summary |

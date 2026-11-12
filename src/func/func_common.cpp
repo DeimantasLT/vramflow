@@ -21,6 +21,13 @@ std::atomic<bool>& stop_flag() {
     return s;
 }
 
+std::atomic<bool>& fast_stop_flag() {
+    static std::atomic<bool> s{false};
+    return s;
+}
+
+// Signalai — tik sigwait atskiroje gijoje cikle (A25): pirmas SIGINT / SIGTERM — tvarkingas sustabdymas (stop_flag), antras —
+// greitas (fast_stop_flag: eilių išleidimas nutraukiamas). Variklio gija signalų negauna (užblokuoti visose gijose).
 void install_signals() {
     sigset_t set;
     sigemptyset(&set);
@@ -28,9 +35,12 @@ void install_signals() {
     sigaddset(&set, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &set, nullptr);
     std::thread([set] {
-        int sig = 0;
-        sigwait(&set, &sig);
-        stop_flag() = true;
+        for (int n = 0; n < 2; ++n) {
+            int sig = 0;
+            if (sigwait(&set, &sig) != 0) return;
+            if (n == 0) stop_flag() = true;
+            else fast_stop_flag() = true;
+        }
     }).detach();
 }
 
@@ -174,6 +184,8 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
         j += f;
     }
     j += "]";
+    if (s.strict >= 0)  // variklio funkcijos: exit politika ir ar buvo praradimų (tarnybos režime exit 0 jų neparodo)
+        j += std::string(",\"strict_exit\":") + (s.strict ? "true" : "false") + ",\"any_loss\":" + (s.any_loss ? "true" : "false");
     if (!s.commit_lateness_s.empty()) j += ",\"commit_lateness_s\":" + seconds_json(s.commit_lateness_s);
     if (!s.fatal.empty()) {
         j += ",\"fatal\":";

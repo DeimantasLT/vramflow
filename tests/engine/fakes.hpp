@@ -182,6 +182,8 @@ public:
     }
     bool interlaced() const override { return interlaced_; }
     std::uint32_t slot_count() const override { return slots_; }
+    bool released = false;  // fail_unit: išėjimas atlaisvintas (po to variklis jo nebekviečia)
+    void release() override { released = true; }
 
     const Event* find(Index i) const {
         for (const Event& e : events)
@@ -373,7 +375,8 @@ struct Rig {
             CHECK(o.strictly_increasing());
             CHECK_FALSE(o.open_now);
             CHECK(o.opens == o.commits + o.cancels + o.failed);
-            check_run(fn, result, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
+            // sugedęs vienetas (fail_unit) po gedimo indeksuose nebedalyvauja — per-indeksinė apskaita jam netaikoma
+            if (!eng->unit_failed(u)) check_run(fn, result, u, &o, 1, 0, cfg.on_loss == GapPolicy::Leave);
         }
         CHECK(fn.at_most_four_per_index());
     }

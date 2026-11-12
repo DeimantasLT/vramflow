@@ -282,7 +282,8 @@ int run_gfxgen(const Opts& o) {
             if (s.d[0]) { cudaFree(s.d[0]); s.d[0] = nullptr; }
         }
         std::uint64_t idx0 = 0;
-        const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
+        // --duration 0 — iki sustabdymo (tarnyba, K-T8)
+        const std::uint64_t end_tai = o.duration_s > 0 ? now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9) : ~0ull;
         if (!rc) {
             idx0 = mxlGetCurrentIndex(&rate) + 1;
             for (auto& s : src) {

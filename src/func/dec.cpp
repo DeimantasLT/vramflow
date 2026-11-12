@@ -456,6 +456,7 @@ int run_dec(const Opts& o) {
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(o.flows);
     for (auto& v : out) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    set_release(ports, out, inst);  // sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11)
     engine::SystemClock clk;
     engine::StatsHub hub;
     engine::TickEngine eng(ecfg, clk, hub, stop);
@@ -468,9 +469,11 @@ int run_dec(const Opts& o) {
     }
     DecFn fn(o, st, ds, anchor, cur, cur_n, underrun_run, first_play, cpu, inter, dim, gpf, fps_i, siting, pool, stream, warm);
     bool engine_loss = false;
+    std::uint32_t failed = 0;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
         engine_loss = res.any_loss;
+        failed = res.failed_units;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -508,15 +511,14 @@ int run_dec(const Opts& o) {
     for (auto& v : out) v.release(inst);
     mxlDestroyInstance(inst);
     av_buffer_unref(&hw);
-    if (!rc)
-        for (auto& f : st.flows)
-            // pts_gap_frames — informacinis (siuntėjo kilpos sandūros); praradimai — tik tai, kas nepasiekė išėjimo
-            for (const char* k : {"overrun_frames", "underrun_fields", "late_skips", "pkts_corrupt", "decode_errors",
-                                  "overflow_drops", "pitch_mismatch", "output_errors"})
-                if (f.c.count(k) && f.c[k]) rc = 4;
-    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
-    if (!rc && engine_loss) rc = 4;
-    return finish(rc);
+    // pts_gap_frames — informacinis (siuntėjo kilpos sandūros); praradimai — tik tai, kas nepasiekė išėjimo. Griežtame režime
+    // exit 4, tarnyboje — tik santraukoje (exit_code_for)
+    bool loss = engine_loss;
+    for (auto& f : st.flows)
+        for (const char* k : {"overrun_frames", "underrun_fields", "late_skips", "pkts_corrupt", "decode_errors",
+                              "overflow_drops", "pitch_mismatch", "output_errors"})
+            if (f.c.count(k) && f.c[k]) loss = true;
+    return finish(exit_code_for(o, rc, loss, failed, st));
 }
 
 // clip: `frames` kadrų iš CPU etalono į stdout raw NV12 (ffmpeg kodavimui). Interlaced: gen_field laukai → weave;

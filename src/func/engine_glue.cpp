@@ -5,6 +5,7 @@
 #include <mxl/time.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace mxlv::func {
@@ -30,7 +31,43 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
     c.duration_s = o.duration_s;
     c.warmup_s = o.warmup_s;
     c.input_wait_ns = o.input_wait_ms * 1'000'000;
+    c.rt_priority = o.rt_priority;
+    parse_cpu_list(o.cpu_affinity, c.cpu_affinity);  // patikrinta CLI
     return c;
+}
+
+bool parse_cpu_list(const std::string& s, std::vector<int>& out) {
+    out.clear();
+    std::size_t p = 0;
+    while (p < s.size()) {
+        const std::size_t e = s.find(',', p);
+        const std::string tok = s.substr(p, e == std::string::npos ? std::string::npos : e - p);
+        p = e == std::string::npos ? s.size() : e + 1;
+        if (tok.empty()) return false;
+        char* end = nullptr;
+        const long a = std::strtol(tok.c_str(), &end, 10);
+        long b = a;
+        if (*end == '-') b = std::strtol(end + 1, &end, 10);
+        if (*end != '\0' || a < 0 || b < a || b > 1023) return false;
+        for (long c = a; c <= b; ++c) out.push_back(static_cast<int>(c));
+    }
+    return true;
+}
+
+bool strict_exit(const Opts& o) { return o.strict_exit == "on" || (o.strict_exit == "auto" && o.duration_s > 0); }
+
+int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, Stats& st) {
+    const bool strict = strict_exit(o);
+    st.strict = strict ? 1 : 0;
+    st.any_loss = loss;
+    if (rc != 0) return exit_code(rc);
+    if (!strict) return 0;
+    if (failed_units) return 2;
+    return loss ? 4 : 0;
+}
+
+void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst) {
+    for (std::size_t n = 0; n < ports.size() && n < outs.size(); ++n) ports[n].release_fn = [&outs, n, inst] { outs[n].release(inst); };
 }
 
 FaultyOutput::FaultyOutput(engine::OutputPort& inner, const Opts& o)
@@ -64,9 +101,10 @@ std::vector<engine::OutputPort*> output_ports(std::vector<engine::OutputPort*> p
     if (o.test_out_error.empty()) return ports;
     keep.clear();
     keep.reserve(ports.size());
-    for (auto*& p : ports) {
-        keep.emplace_back(*p, o);
-        p = &keep.back();
+    for (std::size_t n = 0; n < ports.size(); ++n) {
+        if (o.test_out_error_flow >= 0 && n != static_cast<std::size_t>(o.test_out_error_flow)) continue;
+        keep.emplace_back(*ports[n], o);
+        ports[n] = &keep.back();
     }
     return ports;
 }
@@ -75,6 +113,13 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
                 SkipScope scope, Stats& st) {
     if (r.first_index != engine::kNoIndex) st.first_index = r.first_index;
     if (r.last_index != engine::kNoIndex) st.last_index = r.last_index;
+    if (!r.warn.empty()) std::fprintf(stderr, "[vramflow] įspėjimas: %s\n", r.warn.c_str());
+    if (r.failed_units) {  // K17: sugedę vienetai (kiti tęsė) — skaičius ir priežastis (įvykio raktai)
+        st.proc["failed_units"] = r.failed_units;
+        std::fprintf(stderr, "[vramflow] sugedo vienetų: %u (pirmas: %s)\n", r.failed_units, r.failed_why.c_str());
+        for (std::uint32_t n = 0; n < units && n < st.flows.size(); ++n)
+            if (eng.unit_failed(n)) st.flows[n].c["unit_failed"] = 1;
+    }
     const engine::EngineCounters& e = hub.engine();
     if (scope == SkipScope::Process) st.proc["clock_steps"] = e.clock_steps;  // gen visada turėjo; logo ir kt. — ne (raktų aibė)
     if (e.clock_backward) st.proc["clock_backward"] += e.clock_backward;

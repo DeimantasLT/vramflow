@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "engine/engine.hpp"
+#include "engine/mxl_ports.hpp"
 #include "engine/stats.hpp"
 #include "func/func_common.hpp"
 
@@ -18,8 +19,22 @@ namespace mxlv::func {
 //               2P − G), leave, wait-all (spragų politika ir startas keičiami vėliau — V17, V18).
 enum class EngineTiming { Legacy, Isolation };
 
-// read_offset_ns — ro (logo: --read-offset-us; gen: 0). Trukmė, warmup — iš parinkčių.
+// read_offset_ns — ro (logo: --read-offset-us; gen: 0). Trukmė, warmup, --rt-priority, --cpu-affinity — iš parinkčių.
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns);
+
+// „0,2-3“ → {0, 2, 3}; false — netinkamas sąrašas (tuščias — tinkamas, nieko).
+bool parse_cpu_list(const std::string& s, std::vector<int>& out);
+
+// Exit kodas (planas D8, --strict-exit). rc — jau nustatytas fatalus kodas (1, 2, 5, 6, kExitInputs, kStoppedWaiting) arba 0;
+// loss — bent vienas praradimas; failed_units — sugedę vienetai (visi — variklis jau grąžino Fatal → rc 2).
+//   griežtas (on; auto ir --duration > 0): sugedęs vienetas → 2, praradimas → 4, kitaip 0;
+//   švelnus (off; auto ir --duration 0): 0 (praradimai — santraukoje: any_loss, skaitikliai).
+// Įrašo st.strict ir st.any_loss (santraukos laukai strict_exit, any_loss).
+bool strict_exit(const Opts& o);
+int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, Stats& st);
+
+// Sugedusio vieneto išėjimų atlaisvinimas (K-T11): MxlVideoOutput::release_fn → VideoOut::release(inst).
+void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst);
 
 // Kur santraukoje rašyti variklio praleidimus: proceso lygiu (gen) ar kiekvienam flow'ui (logo, composite…).
 enum class SkipScope { Process, PerFlow, PerFlowFrames };  // PerFlowFrames — enc: *_skips_frames
@@ -100,6 +115,7 @@ public:
     bool flush_gaps() override { return in_.flush_gaps(); }
     bool interlaced() const override { return in_.interlaced(); }
     std::uint32_t slot_count() const override { return in_.slot_count(); }
+    void release() override { in_.release(); }
 
 private:
     bool active(engine::Index i);
@@ -110,7 +126,8 @@ private:
     engine::Index first_ = engine::kNoIndex, cur_ = engine::kNoIndex;
 };
 
-// Išėjimų prievadai varikliui: be --test-out-error — patys prievadai, su ja — FaultyOutput apvalkalai (laikomi `keep`).
+// Išėjimų prievadai varikliui: be --test-out-error — patys prievadai, su ja — FaultyOutput apvalkalai (laikomi `keep`;
+// --test-out-error-flow N — tik flow'o N išėjimas).
 std::vector<engine::OutputPort*> output_ports(std::vector<engine::OutputPort*> ports, const Opts& o,
                                               std::vector<FaultyOutput>& keep);
 
