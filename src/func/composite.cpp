@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
 // composite — kompozitorius: kiekvienam išėjimui n bazė (v210 iš `gen`, arba jokios) + K grafikos sluoksnių (v210a iš `gfxgen` ar
-// kito composite) → v210 / v210a MXL išėjimas. Tick variklis kaip `logo`: viena gija valdo visus MXL handle'us; visi įėjimai
-// skaitomi neblokuojančiai (kartojama kas 0,5 ms iki termino); vienas CPU batch / CUDA batch laukui visiems N.
+// kito composite) → v210 / v210a MXL išėjimas. Bendras tick variklis (V11, izoliacijos ribos kaip logo): viena gija valdo
+// visus MXL handle'us; paruošti išėjimai apdorojami vienu CPU / CUDA batch'u fazei, užstrigęs įėjimas kitų nelaiko.
 //
 // Sprendimai:
 //  - Geometrija statinė: rastrai perskaitomi iš flow aprašų, kiekvienas darbas tikrinamas bendru gfx::composite_job_valid
@@ -30,6 +30,9 @@
 #include <vector>
 
 #include "common/index_math.hpp"
+#include "engine/engine.hpp"
+#include "engine/mxl_ports.hpp"
+#include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "gfx/cpu/gfx_cpu.hpp"
@@ -76,6 +79,174 @@ bool parse_layer_flows(const Opts& o, std::vector<std::string>& ids, std::string
     return true;
 }
 
+}  // namespace
+
+namespace {
+// composite kaip TickFunction (planas V11): N transformacijos vienetų ([bazė] + K sluoksnių → 1 išėjimas). process — visi
+// tuo metu paruošti vienetai vienu batch'u (G: composite_batch kMaxBatch dalimis; H: H2D → batch → D2H; C: CPU batch);
+// lap patikrą, commit'ą ir spragas daro variklis. Santraukos raktai — tie patys kaip prieš migraciją.
+struct CompositeFn final : engine::TickFunction {
+    const Opts& o;
+    Stats& st;
+    const engine::StatsHub& hub;
+    const engine::TickEngine& eng;
+    std::vector<runtime::InputSlot>& in;
+    bool cpu, host_gpu, has_base;
+    std::uint32_t K, per;
+    const std::vector<int>& lx;
+    const std::vector<int>& ly;
+    const std::vector<float>& lop;
+    std::vector<Layer>& lay;
+    const std::vector<Raster>& out_r;
+    std::vector<std::uint8_t*>& s_in;
+    std::vector<std::uint8_t*>& s_out;
+    ThreadPool& pool;
+    cudaStream_t stream;
+    double warm;
+    std::vector<CompositeJob> jobs;
+    std::vector<std::uint32_t> job_out;
+    std::vector<std::uint8_t*> host_dst;
+    std::vector<engine::InCounters> seen;  // įėjimų skaitikliai po paskutinio vieneto sprendimo (spragos priežasčiai)
+    std::vector<std::uint64_t> seen_reatt;
+    std::uint64_t t_wake = 0, t_ready = 0, t_commit = 0;
+    bool processed = false;
+
+    CompositeFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, const engine::TickEngine& eng_, std::vector<runtime::InputSlot>& in_,
+                bool cpu_, bool host_gpu_, bool has_base_, std::uint32_t K_, std::uint32_t per_, const std::vector<int>& lx_,
+                const std::vector<int>& ly_, const std::vector<float>& lop_, std::vector<Layer>& lay_, const std::vector<Raster>& out_r_,
+                std::vector<std::uint8_t*>& s_in_, std::vector<std::uint8_t*>& s_out_, ThreadPool& pool_, cudaStream_t stream_, double warm_)
+        : o(o_), st(st_), hub(hub_), eng(eng_), in(in_), cpu(cpu_), host_gpu(host_gpu_), has_base(has_base_), K(K_), per(per_), lx(lx_),
+          ly(ly_), lop(lop_), lay(lay_), out_r(out_r_), s_in(s_in_), s_out(s_out_), pool(pool_), stream(stream_), warm(warm_),
+          seen(in_.size()), seen_reatt(in_.size(), 0) {
+        jobs.reserve(o.flows);
+        job_out.reserve(o.flows);
+        host_dst.reserve(o.flows);
+    }
+
+    void begin_tick(engine::Index i, engine::TickContext&) override {
+        t_wake = now_tai();
+        processed = false;
+        t_commit = 0;
+        const mxlRational r = mxl_rate(o.fmt.grain_rate());
+        if (t_wake < mxlIndexToTimestamp(&r, i)) st.proc["early_wakes"]++;  // tick'as niekada nepabunda prieš grain'o laiką
+        for (std::size_t a = 0; a < in.size(); ++a) {
+            if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");
+            if (in[a].reattached() != seen_reatt[a]) {
+                seen_reatt[a] = in[a].reattached();
+                st.flows[a / per].inc("reopened");
+            }
+        }
+    }
+
+    bool process(const engine::Batch& b, engine::TickContext& ctx) override {
+        const std::uint64_t i = b.index;
+        if (!processed) t_ready = now_tai();
+        processed = true;
+        jobs.clear();
+        job_out.clear();
+        host_dst.clear();
+        cudaError_t ce = cudaSuccess;
+        if (!cpu) (void)cudaGetLastError();  // composite_batch naudoja PeekAtLastError — išvalom ankstesnę
+        for (const engine::UnitTick& ut : b.units) {
+            const std::uint32_t n = ut.unit;
+            host_dst.push_back(static_cast<std::uint8_t*>(ut.out[0]));
+            job_out.push_back(n);
+            for (std::uint32_t k = 0; k < K && !ce; ++k) {
+                const std::size_t a = n * per + (has_base ? 1 : 0) + k;
+                const auto* src = static_cast<const std::uint8_t*>(ut.in[(has_base ? 1 : 0) + k].ptr);
+                if (host_gpu) {
+                    ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
+                    src = s_in[a];
+                }
+                lay[n * K + k] = Layer{src, in[a].format().raster, lx[k], ly[k], lop[k]};
+            }
+            const std::uint8_t* base = nullptr;
+            if (has_base) {
+                const std::size_t a = n * per;
+                base = static_cast<const std::uint8_t*>(ut.in[0].ptr);
+                if (host_gpu && !ce) {
+                    ce = cudaMemcpyAsync(s_in[a], base, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
+                    base = s_in[a];
+                }
+            }
+            jobs.push_back(CompositeJob{base, has_base ? in[n * per].format().raster : out_r[n], &lay[n * K], static_cast<int>(K), out_r[n],
+                                        host_gpu ? s_out[n] : host_dst.back()});
+        }
+        const int parity = static_cast<int>(i & 1);
+        if (cpu) {
+            if (!jobs.empty() && !gfx::cpu::composite_batch(jobs.data(), static_cast<int>(jobs.size()), parity, &pool)) {
+                st.fatal = "cpu::composite_batch atmetė užduotis";
+                ctx.fatal(2, st.fatal);
+                return false;
+            }
+        } else {
+            for (std::size_t off = 0; off < jobs.size() && !ce; off += gfx::cuda::kMaxBatch)
+                ce = gfx::cuda::composite_batch(jobs.data() + off, static_cast<int>(std::min<std::size_t>(gfx::cuda::kMaxBatch, jobs.size() - off)),
+                                                parity, stream);
+            if (host_gpu)
+                for (std::size_t j = 0; j < jobs.size() && !ce; ++j)
+                    ce = cudaMemcpyAsync(host_dst[j], s_out[job_out[j]], gfx::grain_bytes(out_r[job_out[j]]), cudaMemcpyDeviceToHost, stream);
+            if (!ce) ce = cudaStreamSynchronize(stream);
+        }
+        if (ce) {
+            st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce);
+            ctx.fatal(2, st.fatal);
+            return false;
+        }
+        return true;
+    }
+
+    void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
+        const std::uint32_t n = ut.unit;
+        FlowStats& f = st.flows[n];
+        // Įėjimų skaitiklių pokytis (bet kuris vieneto įėjimas) — spragos priežasčiai
+        bool inv = false, tl = false, re = false, det = false;
+        for (std::uint32_t s = 0; s < per; ++s) {
+            const engine::InCounters& c = hub.in(eng.in_id(n, s));
+            engine::InCounters& p = seen[n * per + s];
+            inv = inv || c.invalid > p.invalid;
+            tl = tl || c.too_late > p.too_late;
+            re = re || c.read_errors > p.read_errors;
+            det = det || c.detaches > p.detaches;
+            p = c;
+            if (c.stalls && c.stalls > f.c["stalls"]) f.c["stalls"] = c.stalls;
+        }
+        switch (oc) {
+            case engine::Outcome::Ready:
+                f.inc("fields_ok");
+                t_commit = now_tai();
+                break;
+            case engine::Outcome::Lapped: f.inc("lapped"); break;
+            case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;
+            case engine::Outcome::GapClock: f.inc("clock_skips"); break;
+            case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;
+            case engine::Outcome::GapNoContent: break;
+            case engine::Outcome::GapLate:
+                if (inv) f.inc("in_invalid");
+                else if (tl) f.inc("too_late");
+                else if (re) f.inc("read_errors");
+                else if (det) f.inc("flow_invalid");  // [PF-3] gamintojas dingo / perkurtas → slot'as atjungtas
+                else {
+                    f.inc("late_fields");  // kuris nors įėjimas nesulaukė iki ribos → necommit'inama
+                    if (f.c["late_fields"] <= 3)
+                        std::fprintf(stderr, "[composite] išėjimas %u: indeksas %llu necommit'intas (įėjimas nesulaukė iki ribos)\n", n,
+                                     static_cast<unsigned long long>(ut.index));
+                }
+                break;
+        }
+    }
+
+    void end_tick(engine::Index i, engine::TickContext&) override {
+        const std::uint64_t t_end = t_commit ? t_commit : now_tai();
+        if (static_cast<double>(t_end) >= warm) {
+            const std::uint64_t ready = processed ? t_ready : t_end;
+            st.add_hist("proc_ms", t_end > ready ? t_end - ready : 0);
+            st.add_hist("wait_ms", ready > t_wake ? ready - t_wake : 0);
+            const mxlRational r = mxl_rate(o.fmt.grain_rate());
+            st.add_hist("out_lateness", t_end - mxlIndexToTimestamp(&r, i));
+        }
+    }
+};
 }  // namespace
 
 int run_composite(const Opts& o) {
@@ -191,188 +362,37 @@ int run_composite(const Opts& o) {
         for (std::uint32_t n = 0; n < N && !rc; ++n)
             if (cudaMalloc(reinterpret_cast<void**>(&s_out[n]), gfx::grain_bytes(out_r[n])) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
 
-    // Būsena per įėjimą: 0 laukia, 1 paruoštas, 2 baigtas be duomenų. seen_reatt — kiek kartų slot'as jau prisijungė iš naujo.
-    std::vector<int> state(in.size());
-    std::vector<std::uint64_t> seen_reatt(in.size(), 0);
-    std::vector<const std::uint32_t*> ptr(in.size(), nullptr);
-    std::vector<char> dead(N), ready(N);
-    std::vector<CompositeJob> jobs;
-    std::vector<std::uint32_t> job_out;
-    std::vector<std::uint8_t*> host_dst;
-
-    const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    const double warm = warm_tai_after(o.warmup_s);
-    const mxlRational rate = mxl_rate(o.fmt.grain_rate());
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
-    ClockWatch cw;
-    cw.stepped();
-
-    while (!rc && !stop.load() && now_tai() < end_tai) {
-        // [PF-3, §P6] atjungtų įėjimų prisijungimas iš naujo — neblokuojantis (InputSlot: ne dažniau kaip kas 100 ms), tarp tick'ų
-        rc = poll_inputs(in_ptr, inst, st.fatal);
-        for (std::size_t a = 0; a < in.size(); ++a) {
-            if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");
-            if (in[a].reattached() != seen_reatt[a]) {
-                seen_reatt[a] = in[a].reattached();
-                st.flows[a / per].inc("reopened");
-            }
+    // Bendras tick variklis (planas V11): N vienetų po per = [bazė] + K įėjimų → 1 išėjimas; izoliacijos ribos kaip logo (V10).
+    std::vector<engine::MxlVideoInput> ports_in;
+    std::vector<engine::MxlVideoOutput> ports_out;
+    ports_in.reserve(in.size());
+    ports_out.reserve(N);
+    for (auto& slot : in) ports_in.emplace_back(slot, inst);
+    for (auto& v : out) ports_out.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    engine::SystemClock clk;
+    engine::StatsHub hub;
+    engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
+    for (std::uint32_t n = 0; n < N && !rc; ++n) {
+        engine::UnitSpec u;
+        u.name = flow_id(kRoleComp, o.flow_base + n);
+        for (std::uint32_t s = 0; s < per; ++s)
+            u.in.push_back(engine::InputSpec{&ports_in[n * per + s], {}, 1, engine::Need::Required, engine::InMode::Exact});
+        u.out.push_back(&ports_out[n]);
+        std::uint32_t id = 0;
+        if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+    }
+    CompositeFn fn(o, st, hub, eng, in, cpu, host_gpu, has_base, K, per, lx, ly, lop, lay, out_r, s_in, s_out, pool, stream,
+                   warm_tai_after(o.warmup_s));
+    if (!rc) {
+        const engine::RunResult res = eng.run(fn);
+        if (res.reason == engine::EndReason::Fatal) {
+            if (st.fatal.empty()) st.fatal = res.fatal;
+            rc = res.exit_code ? res.exit_code : 2;
+        } else if (res.reason == engine::EndReason::FormatChange) {
+            st.fatal = res.fatal;
+            rc = kExitFormatChange;
         }
-        if (rc) break;
-        if (wait_until(rate, i, o.read_offset_us * 1000, stop)) st.proc["clock_backward"]++;
-        if (stop.load()) break;
-        const std::uint64_t t_wake = now_tai();
-        // tick'as niekada nepabunda prieš savo grain'o laiką (kitas laikrodis / dažnis — klaida; funkcinis testas tikrina 0)
-        if (t_wake < mxlIndexToTimestamp(&rate, i)) st.proc["early_wakes"]++;
-        const std::uint64_t deadline = mxlIndexToTimestamp(&rate, i) + std::uint64_t{o.deadline_ms} * 1'000'000ull;
-        std::fill(state.begin(), state.end(), 0);
-        std::fill(dead.begin(), dead.end(), 0);
-        for (std::uint32_t n = 0; n < N; ++n)
-            for (std::uint32_t s = 0; s < per; ++s)
-                if (in[n * per + s].state() != runtime::InputSlot::State::Attached) {
-                    if (!dead[n]) st.flows[n].inc("missing_fields");
-                    dead[n] = 1;
-                }
-        // 3: visi įėjimai neblokuojančiai; laukiantys kartojami kas 0,5 ms iki deadline
-        for (;;) {
-            bool waiting = false;
-            for (std::uint32_t n = 0; n < N; ++n) {
-                if (dead[n]) continue;
-                for (std::uint32_t s = 0; s < per && !dead[n]; ++s) {
-                    const std::size_t a = n * per + s;
-                    if (state[a]) continue;
-                    mxlGrainInfo info{};
-                    const std::uint32_t* p = nullptr;
-                    const mxlStatus r = in[a].get(i, 0, info, p);
-                    if (r == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) { waiting = true; continue; }
-                    if (r == MXL_STATUS_OK && !(info.flags & MXL_GRAIN_FLAG_INVALID)) { ptr[a] = p; state[a] = 1; continue; }
-                    state[a] = 2;
-                    dead[n] = 1;
-                    if (r == MXL_STATUS_OK) st.flows[n].inc("in_invalid");
-                    else if (r == MXL_ERR_OUT_OF_RANGE_TOO_LATE) st.flows[n].inc("too_late");
-                    else if (r == MXL_ERR_FLOW_INVALID) st.flows[n].inc("flow_invalid");  // [PF-3] gamintojas dingo / perkurtas → slot'as atjungtas
-                    else {
-                        st.flows[n].inc("read_errors");
-                        st.flows[n].inc(("read_status_" + std::to_string(r)).c_str());
-                    }
-                }
-            }
-            if (!waiting || now_tai() >= deadline || stop.load()) break;
-            mxlSleepForNs(500'000);
-        }
-        for (std::uint32_t n = 0; n < N; ++n) {
-            ready[n] = 0;
-            if (dead[n]) continue;
-            bool all = true;
-            for (std::uint32_t s = 0; s < per; ++s) all = all && state[n * per + s] == 1;
-            if (all) ready[n] = 1;
-            else {
-                st.flows[n].inc("late_fields");  // kuris nors įėjimas nesulaukė iki deadline → necommit'inama
-                if (st.flows[n].c["late_fields"] <= 3) {  // pirmi įvykiai — diagnostikai į stderr
-                    std::string who;
-                    for (std::uint32_t s = 0; s < per; ++s)
-                        if (state[n * per + s] != 1)
-                            who += " " + in[n * per + s].id().substr(24) + "(head-i=" +
-                                   std::to_string(static_cast<long long>(in[n * per + s].head()) - static_cast<long long>(i)) + ")";
-                    std::fprintf(stderr, "[composite] išėjimas %u: indeksas %llu (tick %lld, pabudimas +%.2f ms) necommit'intas, nesulaukta:%s\n", n,
-                                 static_cast<unsigned long long>(i), static_cast<long long>(i - (st.first_index == ~0ull ? i : st.first_index)),
-                                 (static_cast<double>(t_wake) - static_cast<double>(mxlIndexToTimestamp(&rate, i))) / 1e6, who.c_str());
-                }
-            }
-        }
-        const std::uint64_t t_ready = now_tai();
-        // 4: išėjimų slot'ai paruoštiems; darbų sąrašas
-        jobs.clear();
-        job_out.clear();
-        host_dst.clear();
-        for (std::uint32_t n = 0; n < N; ++n) {
-            if (!ready[n]) continue;
-            mxlStatus s{};
-            std::uint32_t* d = out[n].open(i, s);
-            if (!d) {
-                if (s == MXL_ERR_INVALID_ARG && i <= out[n].last_committed) { st.proc["clock_backward"]++; ready[n] = 0; continue; }
-                st.fatal = "OpenGrainSlot status " + std::to_string(s);
-                rc = 2;
-                break;
-            }
-            host_dst.push_back(reinterpret_cast<std::uint8_t*>(d));
-            job_out.push_back(n);
-        }
-        if (rc) break;
-        // 5: apdorojimas — G: tiesiai device rodyklės; H: H2D → batch → D2H; C: CPU batch
-        cudaError_t ce = cudaSuccess;
-        const int parity = static_cast<int>(i & 1);
-        if (!cpu) (void)cudaGetLastError();  // sąmoningai išvalom ankstesnę (jau apdorotą) klaidą — composite_batch naudoja PeekAtLastError
-        for (std::size_t j = 0; j < job_out.size() && !ce; ++j) {
-            const std::uint32_t n = job_out[j];
-            for (std::uint32_t k = 0; k < K; ++k) {
-                const std::size_t a = idx_layer(n, k);
-                const std::uint8_t* src = reinterpret_cast<const std::uint8_t*>(ptr[a]);
-                if (host_gpu) {
-                    if (!ce) ce = cudaMemcpyAsync(s_in[a], src, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
-                    src = s_in[a];
-                }
-                lay[n * K + k] = Layer{src, in[a].format().raster, lx[k], ly[k], lop[k]};
-            }
-            const std::uint8_t* base = nullptr;
-            if (has_base) {
-                const std::size_t a = idx_base(n);
-                base = reinterpret_cast<const std::uint8_t*>(ptr[a]);
-                if (host_gpu && !ce) {
-                    ce = cudaMemcpyAsync(s_in[a], base, gfx::grain_bytes(in[a].format().raster), cudaMemcpyHostToDevice, stream);
-                    base = s_in[a];
-                }
-            }
-            jobs.push_back(CompositeJob{base, has_base ? in[idx_base(n)].format().raster : out_r[n], &lay[n * K], static_cast<int>(K), out_r[n],
-                                        host_gpu ? s_out[n] : host_dst[j]});
-        }
-        if (cpu) {
-            if (!jobs.empty() && !gfx::cpu::composite_batch(jobs.data(), static_cast<int>(jobs.size()), parity, &pool)) {
-                st.fatal = "cpu::composite_batch atmetė užduotis";
-                rc = 2;
-            }
-        } else {
-            for (std::size_t off = 0; off < jobs.size() && !ce; off += gfx::cuda::kMaxBatch)
-                ce = gfx::cuda::composite_batch(jobs.data() + off, static_cast<int>(std::min<std::size_t>(gfx::cuda::kMaxBatch, jobs.size() - off)),
-                                                parity, stream);
-            if (host_gpu)
-                for (std::size_t j = 0; j < jobs.size() && !ce; ++j)
-                    ce = cudaMemcpyAsync(host_dst[j], s_out[job_out[j]], gfx::grain_bytes(out_r[job_out[j]]), cudaMemcpyDeviceToHost, stream);
-            if (!ce) ce = cudaStreamSynchronize(stream);
-        }
-        if (ce) { st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce); rc = 2; }
-        if (rc) break;
-        // 6: lap patikra visiems įėjimams, 7: commit
-        const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
-        for (const std::uint32_t n : job_out) {
-            bool lap = false;
-            for (std::uint32_t s = 0; s < per; ++s) {
-                const std::size_t a = n * per + s;
-                const std::uint64_t h = in[a].head();
-                if (lapped(std::max(h == MXL_UNDEFINED_INDEX ? 0 : h, now_idx), i, in[a].in().layout.slotCount)) lap = true;
-            }
-            if (lap) {
-                out[n].cancel();
-                st.flows[n].inc("lapped");
-                continue;
-            }
-            if (out[n].commit() != MXL_STATUS_OK) { st.fatal = "CommitGrain"; rc = 2; break; }
-            st.flows[n].inc("fields_ok");
-        }
-        const std::uint64_t t_commit = now_tai();
-        if (t_commit >= warm) {
-            st.add_hist("proc_ms", t_commit - t_ready);
-            st.add_hist("wait_ms", t_ready - t_wake);
-            st.add_hist("out_lateness", t_commit - mxlIndexToTimestamp(&rate, i));
-        }
-        if (st.first_index == ~0ull) st.first_index = i;
-        st.last_index = i;
-        ++i;
-        const bool clk = cw.stepped();
-        const std::uint64_t now2 = mxlGetCurrentIndex(&rate);
-        if (now2 > i) {
-            for (auto& f : st.flows) f.inc(clk ? "clock_skips" : (t_commit < warm ? "warmup_skips" : "late_skips"), now2 - i);
-            i = now2;
-        }
+        to_summary(hub, eng, res, N, SkipScope::PerFlow, st);
     }
     if (!cpu && stream) {
         cudaStreamSynchronize(stream);

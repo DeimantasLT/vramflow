@@ -26,7 +26,7 @@ sutrikimas rašomas atskira INFO eilute (didžiausias gen A commit'o vėlavimas 
 SIGSTOP / SIGCONT / kill momento).
 
 Būsena: fiso_kill ir fiso_stall — VARTAI logo funkcijai nuo V10 (izoliacija variklyje; tvirtinimai — logo_gate()); fiso_composite
-ir fiso_enc — kol kas INFO su skaičiais (vartais taps V11, V12). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
+— vartai nuo V11 (ta pati taisyklė, aukštupiai — gen ir gfxgen A); fiso_enc — kol kas INFO (vartais taps V12). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
 nėra santraukos). Struktūruoti skaičiai — `before` / `after` laukuose (functional.json). „Prieš“ skaičiai —
 docs/rezultatai/2026-11-12-izoliacija-pries.md.
 
@@ -232,9 +232,14 @@ def run_composite(out, tag, impl, storage, fault):
     sc, sv = F.vsummary(c, "composite"), F.vsummary(va, "verify-composite")
     if sc is None or sv is None:
         return {"err": f"nėra santraukų (composite={sc is not None}, verify={sv is not None})"}
+    ug, ux = upstream(g), upstream(xa)  # sveiki aukštupiai: gen (bazės) ir gfxgen A (sluoksniai)
+    up = {"late_skips": ug["late_skips"] + ux["late_skips"], "late_commits": ug["late_commits"] + ux["late_commits"],
+          "max_lateness_ms": ug["max_lateness_ms"], "late_ticks": ug["late_ticks"], "gfxgen": ux}
     return {**common_record(fault, t_fault), "exit": {"composite": rc, "verify": rv}, "fn": split_summary(sc, FN_KEYS, N),
             "out_lateness": hist_of(sc, "out_lateness"), "verify": split_summary(sv, VER_KEYS, N),
-            "verify_proc": (sv.get("proc") or {}), "fatal": sc.get("fatal")}
+            "verify_proc": (sv.get("proc") or {}), "fatal": sc.get("fatal"), "upstream": up,
+            "fn_flows": [flow_view(sc, FN_KEYS, [n]) for n in range(N - 1)],
+            "verify_flows": [flow_view(sv, VER_KEYS, [n]) for n in range(N - 1)]}
 
 
 # --- enc -----------------------------------------------------------------------------------------------------------------
@@ -303,7 +308,7 @@ def describe(r):
     return s
 
 
-FN_LOSS = ("late_fields", "late_skips", "lapped", "too_late", "in_invalid", "read_errors", "missing_fields")
+FN_LOSS = ("late_fields", "late_skips", "lapped", "too_late", "in_invalid", "read_errors", "missing_fields", "flow_invalid")
 
 
 def upstream_budget(r):
@@ -312,7 +317,7 @@ def upstream_budget(r):
     return u.get("late_skips", 0) + u.get("late_commits", 0)
 
 
-def logo_gate(fault, ctrl, r):
+def logo_gate(fault, ctrl, r):  # noqa: C901 — taip pat composite (V11)
     """V10 vartai (planas §9 V10) su priskyrimu: kiekvienam sveikam flow'ui funkcijos praradimai (FN_LOSS) ir verify missing +
     invalid ≤ aukštupio biudžetas (upstream_budget; be aukštupio sutrikimų — 0), mismatch == 0 visada; out_lateness p99 po gedimo
     ≤ p99 be gedimo + Wr + 1 ms; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir po SIGCONT POST_S s be praradimų.
@@ -364,7 +369,7 @@ def probe(out, name, runner, faults):
             if "upstream" in r:  # sveiko aukštupio sutrikimai — atskira INFO eilutė su skaičiais
                 res.append(F.result(f"{tid}:upstream", "INFO", why=f"sveikas aukštupis (gen A): be gedimo {ctrl.get('upstream')} | "
                                                                   f"su gedimu {r['upstream']}"))
-            if runner is run_logo:
+            if runner in (run_logo, run_composite):
                 bad = logo_gate(fault, ctrl, r)
                 if r.get("post"):
                     why += f" | po SIGCONT: {r['post']}"
