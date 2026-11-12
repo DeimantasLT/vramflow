@@ -316,7 +316,7 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--flow-base B` | First flow number (to run several independent groups in one domain) |
 | `--impl gpu\|cpu`, `--storage cuda-linear\|host` | Variant, see section 1 |
 | `--device-uuid GPU-…` | GPU to use (default: device 0) |
-| `--duration S`, `--warmup S` | Run time; warm-up seconds are left out of the statistics |
+| `--duration S`, `--warmup S` | Run time (default 30 s; `0` — run until `SIGINT` / `SIGTERM` for `gen`, `logo`, `composite`, `enc`, `dec`); warm-up seconds are left out of the statistics |
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 | `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
@@ -419,10 +419,25 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
 ### Exit code and summary
 
 Exit code `0` means everything was correct. `1` — wrong options or configuration, `2` — setup failed (CUDA, MXL, an output
-flow owned by another run), `3` — verification errors, `4` — something was lost (late, missing, inputs did not appear within
-`--input-wait-ms`), `6` — an input came back with another format (`--on-format-change exit`). Every run writes
+flow owned by another run) or an output kept failing (3 open / commit errors in a row on one output; the message names the
+output), `3` — verification errors, `4` — something was lost (late, missing, a single output error, inputs did not appear
+within `--input-wait-ms`), `6` — an input came back with another format (`--on-format-change exit`). Every run writes
 `summary-<command>.json` with counters (fields written, read, lost, late, invalid, verification errors), a latency histogram,
 the run ID and the software / GPU versions.
+
+Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`, `enc`, `dec`) that need a word:
+
+| Counter | Meaning |
+|---|---|
+| `output_errors` (per flow) | Opening or committing an output grain failed; the index has no grain. Counted as a loss (exit `4`); 3 in a row on one output end the run with exit `2` |
+| `clock_backward` (process) | The output index was already written — the clock went back (MXL refuses to write an index twice). Not an error, not a loss |
+| `late_fields` → `missing_fields` | An input that stopped delivering (alive but stuck, e.g. `SIGSTOP`) costs 3 `late_fields` (the engine waits for it up to the deadline 3 times), after that it is *stalled* and every further index is `missing_fields` (no wait at all) until it delivers again |
+| `read_errors` (per flow) | Replaces the old `read_status_<code>` keys: any unexpected read status of an input. The status code itself is no longer in the summary |
+| `reopen_mismatch` (`composite`) | The input that came back with another format (with `--on-format-change exit`, exit `6`) |
+| `lateness_max_us` (per flow) | Largest commit lateness after `T(i)` of this flow after warm-up, µs (`enc`: frame queued). The `out_lateness` histogram covers the whole tick |
+| hist `proc_ms` / `wait_ms` / `held_ms` | `proc_ms` — processing only (kernels, sync, commit; summed over the phases of one index); `wait_ms` — tick open → first processing; `held_ms` — only for an index processed in more than one phase: time spent waiting for late inputs between phases |
+| `enc`: `audio_underrun_frames` | The frame's audio was not there when the frame was encoded (silence is encoded instead). Audio is a *wanted* input: the engine waits for it at most until the first cut `a(i)` and never on the engine thread, so one stream without audio does not delay the others |
+| `dec`: `clock_overrun_frames`, `clock_overflow_drops` | Frames dropped because a backward clock step of `S` made the tick wait: at most `ceil(S / frame)` frames, once, at the first frame tick after the step. Everything else above the buffer limit is `overrun_frames` (exit `4`)
 
 ---
 

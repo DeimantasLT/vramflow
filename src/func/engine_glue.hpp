@@ -30,6 +30,63 @@ enum class SkipScope { Process, PerFlow, PerFlowFrames };  // PerFlowFrames — 
 void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, const engine::RunResult& r, std::uint32_t units,
                 SkipScope scope, Stats& st);
 
+// Tick'o laikai funkcijų histogramoms — ATSKIRAI kiekvienam iš dviejų galimai persidengiančių indeksų (pernešimas:
+// i − 1 baigiasi po i atidarymo; slot = index & 1), kad vieno indekso būsena nepasiimtų kito laikų.
+//   proc  — tik apdorojimas: Σ per fazes (process pradžia → paskutinis tos fazės vieneto commit / lap / klaida);
+//   wait  — tick'o atidarymas → pirmo apdorojimo pradžia (įėjimų laukimas);
+//   held  — laikas tarp fazių (paruošti / pavėluoję vienetai laukė B / C fazės): (paskutinis commit − pirma pradžia) − proc;
+//   end   — paskutinis commit (be commit'ų — dabar).
+class TickTimes {
+public:
+    struct Result {
+        bool processed = false;
+        std::uint64_t proc = 0, wait = 0, held = 0, end = 0, first = 0;
+        std::uint32_t phases = 0;
+    };
+    void wake(engine::Index i, std::uint64_t now) { s_[i & 1] = S{now}; }
+    void phase_begin(engine::Index i, std::uint64_t now) {
+        S& t = s_[i & 1];
+        close(t);
+        if (t.phases++ == 0) t.first = now;
+        t.phase0 = t.last = now;
+        t.open = true;
+    }
+    // Vieneto pabaiga po šios fazės apdorojimo (Ready / Lapped / OutputError); committed — tikras commit.
+    void unit_done(engine::Index i, std::uint64_t now, bool committed) {
+        S& t = s_[i & 1];
+        if (t.open) t.last = now;
+        if (committed) t.commit = now;
+    }
+    std::uint64_t first(engine::Index i) const { return s_[i & 1].first; }
+    Result end(engine::Index i, std::uint64_t now) {
+        S& t = s_[i & 1];
+        close(t);
+        Result r;
+        r.processed = t.phases > 0;
+        r.phases = t.phases;
+        r.end = t.commit ? t.commit : now;
+        r.first = r.processed ? t.first : r.end;
+        r.proc = t.proc;
+        r.wait = r.first > t.wake ? r.first - t.wake : 0;
+        const std::uint64_t span = r.end > r.first ? r.end - r.first : 0;
+        r.held = span > t.proc ? span - t.proc : 0;
+        return r;
+    }
+
+private:
+    struct S {
+        std::uint64_t wake = 0, first = 0, phase0 = 0, last = 0, commit = 0, proc = 0;
+        std::uint32_t phases = 0;
+        bool open = false;
+    };
+    static void close(S& t) {
+        if (!t.open) return;
+        t.proc += t.last > t.phase0 ? t.last - t.phase0 : 0;
+        t.open = false;
+    }
+    S s_[2];
+};
+
 // Testinė išėjimo klaidų injekcija (--test-out-error open|commit, paslėpta): apgaubia tikrą išėjimą; nuo pirmo open po
 // `after_s` (TAI) `count` indeksų iš eilės (0 — visam laikui) open grąžina Error arba commit — false (slot'as atšaukiamas).
 // Tikrina, kad išėjimo klaida nėra tyli (skaitiklis output_errors, ilgalaikė — exit 2 su pranešimu).

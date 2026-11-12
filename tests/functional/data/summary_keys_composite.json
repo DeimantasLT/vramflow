@@ -28,7 +28,9 @@
  "optional": {
   "top": [],
   "proc": [],
-  "hist": [],
+  "hist": [
+   "held_ms"
+  ],
   "flows": [
    "fields_ok",
    "lapped",

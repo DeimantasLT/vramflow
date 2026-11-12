@@ -536,7 +536,8 @@ int run_enc(const Opts& o) {
         std::vector<std::uint8_t*> buf_of;        // vieneto host buferis (x264) po process
         std::vector<char> alloc_failed;
         std::vector<engine::InCounters> seen;
-        std::uint64_t t_ready = 0, t_done = 0;
+        std::uint64_t t_done = 0;
+        TickTimes times;  // weave_ms — tik indeksams, kurių kadrai apdoroti (atskirai kiekvienam indeksui)
 
         EncFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, std::vector<runtime::InputSlot>& in_,
               std::vector<engine::MxlAudioInput>& pa_, std::vector<std::uint64_t>& sr_, std::vector<std::unique_ptr<Stream>>& streams_, Ctx& cx_,
@@ -552,6 +553,7 @@ int run_enc(const Opts& o) {
 
         void begin_tick(engine::Index i, engine::TickContext&) override {
             if (i % gpf != gpf - 1) return;
+            times.wake(i, now_tai());
             F = i / gpf;
             // [§P6] po video re-attach (tas pats gamintojas paleistas iš naujo) — ir garso reader'is: prievadas atjungiamas,
             // variklis jį mato kaip Gone ir prijungia prie naujo flow'o (attach_poll, kas 100 ms)
@@ -564,7 +566,7 @@ int run_enc(const Opts& o) {
 
         bool process(const engine::Batch& b, engine::TickContext& ctx) override {
             F = b.index / gpf;
-            t_ready = now_tai();
+            times.phase_begin(b.index, now_tai());
             jobs.clear();
             job_flow.clear();
             for (const engine::UnitTick& ut : b.units) {
@@ -692,7 +694,7 @@ int run_enc(const Opts& o) {
             Item item;
             item.video = f;
             item.frame = static_cast<std::int64_t>(F);
-            item.t_ready = t_ready;
+            item.t_ready = times.first(ut.index);
             if (!ports_audio.empty() && !take_audio(n, ut.index, item, ut.in.size() > gpf ? &ut.in[gpf] : nullptr)) {
                 fs.inc("audio_underrun_frames");
                 std::fill(item.l.begin(), item.l.end(), 0.f);
@@ -701,7 +703,7 @@ int run_enc(const Opts& o) {
             Stream& s = *streams[n];
             {
                 std::unique_lock g(s.m);
-                const bool test_drop = o.test_drop_every && t_ready >= test_drop_from && F % o.test_drop_every == 0;
+                const bool test_drop = o.test_drop_every && item.t_ready >= test_drop_from && F % o.test_drop_every == 0;
                 if (s.q.size() >= kQueueMax || test_drop) {
                     g.unlock();
                     fs.inc("frames_dropped_queue");
@@ -713,6 +715,7 @@ int run_enc(const Opts& o) {
             s.cv.notify_one();
             fs.inc("frames_queued");
             t_done = now_tai();
+            times.unit_done(ut.index, t_done, true);
             const mxlRational r = mxl_rate(o.fmt.grain_rate());
             fs.note_lateness(t_done, mxlIndexToTimestamp(&r, ut.index), warm);
         }
@@ -720,9 +723,10 @@ int run_enc(const Opts& o) {
         void end_tick(engine::Index i, engine::TickContext&) override {
             if (i % gpf != gpf - 1) return;
             const std::uint64_t td = now_tai();
+            const TickTimes::Result t = times.end(i, td);
             if (static_cast<double>(td) >= warm) {
                 const mxlRational r = mxl_rate(o.fmt.grain_rate());
-                st.add_hist("weave_ms", td > t_ready ? td - t_ready : 0);
+                if (t.processed) st.add_hist("weave_ms", t.proc);  // be apdorotų kadrų (visi spragos) — nėra ką matuoti
                 st.add_hist("frame_lateness", td - mxlIndexToTimestamp(&r, i));
             }
         }

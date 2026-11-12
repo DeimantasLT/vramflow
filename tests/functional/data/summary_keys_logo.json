@@ -29,7 +29,9 @@
  "optional": {
   "top": [],
   "proc": [],
-  "hist": [],
+  "hist": [
+   "held_ms"
+  ],
   "flows": [
    "fields_ok",
    "lateness_max_us",

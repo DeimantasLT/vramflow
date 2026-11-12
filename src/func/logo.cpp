@@ -102,9 +102,8 @@ struct LogoFn final : engine::TickFunction {
     std::vector<media::LogoJob> jobs, host_jobs;
     std::vector<std::uint32_t> job_flow;
     std::vector<engine::InCounters> seen;  // įėjimų skaitikliai po paskutinio vieneto sprendimo (spragos priežasčiai)
-    std::uint64_t t_wake = 0, t_ready = 0, t_commit = 0;
+    TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
     std::uint64_t injected_at = ~0ull;
-    bool processed = false;
 
     LogoFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, const engine::TickEngine& eng_, bool cpu_, bool host_gpu_,
            bool inter_, media::Dim dim_, std::size_t gbytes_, std::size_t inject_word_, ThreadPool& pool_, DeviceLogo& dlogo_,
@@ -118,16 +117,13 @@ struct LogoFn final : engine::TickFunction {
         job_flow.reserve(o.flows);
     }
 
-    void begin_tick(engine::Index, engine::TickContext&) override {
-        t_wake = now_tai();
-        processed = false;
-        t_commit = 0;
+    void begin_tick(engine::Index i, engine::TickContext&) override {
+        times.wake(i, now_tai());
     }
 
     bool process(const engine::Batch& b, engine::TickContext& ctx) override {
         const std::uint64_t i = b.index;
-        if (!processed) t_ready = now_tai();
-        processed = true;
+        times.phase_begin(i, now_tai());
         jobs.clear();
         job_flow.clear();
         for (const engine::UnitTick& ut : b.units) {
@@ -189,16 +185,23 @@ struct LogoFn final : engine::TickFunction {
         switch (oc) {
             case engine::Outcome::Ready: {
                 f.inc("fields_ok");
-                t_commit = now_tai();
+                const std::uint64_t t_commit = now_tai();
+                times.unit_done(ut.index, t_commit, true);
                 const mxlRational r = mxl_rate(o.fmt.grain_rate());
                 f.note_lateness(t_commit, mxlIndexToTimestamp(&r, ut.index), warm);
                 break;
             }
-            case engine::Outcome::Lapped: f.inc("lapped"); break;
+            case engine::Outcome::Lapped:
+                f.inc("lapped");
+                times.unit_done(ut.index, now_tai(), false);
+                break;
             case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;  // gamintojo nėra / užstrigęs
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;      // laikrodžio žingsnis — aplinka
             case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;  // AlreadyCommitted — laikrodis atgal (M11)
-            case engine::Outcome::OutputError: f.inc("output_errors"); break;    // open / commit klaida (ilgalaikė — fatalu)
+            case engine::Outcome::OutputError:  // open / commit klaida (ilgalaikė — fatalu)
+                f.inc("output_errors");
+                times.unit_done(ut.index, now_tai(), false);
+                break;
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapLate:
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
@@ -216,13 +219,13 @@ struct LogoFn final : engine::TickFunction {
     }
 
     void end_tick(engine::Index i, engine::TickContext&) override {
-        const std::uint64_t t_end = t_commit ? t_commit : now_tai();
-        if (static_cast<double>(t_end) >= warm) {
-            const std::uint64_t ready = processed ? t_ready : t_end;
-            st.add_hist("proc_ms", t_end > ready ? t_end - ready : 0);  // paruošta → commit (kernel + sync + commit)
-            st.add_hist("wait_ms", ready > t_wake ? ready - t_wake : 0);  // laukimas įėjimų
+        const TickTimes::Result t = times.end(i, now_tai());
+        if (static_cast<double>(t.end) >= warm) {
+            st.add_hist("proc_ms", t.proc);  // tik apdorojimas: kernel + sync + commit (Σ fazių), be laukimo tarp jų
+            st.add_hist("wait_ms", t.wait);  // laukimas įėjimų iki pirmo apdorojimo
+            if (t.phases > 1) st.add_hist("held_ms", t.held);  // B / C fazė: laukta vėluojančių (ne apdorojimas)
             const mxlRational r = mxl_rate(o.fmt.grain_rate());
-            st.add_hist("out_lateness", t_end - mxlIndexToTimestamp(&r, i));
+            st.add_hist("out_lateness", t.end - mxlIndexToTimestamp(&r, i));
         }
     }
 };
