@@ -60,6 +60,7 @@ const char* to_string(Outcome o) {
         case Outcome::GapClock: return "GapClock";
         case Outcome::Lapped: return "Lapped";
         case Outcome::Skipped: return "Skipped";
+        case Outcome::OutputError: return "OutputError";
     }
     return "?";
 }
@@ -90,7 +91,9 @@ struct TickEngine::Impl {
         OutputPort* port;
         GapState gs;
         std::uint32_t hub;
+        std::string name;            // pranešimui apie ilgalaikę klaidą (alokuojama tik add_unit)
         bool flush = false;
+        std::uint32_t fail_run = 0;  // open / commit klaidų iš eilės
     };
     struct Unit {
         std::uint32_t stride = 1, residue = 0;
@@ -348,6 +351,8 @@ struct TickEngine::Impl {
         gap_outputs(u, c, startup, false);
         UnitCounters& uc = hub.unit(u.hub);
         ++(startup ? uc.startup : uc.gaps);  // paleidimo spragos — ne praradimas
+        if (!startup && why == Outcome::GapClock) ++uc.gaps_clock;
+        if (!startup && why == Outcome::GapNoContent) ++uc.gaps_no_content;
         if (why == Outcome::GapBlocked)  // gyvi broliai — stebimi kitame tick'e (skaitikliai ir būsena, ne turinys)
             for (std::uint32_t k = 0; k < u.nin; ++k)
                 if (ins[u.in0 + k].st.live() && ins[u.in0 + k].spec.need != Need::Optional) ins[u.in0 + k].observe = jidx(u, ins[u.in0 + k]);
@@ -422,23 +427,30 @@ struct TickEngine::Impl {
                 gap_unit(u, Outcome::GapBlocked, phase);
                 continue;
             }
-            bool opened = true;
+            OpenResult opened = OpenResult::Ok;
             for (std::uint32_t m = 0; m < u.nout; ++m) {
                 void* s = nullptr;
-                const OpenResult o = outs[u.out0 + m].port->open(idx, s);
-                if (o == OpenResult::Ok) {
+                Out& o = outs[u.out0 + m];
+                opened = o.port->open(idx, s);
+                if (opened == OpenResult::Ok) {
                     slots[u.out0 + m] = s;
                     continue;
                 }
                 for (std::uint32_t p = 0; p < m; ++p) outs[u.out0 + p].port->cancel();
-                for (std::uint32_t p = 0; p < u.nout; ++p) ++hub.out(outs[u.out0 + p].hub).commit_errors;
-                opened = false;
+                if (opened == OpenResult::AlreadyCommitted) {
+                    ++hub.out(o.hub).already_committed;  // laikrodis atgal (M11): indeksas jau parašytas
+                } else {
+                    ++hub.out(o.hub).commit_errors;
+                    out_failed(o, "open");
+                }
                 break;
             }
-            if (!opened) {
-                ++hub.unit(u.hub).gaps;
+            if (opened != OpenResult::Ok) {
+                UnitCounters& uc = hub.unit(u.hub);
+                ++uc.gaps;
+                if (opened == OpenResult::AlreadyCommitted) ++uc.gaps_clock;
                 const UnitTick ut{uid(u), idx, phase, {}, {}};
-                fn->end_unit(ut, Outcome::Skipped, ctx);
+                fn->end_unit(ut, opened == OpenResult::AlreadyCommitted ? Outcome::Skipped : Outcome::OutputError, ctx);
                 resolve_unit(u);
                 continue;
             }
@@ -496,9 +508,11 @@ struct TickEngine::Impl {
                     if (o.port->commit()) {
                         ++(phase == 0 ? c.ok : c.late);
                         o.gs.on_content(idx, T(idx));
+                        o.fail_run = 0;
                         hub.out_commit(o.hub).add(static_cast<std::uint64_t>(std::max<std::int64_t>(0, done_at - T(idx))));
                     } else {
                         ++c.commit_errors;  // praradimas (any_loss); indeksas lieka su priežastimi
+                        out_failed(o, "commit");
                         all_ok = false;
                     }
                 }
@@ -506,7 +520,7 @@ struct TickEngine::Impl {
                     ++(phase == 0 ? uc.ok : uc.late);
                 } else {
                     ++uc.gaps;
-                    oc = Outcome::Skipped;
+                    oc = Outcome::OutputError;
                 }
             }
             fn->end_unit(ut, oc, ctx);
@@ -514,6 +528,14 @@ struct TickEngine::Impl {
         }
         // Po apdorojimo: B fazė baigėsi po kito tick'o atidarymo
         if (phase == 1 && done_at > cuts_for(idx + 1, cfg.cuts).open) ++hub.engine().guard_overrun;
+    }
+
+    // Išėjimo open / commit klaida: cfg.out_fail_fatal kartų iš eilės → fatalu (exit 2) su išėjimo vardu.
+    void out_failed(Out& o, const char* what) {
+        ++o.fail_run;
+        if (cfg.out_fail_fatal == 0 || o.fail_run < cfg.out_fail_fatal || ended) return;
+        end_fatal(EndReason::Fatal, 2,
+                  "išėjimas " + o.name + ": " + std::to_string(o.fail_run) + " " + what + " klaidos iš eilės (open / commit)");
     }
 
     void count_inputs(Unit& u, const Rec& r) {
@@ -1007,18 +1029,15 @@ struct TickEngine::Impl {
         pending = 0;
         fn->finish(ctx);
         if (any_failed && res.exit_code == 0) res.exit_code = 2;
+        // Praradimai — vieneto lygiu (kiekvienas indeksas baigiasi lygiai vienu rezultatu); išėjimų spragų skaitikliai —
+        // tų pačių vieneto spragų pasekmė. Laikrodžio įvykiai ir šaltinio „nėra turinio“ — ne praradimas.
         for (std::size_t k = 0; k < hub.inputs(); ++k)
             if (hub.in(static_cast<std::uint32_t>(k)).lost != 0) res.any_loss = true;
-        for (std::size_t k = 0; k < hub.outputs(); ++k) {
-            const OutCounters& c = hub.out(static_cast<std::uint32_t>(k));
-            if (c.gap_invalid + c.gap_frozen + c.gap_black + c.gap_left + c.lapped + c.late_skips + c.clock_skips +
-                    c.commit_errors !=
-                0)
-                res.any_loss = true;
-        }
+        for (std::size_t k = 0; k < hub.outputs(); ++k)
+            if (hub.out(static_cast<std::uint32_t>(k)).commit_errors != 0) res.any_loss = true;
         for (std::size_t k = 0; k < hub.units(); ++k) {
             const UnitCounters& c = hub.unit(static_cast<std::uint32_t>(k));
-            if (c.gaps + c.lapped + c.late_skips + c.clock_skips != 0) res.any_loss = true;
+            if (c.gaps - c.gaps_clock - c.gaps_no_content + c.lapped + c.late_skips != 0) res.any_loss = true;
         }
         return res;
     }
@@ -1095,7 +1114,8 @@ bool TickEngine::add_unit(const UnitSpec& s, std::uint32_t& unit, std::string& w
         GapState g;
         g.policy = d.cfg.on_loss;
         g.hold_ns = d.cfg.hold_ns;
-        d.outs.push_back(Impl::Out{s.out[m], g, d.hub.add_output(s.name + "/out" + std::to_string(m))});
+        const std::string oname = s.name + "/out" + std::to_string(m);
+        d.outs.push_back(Impl::Out{s.out[m], g, d.hub.add_output(oname), oname});
     }
     d.slots.resize(d.outs.size(), nullptr);
     u.hub = d.hub.add_unit(s.name);

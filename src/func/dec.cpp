@@ -426,7 +426,8 @@ int run_dec(const Opts& o) {
 
         void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
             if (oc == engine::Outcome::Ready) st.flows[ut.unit].inc("fields_ok");
-            else if (oc == engine::Outcome::Skipped) st.proc["clock_backward"]++;
+            else if (oc == engine::Outcome::Skipped) st.proc["clock_backward"]++;  // AlreadyCommitted — laikrodis atgal (M11)
+            else if (oc == engine::Outcome::OutputError) st.flows[ut.unit].inc("output_errors");  // ilgalaikė — fatalu
         }
 
         void end_tick(engine::Index i, engine::TickContext&) override {
@@ -460,8 +461,10 @@ int run_dec(const Opts& o) {
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
     }
     DecFn fn(o, st, ds, anchor, cur, cur_n, underrun_run, first_play, cpu, inter, dim, gpf, fps_i, siting, pool, stream, warm);
+    bool engine_loss = false;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        engine_loss = res.any_loss;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -503,8 +506,10 @@ int run_dec(const Opts& o) {
         for (auto& f : st.flows)
             // pts_gap_frames — informacinis (siuntėjo kilpos sandūros); praradimai — tik tai, kas nepasiekė išėjimo
             for (const char* k : {"overrun_frames", "underrun_fields", "late_skips", "pkts_corrupt", "decode_errors",
-                                  "overflow_drops", "pitch_mismatch"})
+                                  "overflow_drops", "pitch_mismatch", "output_errors"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
+    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
+    if (!rc && engine_loss) rc = 4;
     return finish(rc);
 }
 

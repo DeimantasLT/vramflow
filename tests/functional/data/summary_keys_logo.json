@@ -32,7 +32,8 @@
   "hist": [],
   "flows": [
    "fields_ok",
-   "lateness_max_us"
+   "lateness_max_us",
+   "output_errors"
   ]
  }
 }

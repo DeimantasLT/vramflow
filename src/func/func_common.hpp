@@ -87,6 +87,11 @@ struct Opts {
     // atmetamas tuo pačiu keliu kaip pilnos eilės atveju (frames_dropped_queue). 0 — išjungta. A/V sinchronizacijos testams.
     std::uint32_t test_drop_every = 0;
     double test_drop_after_s = 0;
+    // Testinė (paslėpta) išėjimo klaidų injekcija (FaultyOutput, engine_glue.hpp): open | commit grąžina klaidą nuo
+    // `test_out_error_after_s` sekundės, `test_out_error_count` indeksų iš eilės (0 — iki pabaigos). Tuščia — išjungta.
+    std::string test_out_error;
+    double test_out_error_after_s = 3;
+    std::uint32_t test_out_error_count = 0;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
     // interlaced flow'o 4:2:0 → 4:2:2 chroma: auto — pagal kadro AV_FRAME_FLAG_INTERLACED; field / frame — priverstinai.

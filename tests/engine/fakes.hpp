@@ -139,8 +139,12 @@ public:
     std::uint64_t opens = 0, commits = 0, cancels = 0, flushes = 0;
     bool open_now = false;
 
+    std::function<bool(Index)> fail_open;   // open klaida šiam indeksui (OpenResult::Error)
+    std::function<bool(Index)> already_at;  // open → AlreadyCommitted šiam indeksui (laikrodis atgal, M11)
     OpenResult open(Index i, void*& slot) override {
         if (last_ != kNoIndex && i <= last_) return OpenResult::AlreadyCommitted;
+        if (already_at && already_at(i)) return OpenResult::AlreadyCommitted;
+        if (fail_open && fail_open(i)) return OpenResult::Error;
         ++opens;
         open_now = true;
         open_i_ = i;
@@ -276,7 +280,7 @@ private:
 
 // Per-indeksinė apskaita (kiekviename teste): kiekvienas vieneto dalyvaujantis indeksas [first_index, last_index] baigiasi
 // LYGIAI vienu end_unit arba variklio praleidimu (on_skip); be įrašo gali likti tik ≤ 2 paskutiniai (vykdomi sustabdant).
-// Išėjimui: Ready ↔ Commit; spraga / Lapped ↔ Gap įrašas, nebent politika leave (be įrašo); Skipped — be įrašo; kiekvienas
+// Išėjimui: Ready ↔ Commit; spraga / Lapped ↔ Gap įrašas, nebent politika leave (be įrašo); Skipped / OutputError — be įrašo; kiekvienas
 // Commit / Gap įrašas turi atitinkamą end_unit.
 inline void check_run(const RecordingFunction& fn, const RunResult& res, std::uint32_t unit, const RecordingOutput* o,
                       std::uint32_t stride = 1, std::uint32_t residue = 0, bool leave = false) {
@@ -315,7 +319,7 @@ inline void check_run(const RecordingFunction& fn, const RunResult& res, std::ui
     for (const auto& [i, oc] : ends) {
         const auto it = ev.find(i);
         if (oc == Outcome::Ready) bad += it == ev.end() || it->second != RecordingOutput::Kind::Commit;
-        else if (oc == Outcome::Skipped) bad += it != ev.end();
+        else if (oc == Outcome::Skipped || oc == Outcome::OutputError) bad += it != ev.end();
         else bad += leave ? it != ev.end() : (it == ev.end() || it->second != RecordingOutput::Kind::Gap);
     }
     for (const auto& [i, kind] : ev) bad += ends.count(i) == 0;

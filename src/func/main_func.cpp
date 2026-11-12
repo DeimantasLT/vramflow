@@ -43,6 +43,10 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--threads", o.threads, "CPU varianto gijos (0 = automatiškai)");
     c->add_option("--format", o.format, "flow formatas: 1080i50 (numatytasis), 1080p25, 1080p50, 720p50, 1080i59.94, 2160p50 …");
     c->add_option("--run-id", o.run_id, "paleidimo ID domeno nuomoje <domain>.vramflow/ (numatyta <subkomanda>-<pid>-<8 hex>)");
+    // testinės parinktys (paslėptos --help): išėjimo klaidų injekcija (logo, gen; tests/functional startstop fout_error)
+    c->add_option("--test-out-error", o.test_out_error)->check(CLI::IsMember({"open", "commit"}))->group("");
+    c->add_option("--test-out-error-after", o.test_out_error_after_s)->group("");
+    c->add_option("--test-out-error-count", o.test_out_error_count)->group("");
 }
 // Įėjimus skaitančios funkcijos (logo, composite, verify, enc): laukimas ir formato pasikeitimas po re-attach (planas §P6).
 void inputs(CLI::App* c, Opts& o) {

@@ -197,7 +197,8 @@ struct LogoFn final : engine::TickFunction {
             case engine::Outcome::Lapped: f.inc("lapped"); break;
             case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;  // gamintojo nėra / užstrigęs
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;      // laikrodžio žingsnis — aplinka
-            case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;
+            case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;  // AlreadyCommitted — laikrodis atgal (M11)
+            case engine::Outcome::OutputError: f.inc("output_errors"); break;    // open / commit klaida (ilgalaikė — fatalu)
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapLate:
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
@@ -311,18 +312,24 @@ int run_logo(const Opts& o_in) {
     engine::SystemClock clk;
     engine::StatsHub hub;
     engine::TickEngine eng(engine_config(o, kLogoTiming, o.read_offset_us * 1000), clk, hub, stop);
+    std::vector<FaultyOutput> faulty;
+    std::vector<engine::OutputPort*> optr;
+    for (auto& p : ports_out) optr.push_back(&p);
+    optr = output_ports(optr, o, faulty);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(kRoleLogo, o.flow_base + n);
         u.in.push_back(engine::InputSpec{&ports_in[n], {}, 1, engine::Need::Required, engine::InMode::Exact});
-        u.out.push_back(&ports_out[n]);
+        u.out.push_back(optr[n]);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
     }
     LogoFn fn(o, st, hub, eng, cpu, host_gpu, inter, dim, gbytes, inject_word, pool, dlogo, hlogo, stream, s_in, s_out,
               warm_tai_after(o.warmup_s));
+    bool engine_loss = false;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        engine_loss = res.any_loss;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -347,8 +354,11 @@ int run_logo(const Opts& o_in) {
     // praradimai = pajėgumo / tiekimo klaida (exit 4), jei nebuvo fatalios; missing_fields — įėjimo spraga (gamintojas dingo)
     if (!rc)
         for (auto& f : st.flows)
-            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields"})
+            for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields",
+                                  "output_errors"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
+    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
+    if (!rc && engine_loss) rc = 4;
     return finish(rc);
 }
 

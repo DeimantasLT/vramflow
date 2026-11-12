@@ -319,3 +319,54 @@ def fstart_logo_restart(out):
 TESTS = {"fstart_order": fstart_order, "fstart_restart": fstart_restart, "fstart_wait": fstart_wait, "fstart_owner": fstart_owner,
          "fstart_domain": fstart_domain, "fstart_parallel": fstart_parallel, "fstart_longpath": fstart_longpath,
          "fstart_logo_restart": fstart_logo_restart}
+
+
+def fout_error(out):
+    """Išėjimo klaidos nėra tylios (peržiūros radinys: po migracijos open / commit klaida baigdavo indeksą kaip „laikrodis
+    atgal“, procesas — exit 0 su 0 fields_ok). Injekcija — paslėpta --test-out-error (FaultyOutput), C variantas:
+    gen: ilgalaikė commit klaida → exit 2, fatal su išėjimo vardu, output_errors == 3, clock_backward nėra;
+    logo: vienkartinė open klaida → exit 4 (praradimas), output_errors == 1, fields_ok > 0, clock_backward nėra;
+    logo: ilgalaikė open klaida → exit 2, fatal su išėjimo vardu."""
+    res = []
+    v = F.vcommon("cpu", "host")
+    d = F.fresh_domain("fout-gen")
+    g = F.FProc(out, "fout/gen", "gen", d, "--flows", 1, "--duration", 8, "--test-out-error", "commit",
+                "--test-out-error-after", 2, *v)
+    rg = g.wait(timeout=60)
+    sg = g.summary() or {}
+    fg = (sg.get("flows") or [{}])[0]
+    fat = sg.get("fatal") or ""
+    ok = rg == 2 and "išėjimas" in fat and "iš eilės" in fat and fg.get("output_errors") == 3 and not (sg.get("proc") or {}).get(
+        "clock_backward")
+    res.append(F.result("fout_error[gen commit ilgalaikė]", "PASS" if ok else "FAIL",
+                        why=f"exit={rg} fatal={fat!r} output_errors={fg.get('output_errors')} proc={sg.get('proc')}"))
+    for name, extra, want_rc in (("logo open vienkartinė", ["--test-out-error-count", 1], 4), ("logo open ilgalaikė", [], 2)):
+        d = F.fresh_domain("fout-logo")
+        gen = F.FProc(out, f"fout/{name}/gen", "gen", d, "--flows", 1, "--duration", 30, *v)
+        lg = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, 0)]):
+                res.append(F.result(f"fout_error[{name}]", "FAIL", why="gen flow'as neatsirado"))
+                continue
+            lg = F.FProc(out, f"fout/{name}", "logo", d, "--flows", 1, "--duration", 6, "--warmup", 1, "--test-out-error", "open",
+                         "--test-out-error-after", 2, *extra, *v)
+            rl = lg.wait(timeout=60)
+        finally:
+            gen.term()
+            if lg is not None and lg.p.poll() is None:
+                lg.term()
+        sl = lg.summary() or {}
+        fl = (sl.get("flows") or [{}])[0]
+        fat = sl.get("fatal") or ""
+        if want_rc == 4:
+            ok = rl == 4 and fl.get("output_errors") == 1 and fl.get("fields_ok", 0) > 100 and not fat
+        else:
+            ok = rl == 2 and "išėjimas" in fat and "iš eilės" in fat and fl.get("output_errors") == 3
+        ok = ok and not (sl.get("proc") or {}).get("clock_backward")
+        res.append(F.result(f"fout_error[{name}]", "PASS" if ok else "FAIL",
+                            why=f"exit={rl} fatal={fat!r} output_errors={fl.get('output_errors')} fields_ok={fl.get('fields_ok')} "
+                                f"proc={sl.get('proc')}"))
+    return res
+
+
+TESTS["fout_error"] = fout_error

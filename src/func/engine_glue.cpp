@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "func/engine_glue.hpp"
 
+#include <mxl/time.h>
+
 #include <cstdio>
 #include <string>
 
@@ -29,6 +31,44 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
     c.warmup_s = o.warmup_s;
     c.input_wait_ns = o.input_wait_ms * 1'000'000;
     return c;
+}
+
+FaultyOutput::FaultyOutput(engine::OutputPort& inner, const Opts& o)
+    : in_(inner), open_mode_(o.test_out_error == "open"),
+      from_tai_(mxlGetTime() + static_cast<std::uint64_t>(o.test_out_error_after_s * 1e9)), count_(o.test_out_error_count) {}
+
+bool FaultyOutput::active(engine::Index i) {
+    if (first_ == engine::kNoIndex) {
+        if (mxlGetTime() < from_tai_) return false;
+        first_ = i;
+    }
+    return i >= first_ && (count_ == 0 || i < first_ + count_);
+}
+
+engine::OpenResult FaultyOutput::open(engine::Index i, void*& slot) {
+    cur_ = i;
+    if (open_mode_ && active(i)) return engine::OpenResult::Error;
+    return in_.open(i, slot);
+}
+
+bool FaultyOutput::commit() {
+    if (!open_mode_ && active(cur_)) {
+        in_.cancel();
+        return false;
+    }
+    return in_.commit();
+}
+
+std::vector<engine::OutputPort*> output_ports(std::vector<engine::OutputPort*> ports, const Opts& o,
+                                              std::vector<FaultyOutput>& keep) {
+    if (o.test_out_error.empty()) return ports;
+    keep.clear();
+    keep.reserve(ports.size());
+    for (auto*& p : ports) {
+        keep.emplace_back(*p, o);
+        p = &keep.back();
+    }
+    return ports;
 }
 
 void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, const engine::RunResult& r, std::uint32_t units,

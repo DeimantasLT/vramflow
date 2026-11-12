@@ -40,7 +40,10 @@ struct UnitSpec {
     Demand demand;
 };
 
-enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped };
+// Skipped — išėjimo indeksas jau commit'intas (laikrodis atgal, M11): ne klaida ir ne praradimas.
+// OutputError — išėjimo open / commit klaida: indeksas be įrašo, commit_errors++ (praradimas); out_fail_fatal kartų iš
+// eilės tam pačiam išėjimui — variklis baigia fatalu (exit 2), kaip prieš migraciją.
+enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError };
 const char* to_string(Outcome);
 
 struct UnitTick {
@@ -107,6 +110,7 @@ struct EngineConfig {
     std::int64_t input_wait_ns = 0;  // 0 — neribotai
     double duration_s = 0, warmup_s = 5;
     std::uint32_t skip_align = 1;    // dec interlaced: 2 (po praleidimo tęsti nuo viršutinio lauko)
+    std::uint32_t out_fail_fatal = 3;  // tiek open / commit klaidų iš eilės vienam išėjimui → fatalu (exit 2); 0 — niekada
     std::function<bool(const UnitSpec&, std::string& why)> admit;  // P4; tuščias — priimti
     // Bibliotekos PacingHooks::wait: jei nustatytas, tick'as atidaromas juo, ne Clock::sleep_until.
     std::function<bool(Index, std::int64_t offset_ns, const std::atomic<bool>& stop)> open_wait;
@@ -120,6 +124,9 @@ struct RunResult {
     int exit_code = 0;
     std::string fatal;
     Index first_index = kNoIndex, last_index = kNoIndex;
+    // Bent vienas tikras praradimas: vieneto spraga (be laikrodžio ir šaltinio „nėra turinio“ spragų), lap'as, late_skips,
+    // įėjimo lost, išėjimo commit_errors. Laikrodžio įvykiai (clock_skips, GapClock, AlreadyCommitted) — ne praradimas.
+    // Funkcijos jį naudoja exit kodui 4 (kaip praradimų raktai prieš migraciją).
     bool any_loss = false;
 };
 

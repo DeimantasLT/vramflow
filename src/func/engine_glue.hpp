@@ -4,6 +4,7 @@
 // Funkcijų ↔ bendro tick variklio jungtis (planas docs/planai/2026-11-12-tick-variklis.md §7 „mxlv::func“, V8+):
 // parinktys → EngineConfig (viena vieta) ir variklio skaitikliai → santraukos raktai (tie patys kaip prieš migraciją).
 #include <cstdint>
+#include <vector>
 
 #include "engine/engine.hpp"
 #include "engine/stats.hpp"
@@ -28,5 +29,32 @@ enum class SkipScope { Process, PerFlow, PerFlowFrames };  // PerFlowFrames — 
 // santraukoje jis visada buvo, kitų funkcijų — ne).
 void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, const engine::RunResult& r, std::uint32_t units,
                 SkipScope scope, Stats& st);
+
+// Testinė išėjimo klaidų injekcija (--test-out-error open|commit, paslėpta): apgaubia tikrą išėjimą; nuo pirmo open po
+// `after_s` (TAI) `count` indeksų iš eilės (0 — visam laikui) open grąžina Error arba commit — false (slot'as atšaukiamas).
+// Tikrina, kad išėjimo klaida nėra tyli (skaitiklis output_errors, ilgalaikė — exit 2 su pranešimu).
+class FaultyOutput final : public engine::OutputPort {
+public:
+    FaultyOutput(engine::OutputPort& inner, const Opts& o);
+    engine::OpenResult open(engine::Index i, void*& slot) override;
+    bool commit() override;
+    void cancel() override { in_.cancel(); }
+    bool fill_gap(engine::Index i, engine::GapAction a, engine::Index from) override { return in_.fill_gap(i, a, from); }
+    bool flush_gaps() override { return in_.flush_gaps(); }
+    bool interlaced() const override { return in_.interlaced(); }
+    std::uint32_t slot_count() const override { return in_.slot_count(); }
+
+private:
+    bool active(engine::Index i);
+    engine::OutputPort& in_;
+    bool open_mode_;
+    std::uint64_t from_tai_;
+    std::uint32_t count_;
+    engine::Index first_ = engine::kNoIndex, cur_ = engine::kNoIndex;
+};
+
+// Išėjimų prievadai varikliui: be --test-out-error — patys prievadai, su ja — FaultyOutput apvalkalai (laikomi `keep`).
+std::vector<engine::OutputPort*> output_ports(std::vector<engine::OutputPort*> ports, const Opts& o,
+                                              std::vector<FaultyOutput>& keep);
 
 }  // namespace mxlv::func

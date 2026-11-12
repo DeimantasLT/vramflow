@@ -222,7 +222,8 @@ struct CompositeFn final : engine::TickFunction {
             case engine::Outcome::Lapped: f.inc("lapped"); break;
             case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;
-            case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;
+            case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;  // AlreadyCommitted — laikrodis atgal (M11)
+            case engine::Outcome::OutputError: f.inc("output_errors"); break;    // open / commit klaida (ilgalaikė — fatalu)
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapLate:
                 if (inv) f.inc("in_invalid");
@@ -386,8 +387,10 @@ int run_composite(const Opts& o) {
     }
     CompositeFn fn(o, st, hub, eng, in, cpu, host_gpu, has_base, K, per, lx, ly, lop, lay, out_r, s_in, s_out, pool, stream,
                    warm_tai_after(o.warmup_s));
+    bool engine_loss = false;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        engine_loss = res.any_loss;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -411,6 +414,8 @@ int run_composite(const Opts& o) {
         for (auto& f : st.flows)
             for (const char* k : {"late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
+    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
+    if (!rc && engine_loss) rc = 4;
     return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
 }
 

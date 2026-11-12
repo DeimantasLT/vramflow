@@ -662,6 +662,7 @@ int run_enc(const Opts& o) {
                 case engine::Outcome::GapBlocked: fs.inc("missing_frames"); audio_of_dropped(n); return;
                 case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n); return;
                 case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n); return;
+                case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n); return;  // sink: neturėtų būti
                 case engine::Outcome::GapNoContent: audio_of_dropped(n); return;
                 case engine::Outcome::GapLate:
                     fs.inc(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames");
@@ -744,8 +745,10 @@ int run_enc(const Opts& o) {
     fn.read_audio = read_audio;
     fn.push_audio_only = push_audio_only;
     fn.audio_of_dropped = audio_of_dropped;
+    bool engine_loss = false;
     if (!rc) {
         const engine::RunResult res = eng.run(fn);
+        engine_loss = res.any_loss;
         if (res.reason == engine::EndReason::Fatal) {
             if (st.fatal.empty()) st.fatal = res.fatal;
             rc = res.exit_code ? res.exit_code : 2;
@@ -801,6 +804,8 @@ int run_enc(const Opts& o) {
             for (const char* k : {"late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
                                   "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors"})
                 if (f.c.count(k) && f.c[k]) rc = 4;
+    // variklio praradimai (RunResult::any_loss, taip pat išėjimo klaidos) — exit 4, kaip praradimų raktai prieš migraciją
+    if (!rc && engine_loss) rc = 4;
     return finish(exit_code(rc));  // kStoppedWaiting — sustabdyta belaukiant įėjimų (tvarkinga pabaiga, exit 0)
 }
 

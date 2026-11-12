@@ -45,6 +45,7 @@
   "hist": [],
   "flows": [
    "fields_ok",
+   "output_errors",
    "startup_discard",
    "waiting_buffer",
    "warmup_underrun_fields"

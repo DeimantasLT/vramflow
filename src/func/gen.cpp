@@ -113,6 +113,10 @@ struct GenFn final : engine::TickFunction {
             st.proc["clock_backward"]++;
             return;
         }
+        if (oc == engine::Outcome::OutputError) {  // open / commit klaida (ilgalaikė — variklis baigia fatalu, exit 2)
+            st.flows[ut.unit].inc("output_errors");
+            return;
+        }
         if (oc != engine::Outcome::Ready) return;
         const std::uint32_t n = ut.unit;
         if (o.video) st.flows[n].inc("fields_written");
@@ -203,13 +207,17 @@ int run_gen(const Opts& o) {
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(vout.size());
     for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    std::vector<FaultyOutput> faulty;
+    std::vector<engine::OutputPort*> optr;
+    for (auto& p : ports) optr.push_back(&p);
+    optr = output_ports(optr, o, faulty);
     engine::SystemClock clk;
     engine::StatsHub hub;
     engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(kRoleGen, o.flow_base + n);
-        if (o.video) u.out.push_back(&ports[n]);
+        if (o.video) u.out.push_back(optr[n]);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
     }

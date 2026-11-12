@@ -33,7 +33,8 @@
    "fields_ok",
    "lapped",
    "late_skips",
-   "lateness_max_us"
+   "lateness_max_us",
+   "output_errors"
   ]
  }
 }
