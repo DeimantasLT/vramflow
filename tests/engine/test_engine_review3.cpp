@@ -304,3 +304,23 @@ TEST_CASE("review3: Blocked vieneto gyvo brolio stebėjimas — Gone atjungia į
     CHECK(at_end != InState::Live);
     CHECK(hub.in(eng.in_id(0, 0)).detaches >= 1);
 }
+
+TEST_CASE("review3: įėjimas grįžo kitu formatu (neprisijungia, bet mismatch) — FormatChange, exit 6", "[engine][review3][mismatch]") {
+    // MxlVideoInput: InputSlot Mismatch būsenoje attach_poll grąžina false, mismatch() — true. Anksčiau variklis mismatch
+    // tikrino tik po sėkmingo prisijungimo — exit 6 neįvykdavo, vienetas laukė be galo (missing_fields).
+    Rig r(1);
+    auto& k = *r.ins[0];
+    k.alive = [](std::uint64_t now) { return static_cast<std::int64_t>(now) < T(1010); };
+    k.attachable = k.alive;
+    const auto base = k.arrival;
+    k.arrival = [base](Index j) { return j >= 1010 ? kNever : base(j); };
+    r.fn.on_end_tick = [&](Index i, TickContext&) {
+        if (i == 1015) k.mismatch_flag = true;  // gamintojas grįžo kitu formatu
+        if (i >= 1100) r.stop = true;
+    };
+    r.build();
+    const RunResult res = r.run();
+    CHECK(res.reason == EndReason::FormatChange);
+    CHECK(res.exit_code == 6);
+    CHECK(res.last_index < 1030);
+}

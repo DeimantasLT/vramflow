@@ -875,12 +875,15 @@ struct TickEngine::Impl {
             if (s == InState::Waiting || s == InState::Detached) {
                 if (mono < in.next_attach) continue;
                 in.next_attach = mono + kRetryNs;
-                if (!in.spec.port->attach_poll(clk.now_tai())) continue;
+                const bool attached = in.spec.port->attach_poll(clk.now_tai());
+                // Grįžo kitu formatu (--on-format-change exit): prievadas neprisijungia, bet praneša mismatch — patikrinama ir
+                // tada (anksčiau — tik po sėkmingo prisijungimo, todėl exit 6 niekada neįvykdavo, laukta be galo).
                 if (in.spec.port->mismatch(why_)) {
                     in.st.on_mismatch();
                     end_fatal(EndReason::FormatChange, 6, why_);
                     return;
                 }
+                if (!attached) continue;
                 in.st.on_attach(c);
                 in.ever = true;
             } else if (s == InState::Live && in.observe != kNoIndex) {

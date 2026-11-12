@@ -372,6 +372,41 @@ def fout_error(out):
 TESTS["fout_error"] = fout_error
 
 
+def fformat_change(out):
+    """composite: sluoksnio gamintojas grįžta kitu rastru (logo → full) → exit 6 (--on-format-change exit), fatal su abiem
+    formatais, to išėjimo reopen_mismatch == 1 (raktas atkurtas po migracijos: variklis baigia prieš begin_tick). C variantas."""
+    v = F.vcommon("cpu", "host")
+    d = F.fresh_domain("ffmtchg")
+    g = F.FProc(out, "ffmtchg/gen", "gen", d, "--flows", 1, "--duration", 60, *v)
+    x = F.FProc(out, "ffmtchg/gfx1", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace",
+                "--duration", 60, *v)
+    c = x2 = None
+    rc = None
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, 0), F.role_flow_id(5, 0)]):
+            return [F.result("fformat_change", "FAIL", why="gen / gfxgen flow'ai neatsirado")]
+        c = F.FProc(out, "ffmtchg", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "0,0", "--base", "gen",
+                    "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", 40, "--warmup", 1, *v)
+        time.sleep(4)
+        x.kill9()
+        x2 = F.FProc(out, "ffmtchg/gfx2", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "full", "--mode", "pace",
+                     "--duration", 60, *v)
+        rc = c.wait(timeout=30)
+    finally:
+        for pr in (c, x2, g):
+            if pr is not None and pr.p.poll() is None:
+                pr.term()
+    s = (c.summary() if c is not None else None) or {}
+    f0 = (s.get("flows") or [{}])[0]
+    fat = s.get("fatal") or ""
+    ok = rc == 6 and f0.get("reopen_mismatch") == 1 and fat != ""
+    return [F.result("fformat_change", "PASS" if ok else "FAIL",
+                     why=f"exit={rc} reopen_mismatch={f0.get('reopen_mismatch')} fatal={fat[:160]!r}")]
+
+
+TESTS["fformat_change"] = fformat_change
+
+
 def fduration0(out):
     """--duration 0 — veikti iki sustabdymo (planas D8 / K-T8; prieš migraciją — 0 tick'ų): gen ir logo po 3 s gyvi, SIGTERM →
     exit 0, santraukoje ≥ 100 laukų; `--help` tai sako. C variantas."""

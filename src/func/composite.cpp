@@ -127,7 +127,6 @@ struct CompositeFn final : engine::TickFunction {
         const mxlRational r = mxl_rate(o.fmt.grain_rate());
         if (now_tai() < mxlIndexToTimestamp(&r, i)) st.proc["early_wakes"]++;  // tick'as niekada nepabunda prieš grain'o laiką
         for (std::size_t a = 0; a < in.size(); ++a) {
-            if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");
             if (in[a].reattached() != seen_reatt[a]) {
                 seen_reatt[a] = in[a].reattached();
                 st.flows[a / per].inc("reopened");
@@ -400,6 +399,9 @@ int run_composite(const Opts& o) {
         } else if (res.reason == engine::EndReason::FormatChange) {
             st.fatal = res.fatal;
             rc = kExitFormatChange;
+            // variklis baigė iškart (attach_poll → mismatch), begin_tick jau nebekviečiamas: kuris įėjimas grįžo kitu formatu
+            for (std::size_t a = 0; a < in.size(); ++a)
+                if (in[a].state() == runtime::InputSlot::State::Mismatch) st.flows[a / per].inc("reopen_mismatch");
         }
         to_summary(hub, eng, res, N, SkipScope::PerFlow, st);
     }
