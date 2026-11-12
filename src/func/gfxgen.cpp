@@ -9,9 +9,10 @@
 //           (ši funkcija tik laukia --duration). Kaina: viena konversija submit metu, ne per lauką.
 //           Sėkmės taisyklė: ≥ 1 s bėgime kiekvienas flow turi commit'inti ≥ 90 % tikėtinų laukų (0 — visada klaida), kitaip
 //           klaida + exit 3 su vfgfx_last_error tekstu stderr.
-//  manual — kadras = index/2 kiekvienam indeksui (abu laukai gauna tą patį kadrą, paritetą parenka biblioteka); ši funkcija
-//           pati laikosi ritmo (wait_until kaip gen) ir kviečia vfgfx_write kiekvienam laukui. Kito kadro turinys sukuriamas
-//           iš anksto (tarp lyginio ir nelyginio lauko), kad kūrimas nepatektų į lyginio lauko commit'ą.
+//  manual — kadras = index/2 kiekvienam indeksui (abu laukai gauna tą patį kadrą, paritetą parenka biblioteka); ritmas —
+//           bendras tick variklis (planas V15: GfxgenFn, N·K šaltinio vienetų be variklio valdomų išėjimų — commit'ina
+//           vfgfx_write kiekvienam laukui). Kito kadro turinys sukuriamas iš anksto (end_tick po lyginio lauko), kad kūrimas
+//           nepatektų į lyginio lauko commit'ą.
 //
 // Kadro atmintis (efektyvumas, žr. gfx.h): cuda-linear saugyklai (impl gpu) kadras kartą įkeliamas į GPU (H2D) ir į biblioteką
 // perduodamas kaip VFGFX_MEM_CUDA — manual režime tas pats įkeltas kadras naudojamas abiem laukams, todėl H2D mokama kartą
@@ -27,12 +28,16 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#include "engine/engine.hpp"
+#include "engine/system_clock.hpp"
 #include "func/cuda_upload.hpp"
+#include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "gfx/gfx_content.hpp"
@@ -89,6 +94,87 @@ struct Src {
         f.alpha = (k & 1u) ? VFGFX_ALPHA_PREMULTIPLIED : VFGFX_ALPHA_STRAIGHT;
         f.mem = cuda ? VFGFX_MEM_CUDA : VFGFX_MEM_HOST;
         return f;
+    }
+};
+
+// gfxgen manual kaip TickFunction (planas V15, §7 lentelė). Vienetai — N·K šaltiniai be variklio valdomų išėjimų:
+// begin_tick — šio indekso kadras (iš anksto paruoštas arba ruošiamas dabar); process — vfgfx_write kiekvienam flow'ui
+// (host saugykla — lygiagrečiai, CPU konvertavimas); end_tick — histogramos ir kito kadro paruošimas (prefetch).
+struct GfxgenFn final : engine::TickFunction {
+    using Prepare = std::function<bool(int slot, std::uint64_t frame)>;
+    using CountErr = std::function<void(std::size_t, int)>;
+    std::vector<Src>& src;
+    Stats& st;
+    ThreadPool& pool;
+    Prepare prepare;
+    CountErr count_err;
+    bool inter, upload, par_write;
+    mxlRational rate;
+    double warm;
+    std::uint64_t t_wake = 0, t_done = 0;
+    std::uint64_t first = ~0ull, last = 0;
+
+    GfxgenFn(std::vector<Src>& s, Stats& st_, ThreadPool& pool_, Prepare prep, CountErr ce, bool inter_, bool upload_, mxlRational r,
+             double warm_)
+        : src(s), st(st_), pool(pool_), prepare(std::move(prep)), count_err(std::move(ce)), inter(inter_), upload(upload_),
+          par_write(!upload_), rate(r), warm(warm_) {}
+
+    std::uint64_t frame_of(engine::Index i) const { return inter ? i / 2 : i; }  // interlaced: abu laukai — tas pats kadras
+
+    void begin_tick(engine::Index i, engine::TickContext& ctx) override {
+        const std::uint64_t fr = frame_of(i);
+        if (src[0].frame[0] != fr) {
+            if (src[0].frame[1] == fr) {  // iš anksto paruoštas kadras
+                for (auto& s : src) {
+                    std::swap(s.h[0], s.h[1]);
+                    std::swap(s.d[0], s.d[1]);
+                    std::swap(s.frame[0], s.frame[1]);
+                }
+            } else if (!prepare(0, fr)) {
+                st.fatal = "cudaMemcpy";
+                ctx.fatal(2, st.fatal);
+                return;
+            }
+        }
+        t_wake = now_tai();
+    }
+
+    bool process(const engine::Batch& b, engine::TickContext&) override {
+        const std::uint64_t i = b.index;
+        auto one = [&](int n) {
+            Src& s = src[b.units[static_cast<std::size_t>(n)].unit];
+            const vfgfx_frame f = s.view(0, upload);
+            s.rc = vfgfx_write(s.w, i, &f);
+        };
+        const int n = static_cast<int>(b.units.size());
+        if (par_write) pool.run(n, one);
+        else for (int j = 0; j < n; ++j) one(j);
+        for (const engine::UnitTick& ut : b.units) {
+            if (src[ut.unit].rc) count_err(ut.unit, src[ut.unit].rc);
+            else st.flows[ut.unit].inc("writes");
+        }
+        t_done = now_tai();
+        return true;
+    }
+
+    void end_tick(engine::Index i, engine::TickContext& ctx) override {
+        if (t_done >= warm) {
+            st.add_hist("write_ms", t_done - t_wake);
+            st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
+        }
+        if (first == ~0ull) first = i;
+        last = i;
+        // interlaced: laisvas ~20 ms tarpas iki nelyginio lauko -> kito kadro prefetch; progresyvus: kiekvienas grain'as —
+        // naujas kadras, prefetch po kiekvieno rašymo
+        if (inter ? (i & 1) == 0 : true) {
+            const std::uint64_t t0 = now_tai();
+            if (!prepare(1, inter ? (i + 1) / 2 + 1 : i + 1)) {
+                st.fatal = "cudaMemcpy";
+                ctx.fatal(2, st.fatal);
+                return;
+            }
+            if (t_done >= warm) st.add_hist("prep_ms", now_tai() - t0);
+        }
     }
 };
 
@@ -204,7 +290,7 @@ int run_gfxgen(const Opts& o) {
                 if (c) { st.fatal = "start_pacing: " + std::to_string(c) + " " + vfgfx_last_error(s.w); rc = 2; break; }
             }
         }
-        while (!rc && !stop.load() && now_tai() < end_tai) mxlSleepForNs(20'000'000ull);
+        if (!rc) engine::SystemClock().sleep_until(end_tai, stop);  // ritmą laiko biblioteka; čia tik --duration
         const std::uint64_t idx1 = mxlGetCurrentIndex(&rate);
         for (std::size_t i = 0; i < src.size(); ++i) {
             const int c = vfgfx_stop_pacing(src[i].w);
@@ -232,59 +318,35 @@ int run_gfxgen(const Opts& o) {
         cw.stepped();
         st.proc["clock_steps"] = cw.steps;
     } else if (!rc) {
-        // --- manual: pats laikausi ritmo, vfgfx_write kiekvienam laukui ---
-        const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-        const double warm = warm_tai_after(o.warmup_s);
-        std::uint64_t i = mxlGetCurrentIndex(&rate) + 1;
-        const bool par_write = !upload;  // host saugykla: rašytojai nepriklausomi, konvertuoja CPU — lygiagrečiai
-        while (!rc && !stop.load() && now_tai() < end_tai) {
-            const std::uint64_t fr = inter ? i / 2 : i;  // interlaced: abu laukai — tas pats kadras
-            if (src[0].frame[0] != fr) {
-                if (src[0].frame[1] == fr) {  // iš anksto paruoštas kadras
-                    for (auto& s : src) {
-                        std::swap(s.h[0], s.h[1]);
-                        std::swap(s.d[0], s.d[1]);
-                        std::swap(s.frame[0], s.frame[1]);
-                    }
-                } else if (!prepare(0, fr)) { st.fatal = "cudaMemcpy"; rc = 2; break; }
+        // --- manual: bendras tick variklis (V15), vfgfx_write kiekvienam laukui ---
+        // Laikas — legacy (kaip gen: ro = 0, viena riba; šaltiniai įėjimų nelaukia). Pirmas kadras paruošiamas prieš ritmą
+        // (pirmas tick'as — artimiausias nepraėjęs indeksas); kitu atveju begin_tick jį paruošia vėluodamas.
+        if (!prepare(0, inter ? (mxlGetCurrentIndex(&rate) + 1) / 2 : mxlGetCurrentIndex(&rate) + 1)) {
+            st.fatal = "cudaMemcpy";
+            rc = 2;
+        }
+        engine::SystemClock clk;
+        engine::StatsHub hub;
+        engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
+        for (std::uint32_t j = 0; j < total && !rc; ++j) {
+            engine::UnitSpec u;
+            u.name = flow_id(kRoleGfx, src[j].n * 8 + src[j].k);
+            std::uint32_t id = 0;
+            if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+        }
+        GfxgenFn fn(src, st, pool, prepare, count_err, inter, upload, rate, warm_tai_after(o.warmup_s));
+        if (!rc) {
+            const engine::RunResult res = eng.run(fn);
+            if (res.reason == engine::EndReason::Fatal) {
+                if (st.fatal.empty()) st.fatal = res.fatal;
+                rc = res.exit_code ? res.exit_code : 2;
             }
-            if (wait_until(rate, i, 0, stop)) st.proc["clock_backward"]++;
-            if (stop.load()) break;
-            const std::uint64_t t_wake = now_tai();
-            auto one = [&](int j) {
-                const vfgfx_frame f = src[j].view(0, upload);
-                src[j].rc = vfgfx_write(src[j].w, i, &f);
-            };
-            if (par_write) pool.run(static_cast<int>(src.size()), one);
-            else for (int j = 0; j < static_cast<int>(src.size()); ++j) one(j);
-            for (std::size_t j = 0; j < src.size(); ++j) {
-                if (src[j].rc) count_err(j, src[j].rc);
-                else st.flows[j].inc("writes");
-            }
-            const std::uint64_t t_done = now_tai();
-            if (t_done >= warm) {
-                st.add_hist("write_ms", t_done - t_wake);
-                st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
-            }
-            if (st.first_index == ~0ull) st.first_index = i;
-            st.last_index = i;
-            const bool wrote_even = (i & 1) == 0;
-            ++i;
-            // interlaced: laisvas ~20 ms tarpas iki nelyginio lauko -> kito kadro prefetch; progresyvus: kiekvienas grain'as — naujas
-            // kadras, prefetch po kiekvieno rašymo
-            if (inter ? wrote_even : true) {
-                const std::uint64_t t0 = now_tai();
-                if (!prepare(1, inter ? i / 2 + 1 : i)) { st.fatal = "cudaMemcpy"; rc = 2; break; }
-                if (t_done >= warm) st.add_hist("prep_ms", now_tai() - t0);
-            }
-            const bool clk = cw.stepped();
-            const std::uint64_t now_idx = mxlGetCurrentIndex(&rate);
-            if (now_idx > i) {
-                st.proc[clk ? "clock_skips" : (t_done < warm ? "warmup_skips" : "late_skips")] += now_idx - i;
-                i = now_idx;
+            to_summary(hub, eng, res, total, SkipScope::Process, st);
+            if (fn.first != ~0ull) {  // first / last — iš įvykdytų tick'ų (kaip anksčiau)
+                st.first_index = fn.first;
+                st.last_index = fn.last;
             }
         }
-        st.proc["clock_steps"] = cw.steps;
         for (std::size_t j = 0; j < src.size(); ++j) st.flows[j].inc("commits", vfgfx_committed(src[j].w));
     }
 
