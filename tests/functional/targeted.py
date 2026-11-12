@@ -83,17 +83,30 @@ def start_sources(out, sub, d, func, v, roles):
     return procs
 
 
+class NiceVerify(F.FProc):
+    """verify — stebėtojas, ne tikrinama sistema: žemesnis prioritetas (nice 10), kad CPU etalonas (--every 1, composite —
+    dešimtys ms laukui) neatimtų CPU iš funkcijos; nespėjus — check_dropped (informacinis), ne klaida."""
+
+    def __init__(self, out, tag, domain, *args):
+        self.out = pathlib.Path(out) / tag
+        self.out.mkdir(parents=True, exist_ok=True)
+        self.sub = "verify"
+        self.err_path = self.out / "verify.err"
+        self.p = subprocess.Popen(["nice", "-n", "10", F.FUNC_BIN, "verify", "--domain", str(domain), "--out", str(self.out),
+                                   *map(str, args)], stdout=subprocess.DEVNULL, stderr=open(self.err_path, "w"), env=F.ENV)
+
+
 def run_func(out, sub, d, func, v, impl, storage):
     common = ["--flows", N, "--duration", DUR, "--warmup", 2, *v]
     if func == "logo":
         fn = F.FProc(out, sub, "logo", d, "--deadline-ms", 30, *common)
-        vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 1, "--duration", DUR - 4, "--warmup", 1,
+        vf = NiceVerify(out, sub, d, "--mode", "logo", "--flows", N, "--every", 1, "--duration", DUR - 4, "--warmup", 1,
                      *F.vimpl(impl, storage))
     else:
         xy = ["--layer-xy", "1488,64"]
         fn = F.FProc(out, sub, "composite", d, "--layers", 1, *xy, "--opacity", "1.0", "--base", "gen", "--out-format", "v210",
                      "--deadline-ms", 30, *common)
-        vf = F.FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo", "--gfx-mode",
+        vf = NiceVerify(out, sub, d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo", "--gfx-mode",
                      "pace", "--base", "gen", "--out-format", "v210", "--every", 1, "--duration", DUR - 4, "--warmup", 1, *xy,
                      "--opacity", "1.0", *F.vimpl(impl, storage))
     return fn, vf
@@ -105,7 +118,8 @@ def scenario(out, name, func, tag, impl, storage, faults):
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     special = set(faults.values())
-    roles = {"A": [n for n in range(N) if n not in special]}
+    roles = {"A": [n for n in range(N) if n not in special]}  # sveiki — iš eilės nuo 0 (vienas gen: --flow-base 0)
+    assert roles["A"] == list(range(len(roles["A"]))), roles
     for k, n in faults.items():
         roles[k] = [n]
     procs = start_sources(out, sub, d, func, v, roles)
@@ -188,7 +202,7 @@ def flate_stall(out):
     for tag in ("C", "G"):
         impl, storage = VARIANTS[tag]
         tid = f"flate_stall[logo-{tag}]"
-        r = scenario(out, "flatestall", "logo", tag, impl, storage, {"jitter": 1, "stall": 2})
+        r = scenario(out, "flatestall", "logo", tag, impl, storage, {"jitter": 2, "stall": 3})  # sveiki 0, 1 — vienas gen
         if r.get("err"):
             res.append(F.result(tid, "FAIL", why=r["err"]))
             continue
