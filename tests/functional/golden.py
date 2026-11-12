@@ -331,9 +331,9 @@ def fn_lines(sf, N):
     return ok, f"funkcija: Σ fields_ok={okf} span·N={span * N} ({span}·{N}) praradimai={bad or '-'}"
 
 
-def finish(tid, r, fn_role, ver_role, extra_roles=(), min_checked=1.0):
+def finish(tid, r, fn_role, ver_role, extra_roles=(), min_checked=1.0, echo=True):
     if r.get("err"):
-        return F.result(tid, "FAIL", why=r["err"])
+        return F.result(tid, "FAIL", echo=echo, why=r["err"])
     N = r["N"]
     okv, tv = verify_lines(r[ver_role], N, min_checked)
     okf, tf = fn_lines(r[fn_role], N)
@@ -341,7 +341,7 @@ def finish(tid, r, fn_role, ver_role, extra_roles=(), min_checked=1.0):
     okk = all(k[0] for k in kchecks)
     okrc = all(x == 0 for x in r["rc"].values())
     ok = okv and okf and okk and okrc
-    return F.result(tid, "PASS" if ok else "FAIL",
+    return F.result(tid, "PASS" if ok else "FAIL", echo=echo,
                     why=f"exit={r['rc']} {tf}; {tv}; raktai: " + "; ".join(k[1] for k in kchecks),
                     **{fn_role: r[fn_role], ver_role: r[ver_role]})
 
@@ -359,7 +359,7 @@ def fgold_composite(out):
         # matoma, bet vartų neveikia (docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md: 30 su / 30 be)
         with F.KW.suspended():
             r = finish("fgold_composite[G be keepwarm]", run_composite(out, "G-nokw", "gpu", "cuda-linear"), "composite",
-                       "verify-composite", ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED)
+                       "verify-composite", ("gen", "gfxgen"), min_checked=COMPOSITE_MIN_CHECKED, echo=False)
         res.append(F.result(r["id"], "INFO", why=f"(be keepwarm: {r['status']}) {r.get('why', '')}",
                             **{k: v for k, v in r.items() if k not in ("id", "status", "why", "keepwarm")}))
     return res

@@ -97,8 +97,9 @@ def leftovers(domain):
     return sorted(p.name for p in pathlib.Path(domain).iterdir() if p.name != "options.json")
 
 
-def result(tid, status, **details):
-    print(f"[{status:7s}] {tid}: {details.get('why', '')}", flush=True)
+def result(tid, status, echo=True, **details):
+    if echo:  # echo=False — tarpinis įvertinimas (pvz. INFO rankos), kurio eilutė neturi atrodyti kaip vartų FAIL
+        print(f"[{status:7s}] {tid}: {details.get('why', '')}", flush=True)
     return {"id": tid, "status": status, "keepwarm": KW.on(), **details}
 
 
