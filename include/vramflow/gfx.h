@@ -90,7 +90,7 @@
  *  - width/height must equal the flow raster (VFGFX_ERR_GEOMETRY); stride >= width x 4 bytes; CUDA frames: pointer and
  *    stride multiples of 4 bytes; host frames into a cuda-linear flow: stride multiple of 4 bytes.
  *  - alpha: VFGFX_ALPHA_STRAIGHT or VFGFX_ALPHA_PREMULTIPLIED; mem: VFGFX_MEM_HOST or VFGFX_MEM_CUDA (device pointer
- *    on the device the writer uses). Other values -> VFGFX_ERR_INVALID_ARG.
+ *    on the device the writer uses). Other values (e.g. from a newer header) -> VFGFX_ERR_UNSUPPORTED.
  *  - Ownership: calls are synchronous. When vfgfx_write / vfgfx_submit / vfgfx_submit_at return, the library has
  *    finished reading the pixels; the buffer may be reused or freed immediately. The library keeps no pointer to it.
  *  - Cost: matching pairs (host frame -> host flow, CUDA frame -> cuda-linear flow) are one conversion straight into
@@ -124,11 +124,18 @@
  *  (`interlaced_bff` is rejected), frame rates 25, 50, 30000/1001, 60000/1001 progressive; 25, 30000/1001 interlaced.
  *
  * ERRORS
- *  Functions return VFGFX_OK (0) or a code: 1..1023 = mxlStatus from libmxl, >= 2000 = VFGFX_ERR_*. No C++ exception
- *  crosses the API (VFGFX_ERR_INTERNAL). Messages:
+ *  Functions return VFGFX_OK (0) or an error code. MXL status codes (mxlStatus, currently 1..1032) are passed through
+ *  unchanged; VFGFX_ERR_* codes are >= 2000, so the two ranges never overlap. No C++ exception crosses the API
+ *  (VFGFX_ERR_INTERNAL). Error classes: VFGFX_ERR_INVALID_ARG = NULL pointers and contradictory fields;
+ *  VFGFX_ERR_UNSUPPORTED = a value this library does not know (unknown enum value of alpha / mem / pixel_format /
+ *  scan, unknown flag, non-zero reserved or unknown trailing field) — typically from a newer header. Messages are in
+ *  English and meant for logs; do not parse them.
  *   - vfgfx_last_error(w): message of the most recent failed call on w (any caller thread); cleared (returns "") by the
- *     next successful int-returning call on w. Writer-wide, so with concurrent callers it may describe another thread's
- *     call — decide on return codes.
+ *     next successful call on w that changes state (write, submit, submit_at, cancel_scheduled, start/stop pacing).
+ *     The read-only queries (vfgfx_get_stats, vfgfx_get_format, vfgfx_committed, vfgfx_current_index,
+ *     vfgfx_index_time_ns, vfgfx_version*) never set or clear it and do not count in stats.caller_errors, so a
+ *     monitoring thread does not hide the caller's error. Writer-wide, so with concurrent callers it may describe
+ *     another thread's call — decide on return codes.
  *   - vfgfx_pacing_error(w): most recent error of the pacing thread (open/copy/commit failure, or the exception that
  *     ended the thread); cleared by the next successful commit of the pacing thread. If the thread ended on an exception
  *     the mode stays "running" (vfgfx_write -> VFGFX_ERR_STATE) until vfgfx_stop_pacing.
@@ -161,13 +168,13 @@ extern "C" {
 
 /* --- Error codes ------------------------------------------------------------------------------------------------------ */
 #define VFGFX_OK 0
-#define VFGFX_ERR_INVALID_ARG 2001      /* NULL pointer, unknown alpha/mem value, contradictory fields, bad JSON */
+#define VFGFX_ERR_INVALID_ARG 2001      /* NULL pointer, contradictory fields, bad JSON, odd submit_at index (interlaced) */
 #define VFGFX_ERR_GEOMETRY 2002         /* frame size/stride/alignment does not fit the flow; unsupported raster/rate */
 #define VFGFX_ERR_CUDA 2003             /* CUDA runtime error (the message has the CUDA error string) */
 #define VFGFX_ERR_STATE 2004            /* call not allowed in this mode; flow already exists */
 #define VFGFX_ERR_INTERNAL 2005         /* unexpected internal exception (never propagated across the API) */
 #define VFGFX_ERR_STRUCT_SIZE 2006      /* struct_size smaller than required or larger than 4096 */
-#define VFGFX_ERR_UNSUPPORTED 2007      /* unknown flag, pixel format, non-zero reserved field or unknown trailing bytes */
+#define VFGFX_ERR_UNSUPPORTED 2007      /* unknown enum value / flag, non-zero reserved field or unknown trailing bytes */
 #define VFGFX_ERR_TOO_LATE 2008         /* vfgfx_submit_at: first_index < next_pacing_index */
 #define VFGFX_ERR_TOO_EARLY 2009        /* vfgfx_submit_at: first_index too far in the future */
 #define VFGFX_ERR_QUEUE_FULL 2010       /* vfgfx_submit_at: queue_capacity frames already pending */
@@ -315,6 +322,12 @@ uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index);
 uint64_t vfgfx_committed(vfgfx_writer w);
 /* Fills *out; out->struct_size and out->flags are set by the caller (VFGFX_STATS_INIT / vfgfx_stats_init()). */
 int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out);
+
+/* Fills *out with the flow's geometry: width, height, scan, frame_rate_num/den (frames per second) and flow_id (owned by
+ * the writer, valid until vfgfx_writer_destroy); label, group_hint and format are set to NULL. out->struct_size and
+ * out->flags (0) are set by the caller; fields beyond the caller's struct_size are not touched, a larger struct's
+ * unknown tail is zeroed. Read-only: does not change vfgfx_last_error. */
+int vfgfx_get_format(vfgfx_writer w, vfgfx_flow_params* out);
 
 /* Error messages (see ERRORS). Never NULL; "" when there is no error. */
 const char* vfgfx_last_error(vfgfx_writer w);

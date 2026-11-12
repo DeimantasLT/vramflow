@@ -357,8 +357,8 @@ TEST_CASE("gfx_writer: klaidų kodai (INVALID_ARG, GEOMETRY, flow aprašas)", "[
     bad.stride = 64 * 4 - 4;
     CHECK(vfgfx_write(w, 1, &bad) == 2002);
     bad = ok.f;
-    bad.mem = 7;
-    CHECK(vfgfx_write(w, 1, &bad) == 2001);
+    bad.mem = 7;  // reikšmė iš naujesnės antraštės — nepalaikoma
+    CHECK(vfgfx_write(w, 1, &bad) == VFGFX_ERR_UNSUPPORTED);
     CHECK(vfgfx_committed(w) == 0);
     CHECK(vfgfx_stop_pacing(w) == 0);  // ne ritmo režime: nieko nedaro
     vfgfx_writer_destroy(w);
@@ -645,7 +645,7 @@ TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksu
     REQUIRE(vfgfx_start_pacing(w, 0) == 0);
     std::this_thread::sleep_for(200ms);
     CHECK(vfgfx_stop_pacing(w) == 0);
-    CHECK(std::string(vfgfx_pacing_error(w)).find("ritmo gija nutrūko") != std::string::npos);
+    CHECK(std::string(vfgfx_pacing_error(w)).find("pacing thread ended") != std::string::npos);
     CHECK(std::string(vfgfx_last_error(w)).empty());  // ritmo gijos klaida neperduodama kviečiančiosios klaidai
     CHECK(gi::pacing_stats(w).errors >= 1);
     vfgfx_writer_destroy(w);
@@ -859,7 +859,7 @@ TEST_CASE("gfx_writer: vfgfx_frame struct_size / flags / reserved / pixel_format
     CHECK(vfgfx_submit(w, &f) == VFGFX_ERR_UNSUPPORTED);
     f = ok.f;
     f.alpha = 2;
-    CHECK(vfgfx_write(w, idx, &f) == VFGFX_ERR_INVALID_ARG);
+    CHECK(vfgfx_write(w, idx, &f) == VFGFX_ERR_UNSUPPORTED);
     f = ok.f;
     int dummy = 0;
     f.cuda_stream = &dummy;  // stream'as host kadrui — prieštaringa
@@ -1245,7 +1245,7 @@ TEST_CASE("gfx_writer: vfgfx_flow_def klaidos", "[gfx_writer][flowdef]") {
     CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_GEOMETRY);
     p = base();
     p.scan = 7;
-    CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_INVALID_ARG);
+    CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_UNSUPPORTED);
     p = base();
     p.format = "1080i50";  // kartu su width/height — prieštaringa
     CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_INVALID_ARG);
@@ -1622,3 +1622,168 @@ TEST_CASE("gfx_writer: submit_at — interlaced flow'e nelyginis indeksas atmeta
     CHECK(vfgfx_submit_at(w2, (next_index(w2) + 11) | 1ull, &p.f) == 0);
     vfgfx_writer_destroy(w2);
 }
+
+// --- Peržiūros 5 ir 9 punktai: klaidų sutartis, skaitymo funkcijos, vfgfx_get_format ------------------------------------
+
+// MXL būsenos kodai perduodami nepakeisti (iki MXL_ERR_UNSUPPORTED_OPERATION = 1032), VFGFX kodai — nuo 2000: nesikerta.
+static_assert(MXL_ERR_UNSUPPORTED_OPERATION < 2000, "mxlStatus kodai turi būti < 2000");
+static_assert(VFGFX_ERR_INVALID_ARG >= 2000 && VFGFX_ERR_BUFFER_TOO_SMALL >= 2000, "VFGFX kodai >= 2000");
+
+namespace {
+bool ascii(const std::string& s) {
+    return std::all_of(s.begin(), s.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; });
+}
+}  // namespace
+
+TEST_CASE("gfx_writer: nežinomos alpha / mem / pixel_format / scan reikšmės -> UNSUPPORTED, žinutės angliškai",
+          "[gfx_writer][mxl][errors]") {
+    Domain d(80);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &w) == 0);
+    Frame ok(64, 16, 1, VFGFX_ALPHA_STRAIGHT, false);
+    const std::uint64_t idx = mxlGetCurrentIndex(&kRate);
+    std::vector<std::string> msgs;
+    auto expect = [&](const vfgfx_frame& f, int code) {
+        CHECK(vfgfx_write(w, idx, &f) == code);
+        msgs.emplace_back(vfgfx_last_error(w));
+    };
+    vfgfx_frame f = ok.f;
+    f.alpha = 2;
+    expect(f, VFGFX_ERR_UNSUPPORTED);
+    f = ok.f;
+    f.mem = 7;
+    expect(f, VFGFX_ERR_UNSUPPORTED);
+    f = ok.f;
+    f.pixel_format = 0x0101;
+    expect(f, VFGFX_ERR_UNSUPPORTED);
+    f = ok.f;
+    f.pixels = nullptr;  // NULL — INVALID_ARG
+    expect(f, VFGFX_ERR_INVALID_ARG);
+    f = ok.f;
+    f.width = 62;
+    expect(f, VFGFX_ERR_GEOMETRY);
+    f = ok.f;
+    f.struct_size = 8;
+    expect(f, VFGFX_ERR_STRUCT_SIZE);
+    f = ok.f;
+    f.flags = 0x40;
+    expect(f, VFGFX_ERR_UNSUPPORTED);
+    vfgfx_flow_params p = VFGFX_FLOW_PARAMS_INIT;
+    p.flow_id = fid.id.c_str();
+    p.width = 64;
+    p.height = 16;
+    p.frame_rate_num = 50;
+    p.frame_rate_den = 1;
+    p.scan = 2;
+    char buf[2048];
+    CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_UNSUPPORTED);
+    msgs.emplace_back(vfgfx_last_error(nullptr));
+    p.scan = VFGFX_SCAN_PROGRESSIVE;
+    p.frame_rate_num = 24;
+    CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_GEOMETRY);
+    msgs.emplace_back(vfgfx_last_error(nullptr));
+    CHECK(msgs.back().find("24/1") != std::string::npos);
+    FlowId f2;
+    CHECK(vfgfx_writer_create(d.inst, def(f2.id, 64, 16, false, 24).c_str(), nullptr, &w) == VFGFX_ERR_GEOMETRY);
+    msgs.emplace_back(vfgfx_last_error(nullptr));
+    CHECK(vfgfx_writer_create(d.inst, "nonsense", nullptr, &w) == VFGFX_ERR_INVALID_ARG);
+    msgs.emplace_back(vfgfx_last_error(nullptr));
+    CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &w) == VFGFX_ERR_STATE);  // jau yra
+    msgs.emplace_back(vfgfx_last_error(nullptr));
+    REQUIRE(w == nullptr);
+    for (const auto& m : msgs) {
+        INFO(m);
+        CHECK_FALSE(m.empty());
+        CHECK(ascii(m));
+    }
+    vfgfx_writer_destroy(w);
+}
+
+// Skaitymo funkcijos (stebėjimo gija) nekeičia vfgfx_last_error: nei neišvalo, nei nenustato (ir nedidina caller_errors).
+TEST_CASE("gfx_writer: skaitymo funkcijos neliečia vfgfx_last_error", "[gfx_writer][mxl][errors]") {
+    Domain d(81);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &w) == 0);
+    Frame bad(62, 16, 1, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_write(w, 1, &bad.f) == VFGFX_ERR_GEOMETRY);
+    const std::string err = vfgfx_last_error(w);
+    REQUIRE_FALSE(err.empty());
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(vfgfx_last_error(w) == err);  // sėkmingas skaitymas neišvalė
+    vfgfx_flow_params fp = VFGFX_FLOW_PARAMS_INIT;
+    REQUIRE(vfgfx_get_format(w, &fp) == 0);
+    CHECK(vfgfx_last_error(w) == err);
+    (void)vfgfx_committed(w);
+    (void)vfgfx_current_index(w);
+    (void)vfgfx_index_time_ns(w, 3);
+    (void)vfgfx_version();
+    CHECK(vfgfx_last_error(w) == err);
+    vfgfx_stats small = VFGFX_STATS_INIT;
+    small.struct_size = 4;
+    CHECK(vfgfx_get_stats(w, &small) == VFGFX_ERR_STRUCT_SIZE);  // nesėkmingas skaitymas nenustato
+    fp.struct_size = 4;
+    CHECK(vfgfx_get_format(w, &fp) == VFGFX_ERR_STRUCT_SIZE);
+    CHECK(vfgfx_last_error(w) == err);
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(st.caller_errors == 1);
+    vfgfx_writer_destroy(w);
+}
+
+TEST_CASE("gfx_writer: vfgfx_get_format — flow'o geometrija, dažnis, skenavimas", "[gfx_writer][mxl][format]") {
+    Domain d(82);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 1920, 1080, true).c_str(), nullptr, &w) == 0);
+    struct Bigger {
+        vfgfx_flow_params p;
+        std::uint64_t extra[2];
+    } big;
+    std::memset(static_cast<void*>(&big), 0xAB, sizeof big);
+    big.p.struct_size = sizeof big;
+    big.p.flags = 0;
+    CHECK(vfgfx_get_format(nullptr, &big.p) == VFGFX_ERR_INVALID_ARG);
+    CHECK(vfgfx_get_format(w, nullptr) == VFGFX_ERR_INVALID_ARG);
+    REQUIRE(vfgfx_get_format(w, &big.p) == 0);
+    CHECK(big.p.struct_size == sizeof big);
+    CHECK(big.p.width == 1920);
+    CHECK(big.p.height == 1080);
+    CHECK(big.p.scan == VFGFX_SCAN_INTERLACED_TFF);
+    CHECK(big.p.frame_rate_num == 25);
+    CHECK(big.p.frame_rate_den == 1);
+    REQUIRE(big.p.flow_id != nullptr);
+    CHECK(std::string(big.p.flow_id) == fid.id);  // galioja iki vfgfx_writer_destroy
+    CHECK(big.p.format == nullptr);
+    CHECK(big.p.label == nullptr);
+    CHECK(big.p.group_hint == nullptr);
+    CHECK(big.p.reserved0 == 0);
+    CHECK(big.p.reserved[3] == 0);
+    CHECK(big.extra[0] == 0);
+    CHECK(big.extra[1] == 0);
+    vfgfx_flow_params q = VFGFX_FLOW_PARAMS_INIT;
+    q.flags = 1;
+    CHECK(vfgfx_get_format(w, &q) == VFGFX_ERR_UNSUPPORTED);
+    // Atgal į aprašą: tie patys parametrai su kitu id duoda tinkamą flow aprašą
+    FlowId f2;
+    vfgfx_flow_params r = big.p;
+    r.struct_size = sizeof r;
+    r.flow_id = f2.id.c_str();
+    char buf[2048];
+    REQUIRE(vfgfx_flow_def(&r, buf, sizeof buf, nullptr) == 0);
+    vramflow::VideoFormat fmt{};
+    std::string err;
+    REQUIRE(vramflow::format_from_flow_def(buf, fmt, err));
+    CHECK(fmt.raster == gfx::Raster{1920, 1080, true, true});
+    vfgfx_writer_destroy(w);
+}
+
+// ABI išdėstymas užfiksuotas (tas pats tikrinama C ir ctypes testuose).
+static_assert(sizeof(vfgfx_frame) == 80 && offsetof(vfgfx_frame, cuda_stream) == 40 && offsetof(vfgfx_frame, reserved) == 48,
+              "vfgfx_frame išdėstymas");
+static_assert(sizeof(vfgfx_stats) == 200 && offsetof(vfgfx_stats, pacing) == 120 && offsetof(vfgfx_stats, reserved) == 136,
+              "vfgfx_stats išdėstymas");
+static_assert(sizeof(vfgfx_flow_params) == 104 && offsetof(vfgfx_flow_params, width) == 40 &&
+                  offsetof(vfgfx_flow_params, frame_rate_num) == 56 && offsetof(vfgfx_flow_params, reserved) == 72,
+              "vfgfx_flow_params išdėstymas");

@@ -74,6 +74,11 @@ def main():
     gfx.vfgfx_last_error.argtypes = [ctypes.c_void_p]
     gfx.vfgfx_writer_destroy.argtypes = [ctypes.c_void_p]
 
+    # ABI išdėstymas užfiksuotas (kaip gfx_c_check.c): dydžiai ir poslinkiai be tarpų.
+    assert (ctypes.sizeof(Frame), ctypes.sizeof(Stats), ctypes.sizeof(FlowParams)) == (80, 200, 104)
+    assert (Frame.cuda_stream.offset, Frame.reserved.offset, Stats.pacing.offset, Stats.reserved.offset,
+            FlowParams.width.offset, FlowParams.frame_rate_num.offset, FlowParams.reserved.offset) == (40, 48, 120, 136, 40, 56, 72)
+
     version = gfx.vfgfx_version()
     vstr = gfx.vfgfx_version_string().decode()
     assert vstr == "%d.%d.%d" % (version >> 16, (version >> 8) & 255, version & 255), (version, vstr)

@@ -5,7 +5,24 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <stddef.h>
 #include <vramflow/gfx.h>
+
+/* ABI išdėstymas užfiksuotas (be tarpų; tas pats tikrina test_gfx_writer.cpp ir gfx_ctypes_smoke.py). */
+_Static_assert(sizeof(vfgfx_frame) == 80, "vfgfx_frame size");
+_Static_assert(offsetof(vfgfx_frame, pixels) == 8 && offsetof(vfgfx_frame, width) == 16 && offsetof(vfgfx_frame, mem) == 36 &&
+                   offsetof(vfgfx_frame, cuda_stream) == 40 && offsetof(vfgfx_frame, reserved) == 48,
+               "vfgfx_frame layout");
+_Static_assert(sizeof(vfgfx_stats) == 200, "vfgfx_stats size");
+_Static_assert(offsetof(vfgfx_stats, committed) == 8 && offsetof(vfgfx_stats, next_pacing_index) == 112 &&
+                   offsetof(vfgfx_stats, pacing) == 120 && offsetof(vfgfx_stats, reserved0) == 132 &&
+                   offsetof(vfgfx_stats, reserved) == 136,
+               "vfgfx_stats layout");
+_Static_assert(sizeof(vfgfx_flow_params) == 104, "vfgfx_flow_params size");
+_Static_assert(offsetof(vfgfx_flow_params, flow_id) == 8 && offsetof(vfgfx_flow_params, format) == 32 &&
+                   offsetof(vfgfx_flow_params, width) == 40 && offsetof(vfgfx_flow_params, frame_rate_num) == 56 &&
+                   offsetof(vfgfx_flow_params, reserved) == 72,
+               "vfgfx_flow_params layout");
 
 int main(void) {
     vfgfx_writer w = NULL;

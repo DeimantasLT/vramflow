@@ -56,6 +56,8 @@ constexpr int kQueueCap = VFGFX_SUBMIT_AT_MIN_QUEUE;  // submit_at eilės talpa 
 constexpr int kSets = 2 + kQueueCap;                  // paruoštų aibių: dabartinė + submit tikslas + eilė
 constexpr std::uint32_t kMaxStruct = 4096;
 constexpr std::uint32_t kFrameFlags = VFGFX_FRAME_CALLER_SYNCED;
+// mxlStatus kodai perduodami nepakeisti; VFGFX_ERR_* prasideda nuo 2000 — sritys nesikerta (gfx.h „ERRORS“).
+static_assert(MXL_ERR_UNSUPPORTED_OPERATION < VFGFX_ERR_INVALID_ARG, "mxlStatus kodai persidengia su VFGFX_ERR_*");
 
 // Kviečiančios gijos CUDA įrenginio perjungimas laikinai (atstatomas išeinant).
 struct DeviceScope {
@@ -91,8 +93,8 @@ std::uint32_t struct_size_of(const void* p) {
 }
 
 std::string size_msg(const char* name, std::uint32_t sz, std::size_t min) {
-    return std::string(name) + ".struct_size " + std::to_string(sz) + " (leidžiama " + std::to_string(min) + "…" +
-           std::to_string(kMaxStruct) + "; naudok _INIT makrokomandą)";
+    return std::string(name) + ".struct_size " + std::to_string(sz) + " out of range (allowed " + std::to_string(min) + ".." +
+           std::to_string(kMaxStruct) + "; initialise the struct with its _INIT macro)";
 }
 
 // Pratęsiamos įvesties struktūros skaitymas (gfx.h „Extensible structs“): struct_size >= min ir <= 4096; žinoma dalis
@@ -109,8 +111,8 @@ int read_struct(const void* p, std::size_t min, const char* name, T& out, std::s
     const auto* b = static_cast<const unsigned char*>(p);
     for (std::size_t k = sizeof out; k < sz; ++k)
         if (b[k]) {
-            msg = std::string(name) + ": nežinomi laukai už " + std::to_string(sizeof out) + " B nenuliniai (struct_size " +
-                  std::to_string(sz) + "; biblioteka " VFGFX_VERSION_STRING " jų nepalaiko)";
+            msg = std::string(name) + ": fields beyond byte " + std::to_string(sizeof out) + " are non-zero (struct_size " +
+                  std::to_string(sz) + "); library " VFGFX_VERSION_STRING " does not support them";
             return VFGFX_ERR_UNSUPPORTED;
         }
     return 0;
@@ -150,6 +152,13 @@ std::string json_escape(const std::string& s) {
     return o;
 }
 
+// Nepalaikomo kadrų dažnio žinutė (angliškai; format.hpp žinutės lietuviškos — vidinės).
+std::string rate_msg(const vramflow::VideoFormat& f) {
+    return "unsupported frame rate " + std::to_string(f.frame_rate.num) + "/" + std::to_string(f.frame_rate.den) +
+           (f.raster.interlaced ? " for an interlaced flow (supported: 25/1, 30000/1001)"
+                                : " for a progressive flow (supported: 25/1, 50/1, 30000/1001, 60000/1001)");
+}
+
 struct Pending {  // submit_at eilės įrašas: aibė `set` tampa dabartine nuo grain'o `first`
     std::uint64_t first;
     int set;
@@ -159,6 +168,7 @@ struct Pending {  // submit_at eilės įrašas: aibė `set` tampa dabartine nuo 
 
 struct vfgfx_writer_s {
     mxlInstance inst = nullptr;
+    std::string flow_id;  // vfgfx_get_format
     func::VideoOut out;
     gfx::Raster r{};
     vramflow::VideoFormat fmt{};  // r + kadrų dažnis iš flow aprašo; ritmas — fmt.grain_rate()
@@ -243,30 +253,30 @@ struct vfgfx_writer_s {
 
     // Kadro nuskaitymas ir patikra (gfx.h „FRAMES“): 0 arba klaidos kodas; fr — žinoma struktūros dalis.
     int read_frame(const vfgfx_frame* f, vfgfx_frame& fr) {
-        if (!f) return fail(VFGFX_ERR_INVALID_ARG, "kadras nullptr");
+        if (!f) return fail(VFGFX_ERR_INVALID_ARG, "frame is NULL");
         std::string msg;
         if (const int c = read_struct(f, offsetof(vfgfx_frame, cuda_stream) + sizeof(void*), "vfgfx_frame", fr, msg))
             return fail(c, msg);
-        if (fr.flags & ~kFrameFlags) return fail(VFGFX_ERR_UNSUPPORTED, "nežinomos vfgfx_frame.flags " + std::to_string(fr.flags));
-        if (!all_zero(fr.reserved)) return fail(VFGFX_ERR_UNSUPPORTED, "vfgfx_frame.reserved turi būti nuliai");
+        if (fr.flags & ~kFrameFlags) return fail(VFGFX_ERR_UNSUPPORTED, "unknown vfgfx_frame.flags " + std::to_string(fr.flags));
+        if (!all_zero(fr.reserved)) return fail(VFGFX_ERR_UNSUPPORTED, "vfgfx_frame.reserved must be zero");
         if (fr.pixel_format != VFGFX_PIXEL_RGBA8 && fr.pixel_format != VFGFX_PIXEL_BGRA8)
-            return fail(VFGFX_ERR_UNSUPPORTED, "nepalaikomas pixel_format " + std::to_string(fr.pixel_format) +
-                                                   " (palaikoma RGBA8 = 0, BGRA8 = 1)");
-        if (!fr.pixels) return fail(VFGFX_ERR_INVALID_ARG, "kadro rodyklė (pixels) nullptr");
+            return fail(VFGFX_ERR_UNSUPPORTED, "unsupported pixel_format " + std::to_string(fr.pixel_format) +
+                                                   " (supported: RGBA8 = 0, BGRA8 = 1)");
+        if (!fr.pixels) return fail(VFGFX_ERR_INVALID_ARG, "vfgfx_frame.pixels is NULL");
         if (fr.alpha != VFGFX_ALPHA_STRAIGHT && fr.alpha != VFGFX_ALPHA_PREMULTIPLIED)
-            return fail(VFGFX_ERR_INVALID_ARG, "nežinomas vfgfx_alpha");
-        if (fr.mem != VFGFX_MEM_HOST && fr.mem != VFGFX_MEM_CUDA) return fail(VFGFX_ERR_INVALID_ARG, "nežinomas vfgfx_mem");
-        if (fr.cuda_stream && fr.mem != VFGFX_MEM_CUDA) return fail(VFGFX_ERR_INVALID_ARG, "cuda_stream galimas tik CUDA kadrui");
+            return fail(VFGFX_ERR_UNSUPPORTED, "unsupported vfgfx_frame.alpha " + std::to_string(fr.alpha));
+        if (fr.mem != VFGFX_MEM_HOST && fr.mem != VFGFX_MEM_CUDA) return fail(VFGFX_ERR_UNSUPPORTED, "unsupported vfgfx_frame.mem " + std::to_string(fr.mem));
+        if (fr.cuda_stream && fr.mem != VFGFX_MEM_CUDA) return fail(VFGFX_ERR_INVALID_ARG, "cuda_stream is only allowed for VFGFX_MEM_CUDA frames");
         if (fr.cuda_stream && (fr.flags & VFGFX_FRAME_CALLER_SYNCED))
-            return fail(VFGFX_ERR_INVALID_ARG, "cuda_stream ir VFGFX_FRAME_CALLER_SYNCED kartu — prieštaringa");
+            return fail(VFGFX_ERR_INVALID_ARG, "cuda_stream and VFGFX_FRAME_CALLER_SYNCED are mutually exclusive");
         if (fr.width != static_cast<std::uint32_t>(r.w) || fr.height != static_cast<std::uint32_t>(r.h))
-            return fail(VFGFX_ERR_GEOMETRY, "kadras " + std::to_string(fr.width) + "x" + std::to_string(fr.height) + " != flow " +
+            return fail(VFGFX_ERR_GEOMETRY, "frame " + std::to_string(fr.width) + "x" + std::to_string(fr.height) + " != flow " +
                                                 std::to_string(r.w) + "x" + std::to_string(r.h));
         if (fr.stride < fr.width * 4u) return fail(VFGFX_ERR_GEOMETRY, "stride < width*4");
         if (fr.mem == VFGFX_MEM_CUDA && ((fr.stride & 3u) || (reinterpret_cast<std::uintptr_t>(fr.pixels) & 3u)))
-            return fail(VFGFX_ERR_GEOMETRY, "CUDA kadro rodyklė ir stride turi būti kartotiniai 4 B");
+            return fail(VFGFX_ERR_GEOMETRY, "CUDA frame pointer and stride must be multiples of 4 bytes");
         if (cuda_store && fr.mem == VFGFX_MEM_HOST && (fr.stride & 3u))
-            return fail(VFGFX_ERR_GEOMETRY, "stride turi būti kartotinis 4 B (cuda-linear saugykla)");
+            return fail(VFGFX_ERR_GEOMETRY, "stride must be a multiple of 4 bytes for a cuda-linear flow");
         return 0;
     }
 
@@ -286,12 +296,12 @@ struct vfgfx_writer_s {
             }
             cudaError_t e = cudaEventRecord(ev_caller, static_cast<cudaStream_t>(fr.cuda_stream));
             if (e == cudaSuccess) e = cudaStreamWaitEvent(own, ev_caller, 0);
-            if (e != cudaSuccess) return fail_cuda("kviečiančiojo cuda_stream įvykis", e);
+            if (e != cudaSuccess) return fail_cuda("event on the caller's cuda_stream", e);
             return 0;
         }
         // R20: visų konteksto darbų laukimas (pirminis kontekstas bendras visiems proceso CUDA runtime'ams).
         const cudaError_t e = cudaDeviceSynchronize();
-        if (e != cudaSuccess) return fail_cuda("laukimas CUDA kadro (R20)", e);
+        if (e != cudaSuccess) return fail_cuda("cudaDeviceSynchronize before reading the CUDA frame", e);
         return 0;
     }
 
@@ -328,7 +338,7 @@ struct vfgfx_writer_s {
                 if (e != cudaSuccess) return fail_cuda("rgba_to_v210a", e);
             }
             const cudaError_t e = cudaStreamSynchronize(s_conv);
-            if (e != cudaSuccess) return fail_cuda("sinchronizavimas", e);
+            if (e != cudaSuccess) return fail_cuda("cudaStreamSynchronize", e);
             return 0;
         }
         const std::uint8_t* src = static_cast<const std::uint8_t*>(f.pixels);
@@ -339,7 +349,7 @@ struct vfgfx_writer_s {
             if (!s_conv) {
                 if (const cudaError_t e = cudaStreamCreateWithFlags(&s_conv, cudaStreamNonBlocking); e != cudaSuccess) {
                     s_conv = nullptr;
-                    return fail_cuda("cudaStreamCreate (CUDA kadro atsisiuntimui)", e);
+                    return fail_cuda("cudaStreamCreate (CUDA frame download)", e);
                 }
             }
             if (const int we = order_after_caller(f, s_conv)) return we;
@@ -351,7 +361,7 @@ struct vfgfx_writer_s {
         }
         for (int k = 0; k < n; ++k)
             if (!gfx::cpu::rgba_to_v210a(src, w, h, stride, mode, r, par[k], dst[k], order))
-                return fail(VFGFX_ERR_GEOMETRY, "CPU rgba_to_v210a atmetė užduotį");
+                return fail(VFGFX_ERR_GEOMETRY, "CPU rgba_to_v210a rejected the frame");
         return 0;
     }
 
@@ -479,10 +489,10 @@ void vfgfx_writer_s::pace_loop() {
     try {
         pace_loop_body();
     } catch (const std::exception& e) {
-        set_pace_error(std::string("ritmo gija nutrūko: ") + e.what());
+        set_pace_error(std::string("pacing thread ended: ") + e.what());
         bump(&gi::PacingStats::errors);
     } catch (...) {
-        set_pace_error("ritmo gija nutrūko: nežinoma išimtis");
+        set_pace_error("pacing thread ended: unknown exception");
         bump(&gi::PacingStats::errors);
     }
     out.cancel();
@@ -595,8 +605,8 @@ static int guarded(vfgfx_writer w, F&& f) noexcept {
         return rc;
     } catch (const std::exception& e) {
         try {
-            if (w) w->fail(VFGFX_ERR_INTERNAL, std::string("vidinė išimtis: ") + e.what());
-            else g_create_error = std::string("vidinė išimtis: ") + e.what();
+            if (w) w->fail(VFGFX_ERR_INTERNAL, std::string("internal exception: ") + e.what());
+            else g_create_error = std::string("internal exception: ") + e.what();
         } catch (...) {
         }
     } catch (...) {
@@ -613,17 +623,19 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         return code;
     };
     if (out) *out = nullptr;
-    if (!inst || !flow_def_json || !out) return fail(VFGFX_ERR_INVALID_ARG, "inst, flow_def_json ir out turi būti ne nullptr");
+    if (!inst || !flow_def_json || !out) return fail(VFGFX_ERR_INVALID_ARG, "inst, flow_def_json and out must not be NULL");
     const std::string def = flow_def_json;
     const std::string opts = writer_options_json ? writer_options_json : "";
     vramflow::VideoFormat fmt{};
     std::string err;
-    if (!vramflow::format_from_flow_def(def, fmt, err)) return fail(VFGFX_ERR_INVALID_ARG, err);
+    if (!vramflow::format_from_flow_def(def, fmt, err))
+        return fail(VFGFX_ERR_INVALID_ARG, "invalid flow definition (expected MXL video flow JSON with media_type, frame_width, "
+                                           "frame_height, interlace_mode progressive|interlaced_tff and grain_rate)");
     const gfx::Raster r = fmt.raster;
     // dažnis — bet kuris palaikomas (format.hpp); rastras — bet koks (grafikos sluoksniai)
-    if (!vramflow::rate_supported(r.interlaced, fmt.frame_rate, err)) return fail(VFGFX_ERR_GEOMETRY, err);
-    if (!r.alpha) return fail(VFGFX_ERR_INVALID_ARG, "flow turi būti video/v210a");
-    if (!gfx::raster_ok(r)) return fail(VFGFX_ERR_GEOMETRY, "netinkamas rastras (plotis ir interlaced aukštis lyginiai)");
+    if (!vramflow::rate_supported(r.interlaced, fmt.frame_rate, err)) return fail(VFGFX_ERR_GEOMETRY, rate_msg(fmt));
+    if (!r.alpha) return fail(VFGFX_ERR_INVALID_ARG, "flow media_type must be video/v210a");
+    if (!gfx::raster_ok(r)) return fail(VFGFX_ERR_GEOMETRY, "invalid raster (width and, for interlaced flows, height must be even)");
 
     auto w = std::make_unique<vfgfx_writer_s>();
     w->inst = inst;
@@ -631,19 +643,24 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
     w->fmt = fmt;
     w->rate = func::mxl_rate(fmt.grain_rate());
     w->fields = r.interlaced ? 2 : 1;
+    gfx::detail::json_str(def, "id", w->flow_id);
     // deviceUuid nurodytas, bet tokio įrenginio nėra: aiški klaida, ne tylus kitas įrenginys. Ieškoma vieną kartą per create.
     const int uuid_dev = device_from_options(opts);
     {
         std::string u;
         if (gfx::detail::json_str(opts, "deviceUuid", u) && !u.empty() && uuid_dev < 0)
-            return fail(VFGFX_ERR_INVALID_ARG, "deviceUuid " + u + " neatitinka jokio CUDA įrenginio");
+            return fail(VFGFX_ERR_INVALID_ARG, "deviceUuid " + u + " matches no CUDA device");
     }
     if (!w->out.create(inst, def, opts, err, fmt)) {
         const int code = w->out.create_status != MXL_STATUS_OK ? static_cast<int>(w->out.create_status)
                          : w->out.existed                       ? VFGFX_ERR_STATE
                                                                 : VFGFX_ERR_GEOMETRY;
         w->out.release(inst);
-        return fail(code, err);
+        const std::string m = w->out.create_status != MXL_STATUS_OK
+                                  ? "mxlCreateFlowWriter failed, status " + std::to_string(w->out.create_status)
+                              : w->out.existed ? "flow already exists in this domain"
+                                               : "flow storage layout or grain rate does not match the v210a definition";
+        return fail(code, m);
     }
     w->cuda_store = mxlv::is_cuda_layout(w->out.layout);
     if (!w->cuda_store) w->conv_dev = uuid_dev;
@@ -653,7 +670,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         if (uuid_dev < 0 && (cudaGetDeviceCount(&n) != cudaSuccess || n < 1)) {
             cudaGetLastError();
             w->out.release(inst);
-            return fail(VFGFX_ERR_CUDA, "nėra CUDA įrenginio");
+            return fail(VFGFX_ERR_CUDA, "no CUDA device");
         }
         w->device = uuid_dev >= 0 ? uuid_dev : 0;
         DeviceScope ds(w->device);
@@ -678,7 +695,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
 static int write_impl(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
-    if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "vfgfx_write negalimas, kol veikia ritmo režimas");
+    if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "vfgfx_write is not allowed while pacing runs");
     vfgfx_frame fr;
     if (const int c = w->read_frame(f, fr)) return c;
     mxlStatus st = MXL_STATUS_OK;
@@ -704,7 +721,7 @@ static int write_impl(vfgfx_writer w, std::uint64_t index, const vfgfx_frame* f)
 static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
     if (!w) return VFGFX_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> l(w->op_m);
-    if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "ritmo režimas jau paleistas");
+    if (w->pacing.load()) return w->fail(VFGFX_ERR_STATE, "pacing is already running");
     w->offset_ns.store(offset_ns);
     w->stop.store(false);
     {
@@ -717,7 +734,7 @@ static int start_pacing_impl(vfgfx_writer w, std::int64_t offset_ns) {
         w->th = std::thread([w] { w->pace_loop(); });
     } catch (...) {
         w->pacing.store(false);
-        return w->fail(VFGFX_ERR_STATE, "nepavyko paleisti ritmo gijos");
+        return w->fail(VFGFX_ERR_STATE, "could not start the pacing thread");
     }
     return 0;
 }
@@ -765,8 +782,8 @@ static int submit_at_impl(vfgfx_writer w, std::uint64_t first, const vfgfx_frame
     const auto num = static_cast<std::uint64_t>(w->rate.numerator), den = static_cast<std::uint64_t>(w->rate.denominator);
     const std::uint64_t lead = (static_cast<std::uint64_t>(VFGFX_SUBMIT_AT_MAX_LEAD_S) * num + den - 1) / den;
     auto too_late = [&](std::uint64_t min) {
-        return w->fail(VFGFX_ERR_TOO_LATE, "submit_at indeksas " + std::to_string(first) + " < " + std::to_string(min) +
-                                               " (mažiausias priimamas — stats.next_pacing_index)");
+        return w->fail(VFGFX_ERR_TOO_LATE, "vfgfx_submit_at: first_index " + std::to_string(first) + " < next_pacing_index " +
+                                               std::to_string(min));
     };
     if (w->r.interlaced && (first & 1))
         return w->fail(VFGFX_ERR_INVALID_ARG, "vfgfx_submit_at: first_index " + std::to_string(first) +
@@ -778,12 +795,12 @@ static int submit_at_impl(vfgfx_writer w, std::uint64_t first, const vfgfx_frame
         if (first < min) return too_late(min);
         const std::uint64_t now = w->current_index();
         if (first > now + lead)
-            return w->fail(VFGFX_ERR_TOO_EARLY, "submit_at indeksas " + std::to_string(first) + " > dabartinis " +
+            return w->fail(VFGFX_ERR_TOO_EARLY, "vfgfx_submit_at: first_index " + std::to_string(first) + " > current index " +
                                                     std::to_string(now) + " + " + std::to_string(lead) + " (" +
                                                     std::to_string(VFGFX_SUBMIT_AT_MAX_LEAD_S) + " s)");
         const bool same = std::any_of(w->queue.begin(), w->queue.end(), [&](const Pending& p) { return p.first == first; });
         if (!same && static_cast<int>(w->queue.size()) >= kQueueCap)
-            return w->fail(VFGFX_ERR_QUEUE_FULL, "submit_at eilė pilna (" + std::to_string(kQueueCap) + " laukiantys kadrai)");
+            return w->fail(VFGFX_ERR_QUEUE_FULL, "vfgfx_submit_at: queue full (" + std::to_string(kQueueCap) + " pending frames)");
     }
     const int target = prepare_set(w, fr);
     if (target < 0) return -target;
@@ -813,14 +830,15 @@ static int stop_pacing_impl(vfgfx_writer w) {
     return 0;
 }
 
+// Skaitymo funkcija: tik grąžinimo kodas, vfgfx_last_error ir caller_errors nekeičiami (stebėjimo gija neturi
+// išvalyti / perrašyti kviečiančiosios klaidos, peržiūros 5 punktas).
 static int get_stats_impl(vfgfx_writer w, vfgfx_stats* out) {
-    if (!w) return VFGFX_ERR_INVALID_ARG;
-    if (!out) return w->fail(VFGFX_ERR_INVALID_ARG, "vfgfx_get_stats: out nullptr");
+    if (!w || !out) return VFGFX_ERR_INVALID_ARG;
     // Išvesties struktūra: tikrinamas tik dydis ir flags; nežinoma uodega (naujesnė antraštė) nunulinama.
     const std::uint32_t sz = struct_size_of(out);
     const std::size_t hdr = offsetof(vfgfx_stats, committed), min = hdr + sizeof(std::uint64_t);
-    if (sz < min || sz > kMaxStruct) return w->fail(VFGFX_ERR_STRUCT_SIZE, size_msg("vfgfx_stats", sz, min));
-    if (out->flags) return w->fail(VFGFX_ERR_UNSUPPORTED, "nežinomos vfgfx_stats.flags " + std::to_string(out->flags));
+    if (sz < min || sz > kMaxStruct) return VFGFX_ERR_STRUCT_SIZE;
+    if (out->flags) return VFGFX_ERR_UNSUPPORTED;
     vfgfx_stats s;
     std::memset(static_cast<void*>(&s), 0, sizeof s);
     {
@@ -865,36 +883,39 @@ static int flow_def_impl(const vfgfx_flow_params* p, char* buf, std::size_t buf_
     std::string msg;
     if (const int c = read_struct(p, offsetof(vfgfx_flow_params, frame_rate_den) + sizeof(std::int64_t), "vfgfx_flow_params", q, msg))
         return fail(c, msg);
-    if (q.flags) return fail(VFGFX_ERR_UNSUPPORTED, "nežinomos vfgfx_flow_params.flags " + std::to_string(q.flags));
-    if (q.reserved0 || !all_zero(q.reserved)) return fail(VFGFX_ERR_UNSUPPORTED, "vfgfx_flow_params.reserved turi būti nuliai");
+    if (q.flags) return fail(VFGFX_ERR_UNSUPPORTED, "unknown vfgfx_flow_params.flags " + std::to_string(q.flags));
+    if (q.reserved0 || !all_zero(q.reserved)) return fail(VFGFX_ERR_UNSUPPORTED, "vfgfx_flow_params.reserved must be zero");
     if (!q.flow_id || !is_uuid(q.flow_id))
-        return fail(VFGFX_ERR_INVALID_ARG, "flow_id privalomas UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)");
+        return fail(VFGFX_ERR_INVALID_ARG, "flow_id must be a UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)");
     const std::string label = json_escape(q.label ? q.label : "vramflow-gfx");
     const std::string hint = json_escape(q.group_hint ? std::string(q.group_hint) : std::string("vramflow-gfx-") + q.flow_id + ":Video");
-    if (label.size() > 256 || hint.size() > 256) return fail(VFGFX_ERR_INVALID_ARG, "label / group_hint ilgesnis nei 256 B (JSON)");
+    if (label.size() > 256 || hint.size() > 256) return fail(VFGFX_ERR_INVALID_ARG, "label or group_hint longer than 256 bytes (JSON-escaped)");
     vramflow::VideoFormat f{};
     std::string err;
     if (q.format) {
         if (q.width || q.height || q.scan || q.frame_rate_num || q.frame_rate_den)
-            return fail(VFGFX_ERR_INVALID_ARG, "format ir width/height/scan/frame_rate kartu — prieštaringa");
-        if (!vramflow::parse_format(q.format, f, err)) return fail(VFGFX_ERR_GEOMETRY, err);
+            return fail(VFGFX_ERR_INVALID_ARG, "format and width/height/scan/frame_rate are mutually exclusive");
+        if (!vramflow::parse_format(q.format, f, err))
+            return fail(VFGFX_ERR_GEOMETRY, std::string("unsupported format name '") + q.format +
+                                                "' (supported: 720p25|50|29.97|59.94, 1080i50|59.94, 1080p25|50|29.97|59.94, "
+                                                "2160p25|50|29.97|59.94)");
     } else {
         if (q.scan != VFGFX_SCAN_PROGRESSIVE && q.scan != VFGFX_SCAN_INTERLACED_TFF)
-            return fail(VFGFX_ERR_INVALID_ARG, "nežinomas vfgfx_scan " + std::to_string(q.scan));
-        if (q.width > 16384 || q.height > 16384) return fail(VFGFX_ERR_GEOMETRY, "rastras didesnis nei 16384");
+            return fail(VFGFX_ERR_UNSUPPORTED, "unsupported vfgfx_flow_params.scan " + std::to_string(q.scan));
+        if (q.width > 16384 || q.height > 16384) return fail(VFGFX_ERR_GEOMETRY, "raster larger than 16384");
         f.raster = gfx::Raster{static_cast<int>(q.width), static_cast<int>(q.height), q.scan == VFGFX_SCAN_INTERLACED_TFF, true};
-        if (!gfx::raster_ok(f.raster)) return fail(VFGFX_ERR_GEOMETRY, "netinkamas rastras (plotis ir interlaced aukštis lyginiai, > 0)");
-        if (q.frame_rate_num <= 0 || q.frame_rate_den <= 0) return fail(VFGFX_ERR_GEOMETRY, "kadrų dažnis turi būti > 0");
+        if (!gfx::raster_ok(f.raster)) return fail(VFGFX_ERR_GEOMETRY, "invalid raster (width and height > 0; width and, for interlaced flows, height even)");
+        if (q.frame_rate_num <= 0 || q.frame_rate_den <= 0) return fail(VFGFX_ERR_GEOMETRY, "frame rate must be > 0");
         f.frame_rate = vramflow::Rational{q.frame_rate_num, q.frame_rate_den};
-        if (!vramflow::rate_supported(f.raster.interlaced, f.frame_rate, err)) return fail(VFGFX_ERR_GEOMETRY, err);
+        if (!vramflow::rate_supported(f.raster.interlaced, f.frame_rate, err)) return fail(VFGFX_ERR_GEOMETRY, rate_msg(f));
     }
     f.raster.alpha = true;  // video/v210a
     const std::string json = vramflow::video_flow_def(q.flow_id, label, f, hint);
-    if (json.size() >= 2047) return fail(VFGFX_ERR_INTERNAL, "flow aprašas per ilgas");
+    if (json.size() >= 2047) return fail(VFGFX_ERR_INTERNAL, "flow definition too long");
     const std::size_t need = json.size() + 1;
     if (required) *required = need;
     if (!buf && buf_size == 0) return 0;
-    if (!buf) return fail(VFGFX_ERR_INVALID_ARG, "buf nullptr, bet buf_size > 0");
+    if (!buf) return fail(VFGFX_ERR_INVALID_ARG, "buf is NULL but buf_size > 0");
     if (buf_size < need) {
         buf[0] = '\0';
         return fail(VFGFX_ERR_BUFFER_TOO_SMALL, "buf_size " + std::to_string(buf_size) + " < " + std::to_string(need));
@@ -937,7 +958,11 @@ int vfgfx_stop_pacing(vfgfx_writer w) {
     return guarded(w, [&] { return stop_pacing_impl(w); });
 }
 int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out) {
-    return guarded(w, [&] { return get_stats_impl(w, out); });
+    try {
+        return get_stats_impl(w, out);
+    } catch (...) {
+        return VFGFX_ERR_INTERNAL;
+    }
 }
 int vfgfx_cancel_scheduled(vfgfx_writer w) {
     return guarded(w, [&] {
@@ -949,6 +974,26 @@ int vfgfx_cancel_scheduled(vfgfx_writer w) {
     });
 }
 uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index) { return w ? mxlIndexToTimestamp(&w->rate, index) : 0; }
+int vfgfx_get_format(vfgfx_writer w, vfgfx_flow_params* out) {
+    // Skaitymo funkcija (kaip vfgfx_get_stats): vfgfx_last_error nekeičiamas.
+    if (!w || !out) return VFGFX_ERR_INVALID_ARG;
+    const std::uint32_t sz = struct_size_of(out);
+    const std::size_t hdr = offsetof(vfgfx_flow_params, flow_id), min = offsetof(vfgfx_flow_params, frame_rate_den) + sizeof(std::int64_t);
+    if (sz < min || sz > kMaxStruct) return VFGFX_ERR_STRUCT_SIZE;
+    if (out->flags) return VFGFX_ERR_UNSUPPORTED;
+    vfgfx_flow_params q;
+    std::memset(static_cast<void*>(&q), 0, sizeof q);
+    q.flow_id = w->flow_id.c_str();
+    q.width = static_cast<std::uint32_t>(w->r.w);
+    q.height = static_cast<std::uint32_t>(w->r.h);
+    q.scan = w->r.interlaced ? VFGFX_SCAN_INTERLACED_TFF : VFGFX_SCAN_PROGRESSIVE;
+    q.frame_rate_num = w->fmt.frame_rate.num;
+    q.frame_rate_den = w->fmt.frame_rate.den;
+    auto* o = reinterpret_cast<unsigned char*>(out);
+    std::memcpy(o + hdr, reinterpret_cast<const unsigned char*>(&q) + hdr, std::min<std::size_t>(sz, sizeof q) - hdr);
+    if (sz > sizeof q) std::memset(o + sizeof q, 0, sz - sizeof q);
+    return 0;
+}
 uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
 uint64_t vfgfx_current_index(vfgfx_writer w) {
     if (!w) return VFGFX_INDEX_NONE;
