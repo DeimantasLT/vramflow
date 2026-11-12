@@ -74,19 +74,16 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   target_link_libraries(mxlv_gfx_writer PUBLIC mxl::mxl mxlv_flows mxlv_gfx_cpu mxlv_gfx_cuda CUDA::cudart_static Threads::Threads)
   set_target_properties(mxlv_gfx_writer PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-  # Versija — vienintelis šaltinis include/vramflow/gfx.h (VFGFX_VERSION_*). SONAME politika (gfx.h „VERSIONING AND
-  # ABI“): iki 1.0 kiekviena MINOR versija gali laužti ABI, todėl SOVERSION = MAJOR.MINOR (libvramflow-gfx.so.0.2);
-  # nuo 1.0 — SOVERSION = MAJOR.
-  file(STRINGS ${CMAKE_SOURCE_DIR}/include/vramflow/gfx.h _vfgfx_ver REGEX "^#define VFGFX_VERSION_(MAJOR|MINOR|PATCH) [0-9]+$")
-  foreach(_part MAJOR MINOR PATCH)
-    string(REGEX REPLACE ".*#define VFGFX_VERSION_${_part} ([0-9]+).*" "\\1" VFGFX_VERSION_${_part} "${_vfgfx_ver}")
+  # Versija ir ABI epocha — vienintelis šaltinis include/vramflow/gfx.h (VFGFX_VERSION_*, VFGFX_ABI_VERSION). SONAME
+  # politika (gfx.h „VERSIONING AND ABI“): SONAME = libvramflow-gfx.so.<ABI epocha>, nepriklausomai nuo leidimo versijos;
+  # epocha keičiama tik nesuderinamo pakeitimo atveju (0.1 turėjo .so.0, 0.2 — .so.1).
+  file(STRINGS ${CMAKE_SOURCE_DIR}/include/vramflow/gfx.h _vfgfx_ver
+       REGEX "^#define VFGFX_(VERSION_MAJOR|VERSION_MINOR|VERSION_PATCH|ABI_VERSION) [0-9]+")
+  foreach(_part VERSION_MAJOR VERSION_MINOR VERSION_PATCH ABI_VERSION)
+    string(REGEX REPLACE ".*#define VFGFX_${_part} ([0-9]+).*" "\\1" VFGFX_${_part} "${_vfgfx_ver}")
   endforeach()
   set(VFGFX_VERSION "${VFGFX_VERSION_MAJOR}.${VFGFX_VERSION_MINOR}.${VFGFX_VERSION_PATCH}")
-  if(VFGFX_VERSION_MAJOR EQUAL 0)
-    set(VFGFX_SOVERSION "${VFGFX_VERSION_MAJOR}.${VFGFX_VERSION_MINOR}")
-  else()
-    set(VFGFX_SOVERSION "${VFGFX_VERSION_MAJOR}")
-  endif()
+  set(VFGFX_SOVERSION "${VFGFX_ABI_VERSION}")
   message(STATUS "libvramflow-gfx ${VFGFX_VERSION}, SOVERSION ${VFGFX_SOVERSION}")
 
   add_library(vramflow-gfx SHARED src/gfx/gfx_writer.cpp)
@@ -122,12 +119,15 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
 
     add_executable(vramflow-gfx-writer-tests tests/gpu/test_gfx_writer.cpp)
     vramflow_warnings(vramflow-gfx-writer-tests)
-    target_link_libraries(vramflow-gfx-writer-tests PRIVATE mxlv_gfx_writer mxlv_gfx_ref Catch2::Catch2WithMain)
+    # CUDA::cuda_driver — tik testui (kviečiančiojo cuCtxCreate konteksto atstatymo patikra); biblioteka jo nelinkuoja.
+    target_link_libraries(vramflow-gfx-writer-tests PRIVATE mxlv_gfx_writer mxlv_gfx_ref CUDA::cuda_driver Catch2::Catch2WithMain)
     set_target_properties(vramflow-gfx-writer-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
     catch_discover_tests(vramflow-gfx-writer-tests)
 
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
+      add_test(NAME gfx_so_abi COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/gfx_so_abi_check.py
+               $<TARGET_FILE:vramflow-gfx> ${CMAKE_SOURCE_DIR}/include/vramflow/gfx.h)
       add_test(NAME gfx_writer_ctypes_smoke
                COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/gfx_ctypes_smoke.py $<TARGET_FILE:vramflow-gfx>
                        ${MXL_ROOT}/lib/libmxl.so)

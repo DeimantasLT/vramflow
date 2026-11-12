@@ -1,5 +1,8 @@
 # Eksportuojamas tik viešas C ABI (include/vramflow/gfx.h); kita (cudart_static, mxlv_*) paslėpta.
-{
+# Simbolių versijos (gfx.h „VERSIONING AND ABI“): VFGFX_1 — ABI epochos 1 pradinis rinkinys. Vėlesniuose leidimuose
+# pridėtos funkcijos eina į NAUJĄ mazgą, paveldintį ankstesnį, pvz. `VFGFX_1.1 { global: vfgfx_naujas; } VFGFX_1;` —
+# esamų mazgų turinys niekada nekeičiamas.
+VFGFX_1 {
   global: vfgfx_*;
   local: *;
 };

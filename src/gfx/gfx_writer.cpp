@@ -59,21 +59,65 @@ constexpr std::uint32_t kFrameFlags = VFGFX_FRAME_CALLER_SYNCED;
 // mxlStatus kodai perduodami nepakeisti; VFGFX_ERR_* prasideda nuo 2000 — sritys nesikerta (gfx.h „ERRORS“).
 static_assert(MXL_ERR_UNSUPPORTED_OPERATION < VFGFX_ERR_INVALID_ARG, "mxlStatus kodai persidengia su VFGFX_ERR_*");
 
-// Kviečiančios gijos CUDA įrenginio perjungimas laikinai (atstatomas išeinant).
+// Kviečiančios gijos CUDA įrenginio perjungimas laikinai (atstatomas išeinant). cudaSetDevice kviečiamas VISADA (ne tik
+// kai įrenginys kitas): jis padaro pirminį kontekstą dabartiniu, o kviečiančiojo cuCtxCreate kontekstas tame pačiame
+// įrenginyje kitaip būtų naudojamas mūsų stream'ams / atminčiai (sukurtiems pirminiame) — klaida. Kviečiančiojo
+// kontekstą atstato CtxGuard (išorinis apvalkalas).
 struct DeviceScope {
     int prev = -1;
     bool active = false;
     explicit DeviceScope(int dev) {
         if (dev < 0) return;
         if (cudaGetDevice(&prev) != cudaSuccess) { cudaGetLastError(); prev = -1; }
-        if (prev != dev) {
-            active = cudaSetDevice(dev) == cudaSuccess;
-            if (!active) cudaGetLastError();
-        }
+        active = cudaSetDevice(dev) == cudaSuccess;
+        if (!active) cudaGetLastError();
     }
     ~DeviceScope() {
         if (active && prev >= 0) cudaSetDevice(prev);
     }
+};
+
+// Kviečiančiosios gijos dabartinio CUDA (driver) konteksto išsaugojimas ir atstatymas (peržiūros 7 punktas): MXL
+// cuda-linear backend'as (cuCtxSetCurrent + cudaSetDevice) ir mūsų privati cudart perjungia giją į pirminį kontekstą.
+// Driver funkcijos gaunamos per cudart (cudaGetDriverEntryPointByVersion) — be naujos priklausomybės nuo libcuda.
+struct DriverCtx {
+    int (*get)(void**) = nullptr;
+    int (*set)(void*) = nullptr;
+};
+const DriverCtx& driver_ctx() {
+    static const DriverCtx d = [] {
+        DriverCtx r;
+        void* g = nullptr;
+        void* s = nullptr;
+        cudaDriverEntryPointQueryResult qg{}, qs{};
+        if (cudaGetDriverEntryPointByVersion("cuCtxGetCurrent", &g, 12000, cudaEnableDefault, &qg) == cudaSuccess &&
+            cudaGetDriverEntryPointByVersion("cuCtxSetCurrent", &s, 12000, cudaEnableDefault, &qs) == cudaSuccess &&
+            qg == cudaDriverEntryPointSuccess && qs == cudaDriverEntryPointSuccess && g && s) {
+            std::memcpy(&r.get, &g, sizeof g);
+            std::memcpy(&r.set, &s, sizeof s);
+        } else {
+            cudaGetLastError();
+        }
+        return r;
+    }();
+    return d;
+}
+struct CtxGuard {
+    void* saved = nullptr;
+    bool on = false;
+    explicit CtxGuard(bool use) {
+        if (!use) return;  // host-only keliai CUDA neliečia (ir neturi inicializuoti cudart)
+        const DriverCtx& d = driver_ctx();
+        on = d.get && d.get(&saved) == 0;
+    }
+    ~CtxGuard() {
+        if (!on) return;
+        const DriverCtx& d = driver_ctx();
+        void* now = nullptr;
+        if (d.get(&now) == 0 && now != saved) d.set(saved);
+    }
+    CtxGuard(const CtxGuard&) = delete;
+    CtxGuard& operator=(const CtxGuard&) = delete;
 };
 
 // Įrenginio eilės numeris pagal "deviceUuid" iš writer_options_json; -1 — nenurodyta / nerasta.
@@ -180,6 +224,7 @@ struct vfgfx_writer_s {
     cudaStream_t s_conv = nullptr;  // create / write / submit (po conv_m); host saugykloje kuriamas tingiai (convert)
     cudaStream_t s_pace = nullptr;  // tik ritmo gija
     cudaEvent_t ev_caller = nullptr;  // cuda_stream keliui (po conv_m), kuriamas tingiai
+    std::atomic<bool> cuda_used{false};  // writer'is jau naudoja CUDA kviečiančiojo gijoje (CtxGuard reikalingas)
 
     // Tarpiniai buferiai (kuriami pirmą kartą prireikus)
     void* d_stage = nullptr;  // device RGBA (host kadras -> cuda-linear)
@@ -347,6 +392,7 @@ struct vfgfx_writer_s {
             // host kadrų rašytuvas niekada neliečia CUDA (veikia ir be GPU / su CUDA_VISIBLE_DEVICES="").
             DeviceScope cd(conv_dev);
             if (!s_conv) {
+                cuda_used.store(true);
                 if (const cudaError_t e = cudaStreamCreateWithFlags(&s_conv, cudaStreamNonBlocking); e != cudaSuccess) {
                     s_conv = nullptr;
                     return fail_cuda("cudaStreamCreate (CUDA frame download)", e);
@@ -663,6 +709,7 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         return fail(code, m);
     }
     w->cuda_store = mxlv::is_cuda_layout(w->out.layout);
+    w->cuda_used.store(w->cuda_store);
     if (!w->cuda_store) w->conv_dev = uuid_dev;
     if (w->cuda_store) {
         // Be deviceUuid — įrenginys 0 (biblioteka turi privatų cudart, kviečiančiojo cudaSetDevice jai nematomas; gfx.h).
@@ -937,21 +984,32 @@ const char* vfgfx_version_string(void) { return VFGFX_VERSION_STRING; }
 int vfgfx_flow_def(const vfgfx_flow_params* p, char* buf, size_t buf_size, size_t* required) {
     return guarded(nullptr, [&] { return flow_def_impl(p, buf, buf_size, required); });
 }
+// Ar kvietimas gali liesti CUDA kviečiančiojo gijoje (tada saugomas jos kontekstas).
+static bool cuda_call(vfgfx_writer w, const vfgfx_frame* f) {
+    if (w && w->cuda_used.load()) return true;
+    if (!f || struct_size_of(f) < offsetof(vfgfx_frame, mem) + sizeof f->mem) return false;
+    return f->mem == VFGFX_MEM_CUDA;
+}
+
 int vfgfx_writer_create(mxlInstance inst, const char* flow_def_json, const char* writer_options_json, vfgfx_writer* out) {
+    const CtxGuard ctx(writer_options_json && std::strstr(writer_options_json, "cuda-linear"));
     const int rc = guarded(nullptr, [&] { return create_impl(inst, flow_def_json, writer_options_json, out); });
     if (rc != 0 && out) *out = nullptr;  // išimtis po dalinio sukūrimo: nelaikom pusiau sukurto writer'io
     return rc;
 }
 int vfgfx_write(vfgfx_writer w, uint64_t index, const vfgfx_frame* f) {
+    const CtxGuard ctx(cuda_call(w, f));
     return guarded(w, [&] { return write_impl(w, index, f); });
 }
 int vfgfx_start_pacing(vfgfx_writer w, int64_t offset_ns) {
     return guarded(w, [&] { return start_pacing_impl(w, offset_ns); });
 }
 int vfgfx_submit(vfgfx_writer w, const vfgfx_frame* f) {
+    const CtxGuard ctx(cuda_call(w, f));
     return guarded(w, [&] { return submit_impl(w, f); });
 }
 int vfgfx_submit_at(vfgfx_writer w, uint64_t first_index, const vfgfx_frame* f) {
+    const CtxGuard ctx(cuda_call(w, f));
     return guarded(w, [&] { return submit_at_impl(w, first_index, f); });
 }
 int vfgfx_stop_pacing(vfgfx_writer w) {
@@ -1033,6 +1091,7 @@ const char* vfgfx_pacing_error(vfgfx_writer w) {
 }
 
 void vfgfx_writer_destroy(vfgfx_writer w) {
+    const CtxGuard ctx(cuda_call(w, nullptr));
     try {
         destroy_impl(w);
     } catch (...) {

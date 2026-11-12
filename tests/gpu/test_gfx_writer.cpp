@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
 #include <mxl/flow.h>
@@ -1787,3 +1788,43 @@ static_assert(sizeof(vfgfx_stats) == 200 && offsetof(vfgfx_stats, pacing) == 120
 static_assert(sizeof(vfgfx_flow_params) == 104 && offsetof(vfgfx_flow_params, width) == 40 &&
                   offsetof(vfgfx_flow_params, frame_rate_num) == 56 && offsetof(vfgfx_flow_params, reserved) == 72,
               "vfgfx_flow_params išdėstymas");
+
+// --- Peržiūros 7 punktas: kviečiančiojo CUDA kontekstas -------------------------------------------------------------------
+
+// Kviečiančioji gija turi savo (ne pirminį, cuCtxCreate) kontekstą, kaip NVENC SDK / FFmpeg stiliaus programos. Po
+// kiekvieno bibliotekos kvietimo jos dabartinis kontekstas privalo likti tas pats (MXL cuda-linear backend'as ir mūsų
+// cudart perjungia į pirminį).
+TEST_CASE("gfx_writer: kviečiančiojo CUDA kontekstas atstatomas po bibliotekos kvietimų", "[gfx_writer][mxl][cudactx]") {
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio");
+    REQUIRE(cuInit(0) == CUDA_SUCCESS);
+    CUdevice dev = 0;
+    REQUIRE(cuDeviceGet(&dev, 0) == CUDA_SUCCESS);
+    CUcontext ctx = nullptr;
+    REQUIRE(cuCtxCreate(&ctx, nullptr, 0, dev) == CUDA_SUCCESS);
+    auto current = [] {
+        CUcontext c = nullptr;
+        cuCtxGetCurrent(&c);
+        return c;
+    };
+    REQUIRE(current() == ctx);
+    Domain d(90);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), storage_opts(true).c_str(), &w) == 0);
+    CHECK(current() == ctx);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_write(w, mxlGetCurrentIndex(&kRate), &f.f) == 0);
+    CHECK(current() == ctx);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    CHECK(current() == ctx);
+    REQUIRE(vfgfx_submit_at(w, (vfgfx_current_index(w) + 20) & ~1ull, &f.f) == 0);
+    CHECK(current() == ctx);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    std::this_thread::sleep_for(60ms);
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    CHECK(current() == ctx);
+    CHECK(vfgfx_committed(w) >= 2);
+    vfgfx_writer_destroy(w);
+    CHECK(current() == ctx);
+    cuCtxDestroy(ctx);
+}

@@ -12,10 +12,16 @@
  * VERSIONING AND ABI
  *  - Compile time: VFGFX_VERSION_MAJOR / _MINOR / _PATCH (and VFGFX_VERSION, VFGFX_VERSION_STRING) describe the header.
  *    Run time: vfgfx_version() / vfgfx_version_string() describe the loaded library.
- *  - SONAME policy. Before 1.0 every MINOR release may break the ABI, so the SONAME carries MAJOR.MINOR:
- *    libvramflow-gfx.so.0.2 for all 0.2.x. A program built against 0.2 therefore never loads 0.3 by accident (the
- *    dynamic loader refuses it instead of the program misreading structs). PATCH releases keep the ABI. From 1.0 on the
- *    SONAME is libvramflow-gfx.so.MAJOR and the ABI only grows within a MAJOR (new functions, new fields at struct ends).
+ *  - SONAME policy. The SONAME carries an ABI epoch, VFGFX_ABI_VERSION, independent of the release version:
+ *    libvramflow-gfx.so.1 (release 0.1 used .so.0). The epoch changes ONLY on an incompatible change (a removed or
+ *    changed function, a changed meaning or offset of an existing field). Additive changes keep it: new functions, new
+ *    fields at the end of a struct (struct_size tells the library what the caller has), new flags and new enum values
+ *    (an older library rejects unknown ones with VFGFX_ERR_UNSUPPORTED). So a program built against any release of
+ *    epoch 1 runs with any later release of epoch 1; vfgfx_version() tells which release is loaded.
+ *  - Symbol versions: every exported function carries the version node of the release that added it; the epoch-1
+ *    baseline is VFGFX_1 (`nm -D --with-symbol-versions` shows vfgfx_*@@VFGFX_1). Functions added later go into new
+ *    nodes (VFGFX_1.1, …), so a program that needs a newer function fails at load time with a clear loader message
+ *    instead of at the call.
  *  - Only `vfgfx_*` symbols are exported; the library carries its own private, statically linked CUDA runtime.
  *  - Extensible structs. Every struct that crosses the API starts with `uint32_t struct_size` (the caller sets it to
  *    sizeof the struct as the caller's header declares it; the *_INIT macros and *_init() functions do this) followed by
@@ -118,6 +124,12 @@
  *  machines: the caller's cudaSetDevice is invisible to the private runtime; without it device 0 is used). A host
  *  flow downloads CUDA frames on the "deviceUuid" device (or device 0). UUID format "GPU-xxxxxxxx-…", any case.
  *  A host flow fed only host frames never touches CUDA (works without a GPU).
+ *  The caller's current CUDA context is preserved: MXL's cuda-linear backend and the library's runtime make the
+ *  device's PRIMARY context current while they work (cuCtxSetCurrent / cudaSetDevice); every call that may touch CUDA
+ *  in the calling thread (create with a cuda-linear option, write / submit / submit_at with a CUDA frame or on a
+ *  writer that uses CUDA, destroy) saves the thread's current context and restores it before returning. The library's
+ *  own work always runs in the primary context, so CUDA frames and the caller's cuda_stream must belong to the primary
+ *  context of the writer's device (memory of a cuCtxCreate context is not valid there).
  *
  * SUPPORTED FLOWS
  *  `video/v210a`, any raster with even width (interlaced: even height), scan progressive or `interlaced_tff`
@@ -165,6 +177,7 @@ extern "C" {
 #define VFGFX_MAKE_VERSION(major, minor, patch) (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
 #define VFGFX_VERSION VFGFX_MAKE_VERSION(VFGFX_VERSION_MAJOR, VFGFX_VERSION_MINOR, VFGFX_VERSION_PATCH)
 #define VFGFX_VERSION_STRING "0.2.0"
+#define VFGFX_ABI_VERSION 1 /* ABI epoch: SONAME libvramflow-gfx.so.1, symbol version node VFGFX_1 */
 
 /* --- Error codes ------------------------------------------------------------------------------------------------------ */
 #define VFGFX_OK 0
