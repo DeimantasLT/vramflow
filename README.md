@@ -477,8 +477,8 @@ native Linux rerun will give the authoritative numbers.
   (creating `cuda-linear` flows, a large `cudaMemset`, a full-GPU kernel, another function starting or stopping), the
   P8 → P3 step stops the GPU work of **all** processes for 50–350 ms: live functions miss real-time deadlines and skip
   indices. Measured: 35 of 70 such events stalled a 7-flow `gen` without a constant light GPU load (worst 368 ms, 290
-  indices skipped), 0 of 70 with `vramflow-func keepwarm` running (worst 22 ms). Its cost: GPU busy 19.5 %, 11.2 W instead
-  of 2.6 W at idle. Operational rule: on laptops and development machines run `vramflow-func keepwarm` (defaults:
+  indices skipped), 0 of 70 with `vramflow-func keepwarm` running (worst 22 ms). Its cost: GPU busy 19.5 %, +8.5 W (11.3 W instead
+  of 2.8 W at idle). Operational rule: on laptops and development machines run `vramflow-func keepwarm` (defaults:
   64 MB every 5 ms; `--duration 0` until stopped) while anything is live; the test harnesses (`functional.py`,
   `capacity.py`) start it for GPU variants by themselves (`VRAMFLOW_GPU_KEEPWARM=0` turns this off) and record it in every
   result. On servers lock the GPU clocks (`nvidia-smi -pm 1`, `-lgc`) — **not verified there yet**: rerun

@@ -172,14 +172,18 @@ SIGINT / SIGTERM; kol veikia — tylus, pabaigoje viena santraukos eilutė). Už
 (absoliutus periodas). `functional.py` ir `capacity.py` jį paleidžia kiekvienam GPU variantui (H, G) ir sustabdo prieš
 kiekvieną C variantą; `VRAMFLOW_GPU_KEEPWARM=0` išjungia; kiekvienas rezultatas turi lauką `keepwarm`.
 
-**Kaina** (nvidia-smi kas 100 ms, 40 s, be kitų procesų; žali duomenys `/root/build/vramflow/kw-cost/`):
+**Kaina** (nvidia-smi kas 100 ms, 40 s, be kitų procesų; pakartota 2026-11-12 vakare tuo pačiu `kw_cost` scenarijumi,
+žali duomenys `/root/build/vramflow/kw-cost/`). **Vienas skaičius, naudojamas visur (README, `capacity.py`): GPU užimtumas
+19,5 %, galia +8,5 W (2,8 → 11,3 W).** Ankstesnis kodo komentaras „~13 %, ~+6 W“ buvo iš 10 s matavimo su 7 flow'ų auka (§5),
+ne iš šio:
 
 | | P-būsena | GPU užimtumas | galia | atminties taktas |
 |---|---|---:|---:|---:|
-| tuščia eiga | P8 (387 / 387 imčių) | 0 % | 2,6 W (p95 2,7) | 405 MHz |
-| keepwarm 64 MB / 5 ms | P4 (379), P3 (7) | 19,5 % (maks. 21) | 11,2 W (p95 12,5) | 6037 MHz |
+| tuščia eiga | P8 (387 / 387 imčių) | 0 % | 2,8 W (p95 2,8) | 405 MHz |
+| keepwarm 64 MB / 5 ms | P4 (379), P3 (8) | 19,5 % (maks. 21) | 11,3 W (p95 12,8) | 6027 MHz |
 
-Vienas užpildymas — vid. 1,17 ms, maks. 2,38 ms (8968 užpildymai per 44,8 s, nė vienas ne ilgesnis už periodą).
+Vienas užpildymas — vid. 1,21 ms, maks. 2,49 ms (8969 užpildymai per 44,8 s, nė vienas ne ilgesnis už periodą). Pirmasis
+matavimas (tas pats scenarijus): 2,6 → 11,2 W, 19,5 % — skirtumas tik tuščiosios eigos galioje (±0,2 W).
 
 **Poveikis** — lemiamas bandymas pakartotas su pačiu įrankiu (`gpu_event_hiccup.py --keep-warm 64,5`; G auka 7 flow'ai;
 seka `mallocraw 512; memset 512 ×2; fill 512; memset 128; memset 64; spinw 50; free` + zondo kontekstas / pabaiga — 10
@@ -192,7 +196,9 @@ seka `mallocraw 512; memset 512 ×2; fill 512; memset 128; memset 64; spinw 50; 
 
 Kas lieka ir su keepwarm: kito proceso įvykiai (CUDA konteksto sukūrimas, platus darbas) vis tiek prailgina kitų GPU darbą
 iki ~20 ms (čia 21,5 ms; fiso_stall[G] — logo `proc_ms` maks. 14,3 ms, kai ties SIGCONT startuoja post `verify`). Tai jau
-ne praradimai (< 30 ms), bet vėlavimo maksimumai; izoliacijos maks. vėlavimo riba tai įskaičiuoja kaip Δproc.
+ne praradimai (< 30 ms), bet vėlavimo maksimumai. Izoliacijos vartai jų nebeatleidžia Δproc nariu (jis atleisdavo ir
+tikrinamos funkcijos pačios sulėtėjimą — žr. `tests/functional/isolation.py`, `fiso_teeth`): post `verify` paleidžiamas prieš
+gedimą (jo CUDA kontekstas kuriamas ne gedimo lange), o riba lyginama su to paties paleidimo langu prieš gedimą.
 
 **Vartų patikimumas** (PASS / paleidimų; C variantas GPU nenaudoja — keepwarm jam niekada nepaleidžiamas, todėl „be“ —
 tik G; žali duomenys `/root/build/vramflow/meas/`, kiekvienas `functional.json` įrašas turi `keepwarm`):
@@ -211,6 +217,20 @@ tik G; žali duomenys `/root/build/vramflow/meas/`, kiekvienas `functional.json`
 Du fiso G nepavykimai buvo tik naujojo maks. vėlavimo vartų (praradimų 0): sveikas aukštupis (gen A) tuo metu pats vėlavo
 17,0 / 22,4 ms (kontroliniame 6,9 / 9,8 ms). Riba papildyta Δup (aukštupio maks. vėlavimo padidėjimas, kaip praradimų
 biudžetas); stulpeliuose — su ja perskaičiuota tų pačių įrašų (`before` / `after`) vartų išvada, skliaustuose — pirminė.
+
+**`fgold_composite[G]`: 30 su keepwarm prieš 30 be** (2026-11-12 vakaras, pakaitomis su / be, tas pats binaras ir parinktys;
+`tests/functional/functional.py --only fgold_composite`, `FGOLD_VARIANTS=G`, be keepwarm — `VRAMFLOW_GPU_KEEPWARM=0`; žali
+duomenys `/root/build/vramflow/kw30/`, santrauka `results.txt`):
+
+| | PASS | FAIL | kas krito |
+|---|---:|---:|---|
+| su keepwarm | **30 / 30** | 0 | — |
+| be keepwarm | **27 / 30** | 3 | 2 `late_fields` + 2 `in_invalid`; 6 `late_fields` + 14 `missing_fields`; 6 `late_fields` + 4 `missing_fields` (visi — composite praradimai, verify teisingumo klaidų 0) |
+
+Du paleidimai (vienas „su“, vienas „be“) nesiskaičiuoja ir pakartoti: jų metu buvo pakeisti santraukos raktų failai (`FAIL`
+tik dėl raktų, praradimų 0). Išvada: be keepwarm šis nešiojamas GPU vartų nepraeina ~1 iš 10 paleidimų (anksčiau 2 / 10),
+su keepwarm — 0 / 30. Todėl G vartai vykdomi su keepwarm, o `fgold_composite[G be keepwarm]` — tik INFO ranka (paleidžiama
+kiekvieną kartą, vartų neveikia), kad nešiojamo GPU elgsena liktų matoma.
 
 ## Atkartojimas
 
