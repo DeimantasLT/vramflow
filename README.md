@@ -260,15 +260,16 @@ f.mem = VFGFX_MEM_HOST;                           /* or VFGFX_MEM_CUDA (+ f.cuda
 
 /* Option A — the library keeps the pace: it commits the current frame every field. */
 vfgfx_start_pacing(g, 0);
-vfgfx_submit(g, &f);                                      /* new picture from the next field */
-vfgfx_submit_at(g, vfgfx_current_index(g) + 4, &f);       /* or exactly from a given field (frame accurate) */
+vfgfx_submit(g, &f);                 /* new picture from the next field (cancels scheduled frames) */
+uint64_t at = (vfgfx_current_index(g) + 4) & ~(uint64_t)1;  /* interlaced: a frame starts on an even (top) field */
+vfgfx_submit_at(g, at, &f);          /* or exactly from field `at` on (frame accurate); time: vfgfx_index_time_ns */
 /* … */
 vfgfx_stop_pacing(g);
 
 /* Option B — you decide every grain:  vfgfx_write(g, index, &f); */
 
 vfgfx_stats st = VFGFX_STATS_INIT;
-vfgfx_get_stats(g, &st);                          /* committed, late_skips, no_frame, errors, … */
+vfgfx_get_stats(g, &st);                          /* committed, late_skips, no_frame, next_pacing_index, … */
 vfgfx_writer_destroy(g);
 mxlDestroyInstance(inst);
 ```
@@ -276,7 +277,9 @@ mxlDestroyInstance(inst);
 Functions return `0` or an error code; `vfgfx_last_error(g)` gives the message of the last failed call (the pacing
 thread has its own, `vfgfx_pacing_error(g)`). The full contract (versioning and ABI policy, threads, memory, timing,
 grain indices, CUDA stream ordering) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h).
-The library is at 0.2 (`vfgfx_version()`); before 1.0 the SONAME carries MAJOR.MINOR (`libvramflow-gfx.so.0.2`).
+The library is at release 0.2.0 (`vfgfx_version()`). The SONAME carries the ABI epoch, not the release:
+`libvramflow-gfx.so.1`, with symbols versioned `VFGFX_1`; releases that only add functions, struct tail fields, flags or
+enum values keep it, so a program built against epoch 1 keeps working with later epoch-1 releases.
 Link with `-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
 (see `tests/gfx_ctypes_smoke.py`).
 

@@ -60,8 +60,11 @@ README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
 - **MXL writer'is / reader'is GPU atmintyje** — tas pats MXL API; writer'is paduoda
   `{"payload":{"backend":"cuda-linear","deviceUuid":"GPU-…"}}`, grain'o adresą duoda `mxlCudaLinearDevicePointer()`.
   Pavyzdys README.md 5.1, pilnas kodas `src/mxlio/verify_writer.cpp` ir `verify_reader.cpp`.
-- **Grafika iš bet kurios programos** — `libvramflow-gfx` (`include/vramflow/gfx.h`): `vfgfx_writer_create`, tada
-  `vfgfx_submit` (biblioteka pati laiko ritmą) arba `vfgfx_write(index, …)` (ritmą valdai pats). Pavyzdys README.md 5.2.
+- **Grafika iš bet kurios programos** — `libvramflow-gfx` (`include/vramflow/gfx.h`, sutartis angliškai): flow aprašas
+  per `vfgfx_flow_def`, `vfgfx_writer_create`, tada `vfgfx_submit` / kadro tikslumo `vfgfx_submit_at(index, …)` (biblioteka
+  pati laiko ritmą) arba `vfgfx_write(index, …)` (ritmą valdai pats); RGBA arba BGRA kadrai, host arba CUDA atmintis
+  (pasirinktinai su kviečiančiojo `cuda_stream`), būsena — `vfgfx_get_stats`. Leidimas 0.2.0, SONAME
+  `libvramflow-gfx.so.1` (ABI epocha, simboliai `VFGFX_1`). Pavyzdys README.md 5.2.
 - **Pavyzdys: OGraf grafika ant video** — `examples/ograf/` (README.md 5.3): headless naršyklė su permatomu fonu atvaizduoja
   [EBU OGraf](https://github.com/ebu/ograf) grafiką, `ograf_feed` per `vfgfx_submit` (ritmo režimas) paverčia ją `v210a`
   flow'u, `composite` uždeda ant `gen` video. Gyvam renderiui panaudotas jau įdiegtas Windows Edge (~4 kadrai/s);
