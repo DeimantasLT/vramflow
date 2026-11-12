@@ -151,6 +151,8 @@ mxlStatus InputSlot::get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrain
     return st;
 }
 
+bool InputSlot::writer_alive() const { return inst_ != nullptr && flow_active(inst_, id_); }
+
 std::uint64_t InputSlot::head() { return state_ == State::Attached ? in_.head() : MXL_UNDEFINED_INDEX; }
 
 bool wait_attached(const std::vector<InputSlot*>& slots, mxlInstance inst, const OpenPolicy& p, const std::atomic<bool>& stop,

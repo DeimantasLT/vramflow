@@ -9,6 +9,7 @@ target_include_directories(mxlv_flows SYSTEM PUBLIC ${MXL_SOURCE_DIR}/lib/payloa
 target_link_libraries(mxlv_flows PUBLIC mxl::mxl mxlv_common)
 set_target_properties(mxlv_flows PROPERTIES POSITION_INDEPENDENT_CODE ON)
 include(${CMAKE_SOURCE_DIR}/cmake/runtime.cmake)  # InputSlot, OpenPolicy, DomainLease (planas §P6)
+include(${CMAKE_SOURCE_DIR}/cmake/engine_mxl.cmake)  # variklio MXL prievadai (V7)
 
 # gfxgen naudoja TIK viešą libvramflow-gfx (include/vramflow/gfx.h): įrodo, kad biblioteka pakankama.
 add_executable(vramflow-func

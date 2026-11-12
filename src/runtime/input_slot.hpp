@@ -56,6 +56,11 @@ public:
     std::uint64_t reattached() const { return reattached_; }
     // Paskutinio atmetimo priežastis (Mismatch tekstas su abiem formatais); tuščia, jei nebuvo.
     const std::string& reason() const { return reason_; }
+    // Gyvas writer'is (mxlIsFlowActive: open + flock + close, M9) — sisteminiai kvietimai; kviesti retai (variklis:
+    // ties A riba ir kas 100 ms Stalled būsenoje). Neprijungtas — false.
+    bool writer_alive() const;
+    // Atjungia iškart (kaip gamintojo dingimas): reader'is atlaisvinamas, būsena Detached, kitas poll bando iškart.
+    void detach_now() { detach(); }
     func::VideoIn& in() { return in_; }
     const func::VideoIn& in() const { return in_; }
     void release();

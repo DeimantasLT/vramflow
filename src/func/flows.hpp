@@ -86,6 +86,9 @@ struct VideoOut {
     // Atidaro grain'ą; grąžina device rodyklę arba nullptr (st — MXL statusas).
     std::uint32_t* open(std::uint64_t index, mxlStatus& st);
     mxlStatus commit();
+    // K3 spraga: atidaro `index`, nustato MXL_GRAIN_FLAG_INVALID ir validSlices = totalSlices, commit'ina (turinys
+    // neliečiamas). Skaitytojas iškart gauna OK + INVALID (M4, M10). Kitas atidarytas grain'as — klaida.
+    mxlStatus commit_invalid(std::uint64_t index);
     void cancel();
     void release(mxlInstance inst);
 };

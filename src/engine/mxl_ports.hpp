@@ -1,0 +1,85 @@
+// SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
+// SPDX-License-Identifier: Apache-2.0
+#pragma once
+// Variklio MXL prievadai (planas §7 mxl_ports.hpp, V7) — vienintelė vieta, kur variklis kalba su MXL.
+//   SystemClock    — mxlGetTime (TAI), CLOCK_MONOTONIC_RAW, mxlSleepUntil ≤ 50 ms gabalais (A27, M14);
+//   MxlVideoInput  — ant runtime::InputSlot: head() be sisteminio kvietimo (M8), probe = get(timeout 0),
+//                    wait = blokuojantis get ant flow'o futex (M1, M2), writer_alive = mxlIsFlowActive (M9);
+//   MxlVideoOutput — ant func::VideoOut: commit, K3 spragos (Invalid — commit_invalid; Repeat / Black — kopija per
+//                    GrainCopy į naujai atidarytą slot'ą, tada commit).
+// Visus metodus kviečia tik variklio gija.
+#include <mxl/mxl.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+#include "engine/clock.hpp"
+#include "engine/ports.hpp"
+#include "func/flows.hpp"
+#include "gfx/raster.hpp"
+#include "runtime/input_slot.hpp"
+
+namespace mxlv::engine {
+
+class SystemClock final : public Clock {
+public:
+    std::uint64_t now_tai() const override;
+    std::int64_t now_mono_raw() const override;
+    void sleep_until(std::uint64_t tai_ns, const std::atomic<bool>& stop) override;
+};
+
+class MxlVideoInput final : public InputPort {
+public:
+    MxlVideoInput(runtime::InputSlot& slot, mxlInstance inst) : slot_(slot), inst_(inst) {}
+
+    bool attach_poll(std::uint64_t now_tai) override;
+    bool mismatch(std::string& why) const override;
+    Index head() override;
+    std::uint64_t last_write_tai() override;
+    Probe probe(Index j, GrainRef& out) override;
+    Probe wait(Index j, std::uint64_t timeout_ns, GrainRef& out) override;
+    bool writer_alive() override;
+    bool lapped(Index j, Index now_idx) override;
+    void detach() override;
+    void retarget(const FlowRef&) override {}  // V22 (valdymo eilė) — kol kas nepalaikoma
+
+private:
+    Probe get(Index j, std::uint64_t timeout_ns, GrainRef& out);
+    runtime::InputSlot& slot_;
+    mxlInstance inst_;
+};
+
+// Kopija į grain'o slot'ą: host — memcpy; cuda-linear — D2D į funkcijos stream'ą (tada flush — to stream'o sync).
+using GrainCopy = std::function<bool(void* dst, const void* src, std::size_t bytes)>;
+GrainCopy host_copy();
+
+// Juodas grain'as (host atmintyje): v210 Y = 64, Cb = Cr = 512 visose eilutėse (ir eilutės užpildo dalyje);
+// v210a key plokštuma — 0 (skaidru). Dydis — gfx::grain_bytes(r).
+std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r);
+
+class MxlVideoOutput final : public OutputPort {
+public:
+    // flush — kviečiamas po kiekvienos Repeat / Black kopijos prieš commit (nullptr — sinchroninė kopija);
+    // black — black_grain() buferis (nullptr — Black nepalaikomas, fill_gap grąžina false).
+    MxlVideoOutput(func::VideoOut& out, GrainCopy copy, std::function<bool()> flush, const void* black)
+        : out_(out), copy_(std::move(copy)), flush_(std::move(flush)), black_(black) {}
+
+    OpenResult open(Index i, void*& slot) override;
+    bool commit() override;
+    void cancel() override;
+    bool fill_gap(Index i, GapAction a, Index repeat_from) override;
+    bool flush_gaps() override { return true; }  // kopijos jau sinchronizuotos fill_gap metu
+    bool interlaced() const override { return out_.raster.interlaced; }
+    std::uint32_t slot_count() const override { return out_.layout.slotCount; }
+
+private:
+    bool copy_commit(Index i, const void* src);
+    func::VideoOut& out_;
+    GrainCopy copy_;
+    std::function<bool()> flush_;
+    const void* black_;
+};
+
+}  // namespace mxlv::engine

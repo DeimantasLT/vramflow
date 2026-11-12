@@ -199,6 +199,22 @@ mxlStatus VideoOut::commit() {
     return st;
 }
 
+mxlStatus VideoOut::commit_invalid(std::uint64_t index) {
+    if (open_grain) return MXL_ERR_INVALID_ARG;
+    info = mxlGrainInfo{};
+    mxlStatus st = mxlFlowWriterOpenGrainSlot(w, index, &info, &cur_slot);
+    if (st != MXL_STATUS_OK) return st;
+    if (info.index != index) {
+        mxlFlowWriterCancelGrain(w);
+        return MXL_ERR_INTERNAL;
+    }
+    info.flags |= MXL_GRAIN_FLAG_INVALID;
+    info.validSlices = info.totalSlices;
+    st = mxlFlowWriterCommitGrain(w, &info);
+    if (st == MXL_STATUS_OK) last_committed = index;
+    return st;
+}
+
 void VideoOut::cancel() {
     if (open_grain) mxlFlowWriterCancelGrain(w);
     open_grain = false;
