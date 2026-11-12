@@ -191,6 +191,13 @@ struct CompositeFn final : engine::TickFunction {
         return true;
     }
 
+    // Variklio praleisti indeksai (T11): praradimai (late_skips; skaitiklį rašo to_summary) — į loss_s sekundėms.
+    void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext& ctx) override {
+        if (!ctx.skip_is_loss()) return;
+        const mxlRational r = mxl_rate(o.fmt.grain_rate());
+        for (engine::Index i = from; i < to; ++i) ++st.flows[unit].loss_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+    }
+
     void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
         const std::uint32_t n = ut.unit;
         FlowStats& f = st.flows[n];
@@ -206,20 +213,21 @@ struct CompositeFn final : engine::TickFunction {
             p = c;
             if (c.stalls && c.stalls > f.c["stalls"]) f.c["stalls"] = c.stalls;
         }
+        const mxlRational r = mxl_rate(o.fmt.grain_rate());
+        const std::uint64_t ti = mxlIndexToTimestamp(&r, ut.index);
         switch (oc) {
             case engine::Outcome::Ready: {
                 f.inc("fields_ok");
                 const std::uint64_t t_commit = now_tai();
                 times.unit_done(ut.index, t_commit, true);
-                const mxlRational r = mxl_rate(o.fmt.grain_rate());
-                f.note_lateness(t_commit, mxlIndexToTimestamp(&r, ut.index), warm);
+                f.note_lateness(t_commit, ti, warm);
                 break;
             }
             case engine::Outcome::Lapped:
-                f.inc("lapped");
+                f.loss("lapped", ti);
                 times.unit_done(ut.index, now_tai(), false);
                 break;
-            case engine::Outcome::GapBlocked: f.inc("missing_fields"); break;
+            case engine::Outcome::GapBlocked: f.loss("missing_fields", ti); break;
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;
             case engine::Outcome::Skipped: st.proc["clock_backward"]++; break;  // AlreadyCommitted — laikrodis atgal (M11)
             case engine::Outcome::OutputError:  // open / commit klaida (ilgalaikė — fatalu)
@@ -228,12 +236,12 @@ struct CompositeFn final : engine::TickFunction {
                 break;
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapLate:
-                if (inv) f.inc("in_invalid");
-                else if (tl) f.inc("too_late");
-                else if (re) f.inc("read_errors");
-                else if (det) f.inc("flow_invalid");  // [PF-3] gamintojas dingo / perkurtas → slot'as atjungtas
+                if (inv) f.loss("in_invalid", ti);
+                else if (tl) f.loss("too_late", ti);
+                else if (re) f.loss("read_errors", ti);
+                else if (det) f.loss("flow_invalid", ti);  // [PF-3] gamintojas dingo / perkurtas → slot'as atjungtas
                 else {
-                    f.inc("late_fields");  // kuris nors įėjimas nesulaukė iki ribos → necommit'inama
+                    f.loss("late_fields", ti);  // kuris nors įėjimas nesulaukė iki ribos → necommit'inama
                     if (f.c["late_fields"] <= 3)
                         std::fprintf(stderr, "[composite] išėjimas %u: indeksas %llu necommit'intas (įėjimas nesulaukė iki ribos)\n", n,
                                      static_cast<unsigned long long>(ut.index));

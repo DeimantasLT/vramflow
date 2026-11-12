@@ -56,18 +56,22 @@ import functional as F  # noqa: E402
 
 VARIANTS = {"C": ("cpu", "host", "x264"), "G": ("gpu", "cuda-linear", "nvenc")}
 N = int(os.environ.get("FISO_N", "8"))
-FAULT_AT = float(os.environ.get("FISO_FAULT_AT", "10"))  # s po funkcijos starto
+FAULT_AT = float(os.environ.get("FISO_FAULT_AT", "12"))  # s po funkcijos starto
 STALL_S = 5.0
-RUN_S = 24  # funkcijos trukmė
-LOGO_RUN_S = 27  # logo: po SIGCONT (ties 15 s) lieka ≥ 10 s patikrai „0 praradimų po atsigavimo“
+RUN_S = 26  # funkcijos trukmė
+LOGO_RUN_S = 29  # logo: po SIGCONT (ties 17 s) lieka ≥ 10 s patikrai „0 praradimų po atsigavimo“
 POST_S = 10  # logo stall: verify paveiktam flow'ui po SIGCONT
 WR_MS = 5.0  # Wr = P/4 prie 50 Hz (planas §6 D2)
 RO_MS = 0.5  # --read-offset-us numatytoji (ro)
-WARM_S = 3.0  # funkcijos --warmup: langas prieš gedimą — [WARM_S, FAULT_AT − PRE_GAP_S) nuo starto
+# Funkcijos --warmup. Langas prieš gedimą (kontrolinis) prasideda ne anksčiau kaip po įšilimo IR po visų procesų paleidimo
+# (FAULT_TAI["ready"]: paskutinis verify paleistas + SETTLE_S — jo CUDA konteksto kūrimas G variante yra GPU įvykis, kuris
+# vėlina sveiką aukštupį; fiso_stall[G]: 37,7 ms vėlus tick'as ~0,5 s po logo starto). Baigiasi PRE_GAP_S iki gedimo.
+WARM_S = 5.0
+SETTLE_S = 2.0
 PRE_GAP_S = 1.0  # langas prieš gedimą baigiasi 1 s iki gedimo
 LEAD_S = 0.5  # gedimo langas prasideda 0,5 s iki gedimo
-MIN_PRE_S = 3  # tiek sekundžių prieš gedimą privalo būti santraukoje (kitaip atskaitos nėra — FAIL)
-VERIFY_S = 20
+MIN_PRE_S = 4  # tiek sekundžių prieš gedimą privalo būti kiekvienam sveikam flow'ui (kitaip atskaitos nėra — FAIL)
+VERIFY_S = 22
 ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
 FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skips", "lapped", "too_late", "in_invalid", "read_errors",
@@ -139,13 +143,25 @@ def tai_ns():
     return time.clock_gettime_ns(time.CLOCK_TAI)
 
 
-FAULT_TAI = {}  # paskutinio apply_fault momentai TAI ns: {"kill"|"stop"|"cont": ns}
+FAULT_TAI = {}  # paskutinio paleidimo momentai TAI ns: {"start"|"ready"|"kill"|"stop"|"cont": ns}
+
+
+def mark_start():
+    """Funkcijos paleidimo momentas (TAI): langas prieš gedimą prasideda ne anksčiau kaip start + WARM_S."""
+    FAULT_TAI.clear()
+    FAULT_TAI["start"] = tai_ns()
+
+
+def mark_ready():
+    """Visi paleidimo procesai (funkcija, verify) paleisti: + SETTLE_S jų paleidimo GPU įvykiams nusistovėti."""
+    FAULT_TAI["ready"] = tai_ns() + int(SETTLE_S * 1e9)
 
 
 def apply_fault(fault, victim, t0):
     """kill: kill -9 ties FAULT_AT; stall: SIGSTOP ties FAULT_AT, SIGCONT po STALL_S. Grąžina faktinį gedimo laiką (s nuo t0);
     momentai TAI laiku — FAULT_TAI (aukštupio vėlaus tick'o laikui palyginti)."""
-    FAULT_TAI.clear()
+    for k in ("kill", "stop", "cont"):
+        FAULT_TAI.pop(k, None)
     if fault == "none":
         return None
     kill_at(t0, FAULT_AT)
@@ -212,16 +228,30 @@ def window_budget(up, fault_tai, last_index):
     return n
 
 
-def split_windows(sec, fault_tai, end_tai):
-    """{sekundė: ms} → (prieš gedimą, gedimo lange) reikšmių sąrašai. Sekundė s apima [s, s + 1) s TAI (indekso laikas)."""
+def split_windows(sec, fault_tai, end_tai, from_tai=0):
+    """{sekundė: reikšmė} → (prieš gedimą, gedimo lange) reikšmių sąrašai. Sekundė s apima [s, s + 1) s TAI (indekso laikas).
+    Prieš gedimą — tik sekundės, prasidėjusios ne anksčiau kaip from_tai (įšilimas ir visų procesų paleidimas)."""
     pre, flt = [], []
     for k, v in sec.items():
         lo, hi = k * 1_000_000_000, (k + 1) * 1_000_000_000
         if hi <= fault_tai - int(PRE_GAP_S * 1e9):
-            pre.append(v)
+            if lo >= from_tai:
+                pre.append(v)
         elif hi > fault_tai - int(LEAD_S * 1e9) and lo <= end_tai:
             flt.append(v)
     return pre, flt
+
+
+def ctl_from(r):
+    """Kontrolinio lango pradžia (TAI): po funkcijos įšilimo ir po visų procesų paleidimo (+ SETTLE_S)."""
+    return max((r.get("start_tai") or 0) + int(WARM_S * 1e9), r.get("ready_tai") or 0)
+
+
+def window_losses(r, n):
+    """Sveiko flow'o n funkcijos praradimai GEDIMO LANGE (loss_s sekundės [gedimas − LEAD_S, T(paskutinis)]) — ta pati
+    atkarpa kaip aukštupio biudžetas (window_budget); paleidimo sutrikimai į ją nepatenka."""
+    _, flt = split_windows((r.get("loss_s") or {}).get(n) or {}, r["fault_tai"], r["end_tai"])
+    return int(sum(flt))
 
 
 def stop_all(procs):
@@ -236,7 +266,8 @@ def stop_all(procs):
 
 def common_record(fault, t_fault, victim, pos):
     return {"fault": fault, "fault_at_s": t_fault, "stall_s": STALL_S if fault == "stall" else None,
-            "fault_tai": FAULT_TAI.get("kill", FAULT_TAI.get("stop")), "victim": victim, "position": pos}
+            "fault_tai": FAULT_TAI.get("kill", FAULT_TAI.get("stop")), "start_tai": FAULT_TAI.get("start"),
+            "ready_tai": FAULT_TAI.get("ready"), "victim": victim, "position": pos}
 
 
 def with_budget(rec, s_fn, up_whole_extra=0):
@@ -246,6 +277,8 @@ def with_budget(rec, s_fn, up_whole_extra=0):
     rec["budget"] = None if w is None else w + up_whole_extra
     fl = (s_fn or {}).get("flows") or []
     rec["lat_s"] = {n: series(fl[n].get("lateness_s")) if n < len(fl) else {} for n in healthy_of(rec["victim"])}
+    rec["loss_s"] = {n: {int(k): v for k, v in (fl[n].get("loss_s") or [])} if n < len(fl) else {}
+                     for n in healthy_of(rec["victim"])}
     rec["end_tai"] = ((s_fn or {}).get("last_index") or 0) * FIELD_NS
     return rec
 
@@ -272,6 +305,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
         if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)]):
             return {"err": "gen flow'ai neatsirado"}
         t0 = time.monotonic()
+        mark_start()
         lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", LOGO_RUN_S, "--warmup", WARM_S, *extra, *v)
         if not F.wait_flows(d, [F.role_flow_id(2, n) for n in range(N)], 30):
             return {"err": "logo išėjimo flow'ai neatsirado"}
@@ -283,6 +317,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
             w = round(FAULT_AT + STALL_S + 1 - (time.monotonic() - t0), 2)
             vp = F.FProc(out, f"{sub}/post", "verify", d, "--mode", "logo", "--flows", 1, "--flow-base", victim, "--every", 1,
                          "--duration", w + POST_S, "--warmup", w, *F.vimpl(impl, storage))
+        mark_ready()
         t_fault = apply_fault(fault, gb, t0)
         if vp is not None:
             rp = vp.wait(timeout=POST_S + 60)
@@ -326,6 +361,7 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
         if not F.wait_flows(d, ids):
             return {"err": "gen / gfxgen flow'ai neatsirado"}
         t0 = time.monotonic()
+        mark_start()
         c = F.FProc(out, sub, "composite", d, "--flows", N, "--layers", 1, *xy, "--opacity", "1.0", "--base", "gen",
                     "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", RUN_S, "--warmup", WARM_S, *v)
         if not F.wait_flows(d, [F.role_flow_id(6, n) for n in range(N)], 30):
@@ -333,6 +369,7 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
         va = F.FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo",
                      "--gfx-mode", "pace", "--base", "gen", "--out-format", "v210", "--every", 5, "--duration", VERIFY_S,
                      "--warmup", 1, *xy, "--opacity", "1.0", *F.vimpl(impl, storage))
+        mark_ready()
         t_fault = apply_fault(fault, xb, t0)
         rv = va.wait(timeout=VERIFY_S + 60)
         rc = c.wait(timeout=RUN_S + 60)
@@ -386,7 +423,9 @@ def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False):
                                  str(sink_json)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         ea = ["--encoder", enc, "--port-base", ENC_PORT] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
         t0 = time.monotonic()
+        mark_start()
         e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--duration", RUN_S, "--warmup", WARM_S, *ea, *v)
+        mark_ready()
         t_fault = apply_fault(fault, gb, t0)
         re_ = e.wait(timeout=RUN_S + 60)
         sink.wait(timeout=60)
@@ -456,11 +495,11 @@ def lateness_bound(r):
         return None, "nėra gedimo laiko", None
     pre = []
     for sec in (r.get("lat_s") or {}).values():
-        p, _ = split_windows(sec, ft, et)
+        p, _ = split_windows(sec, ft, et, ctl_from(r))
         pre += p
     if len(pre) < MIN_PRE_S * (N - 1):
         return None, f"langas prieš gedimą per trumpas ({len(pre)} flow'o sekundžių < {MIN_PRE_S * (N - 1)})", None
-    up_pre, up_flt = split_windows((r.get("upstream") or {}).get("lat_s") or {}, ft, et)
+    up_pre, up_flt = split_windows((r.get("upstream") or {}).get("lat_s") or {}, ft, et, ctl_from(r))
     dup = max(0.0, max(up_flt) - max(up_pre)) if up_pre and up_flt else 0.0
     pmax = max(pre)
     return pmax + WR_MS + RO_MS + dup + 1.0, pmax, dup
@@ -492,9 +531,10 @@ def logo_gate(fault, r):
     budget = upstream_budget(r)
     hv = healthy_of(r["victim"])
     for n, f in zip(hv, r.get("fn_flows") or []):
-        lost = sum(f.get(k, 0) for k in FN_LOSS)
+        lost = window_losses(r, n)  # gedimo lange — ta pati atkarpa kaip aukštupio biudžetas (ne viso gyvenimo skaitikliai)
         if lost > budget:
-            bad.append(f"sveiko #{n} funkcijos praradimai {lost} > aukštupio {budget} ({ {k: f[k] for k in FN_LOSS if f.get(k)} })")
+            bad.append(f"sveiko #{n} funkcijos praradimai gedimo lange {lost} > aukštupio {budget} "
+                       f"(viso gyvenimo { {k: f[k] for k in FN_LOSS if f.get(k)} })")
     for n, v in zip(hv, r.get("verify_flows") or []):
         lost = v.get("missing", 0) + v.get("invalid", 0)
         if lost > budget:
@@ -535,9 +575,10 @@ def enc_gate(fault, r):
     bad = []
     budget = upstream_budget(r)
     for n, f in zip(healthy_of(r["victim"]), r.get("fn_flows") or []):
-        lost = sum(f.get(k, 0) for k in ENC_LOSS)
+        lost = window_losses(r, n)  # gedimo lange (kaip aukštupio biudžetas)
         if lost > budget:
-            bad.append(f"sveiko #{n} enc praradimai {lost} > aukštupio {budget} ({ {k: f[k] for k in ENC_LOSS if f.get(k)} })")
+            bad.append(f"sveiko #{n} enc praradimai gedimo lange {lost} > aukštupio {budget} "
+                       f"(viso gyvenimo { {k: f[k] for k in ENC_LOSS if f.get(k)} })")
         if f.get("frames_encoded", 0) < 25 * RUN_S - 1 - budget:
             bad.append(f"sveiko #{n} frames_encoded={f.get('frames_encoded', 0)} < {25 * RUN_S - 1 - budget}")
         if f.get("audio_silence_samples", 0) > 1920 * budget:  # tyla tik už aukštupio prarastus kadrus (1080i50: 1920 / kadrui)

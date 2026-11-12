@@ -147,6 +147,14 @@ struct FlowStats {
         std::uint64_t& s = lateness_s[t_index / 1'000'000'000];
         s = std::max<std::uint64_t>(s, us);
     }
+    // loss_s: šio flow'o praradimų (spragų, lap'ų, praleidimų) skaičius kiekvienai indekso laiko T(i) sekundei (TAI s) —
+    // izoliacijos vartai lygina funkcijos praradimus GEDIMO LANGE su aukštupio biudžetu tame pačiame lange (ne viso
+    // gyvenimo skaitiklius); paleidimo spragos į gedimo langą nepatenka.
+    std::map<std::uint64_t, std::uint64_t> loss_s;
+    void loss(const char* k, std::uint64_t t_index) {
+        inc(k);
+        ++loss_s[t_index / 1'000'000'000];
+    }
 };
 
 struct Stats {

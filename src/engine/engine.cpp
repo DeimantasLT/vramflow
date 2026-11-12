@@ -147,6 +147,7 @@ struct TickEngine::Impl {
 
     StepDetector sd;
     bool step_in_tick = false;
+    bool skip_loss = false;  // on_skip metu: praleidimas — praradimas (TickContext::skip_is_loss)
     std::int64_t last_step_mono = INT64_MIN;
     std::uint32_t pending = 0;
     std::uint64_t changes = 0;
@@ -1023,6 +1024,7 @@ struct TickEngine::Impl {
         for (Unit& u : units) {
             if (u.failed) continue;
             const std::uint64_t n = count_in(from, to, u.stride, u.residue);
+            skip_loss = !step_in_tick && !warm;
             if (n) fn->on_skip(uid(u), from, to, ctx);
             UnitCounters& uc = hub.unit(u.hub);
             (step_in_tick ? uc.clock_skips : warm ? uc.warmup_skips : uc.late_skips) += n;
@@ -1164,6 +1166,7 @@ bool TickContext::clock_event_recent(std::uint64_t window_ns) const {
            d->clk.now_mono_raw() - d->last_step_mono <= static_cast<std::int64_t>(window_ns);
 }
 std::int64_t TickContext::held_ns() const { return static_cast<const TickEngine::Impl*>(e_)->ctx_held; }
+bool TickContext::skip_is_loss() const { return static_cast<const TickEngine::Impl*>(e_)->skip_loss; }
 
 // --- TickEngine ----------------------------------------------------------------------------------------------------
 TickEngine::TickEngine(const EngineConfig& c, Clock& k, StatsHub& h, const std::atomic<bool>& s)

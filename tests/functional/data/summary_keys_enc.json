@@ -45,7 +45,8 @@
   "hist": [],
   "flows": [
    "frames_queued",
-   "lateness_s"
+   "lateness_s",
+   "loss_s"
   ]
  }
 }

@@ -184,26 +184,34 @@ struct LogoFn final : engine::TickFunction {
         return true;
     }
 
+    // Variklio praleisti indeksai (T11): praradimai (late_skips; skaitiklį rašo to_summary) — į loss_s sekundėms.
+    void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext& ctx) override {
+        if (!ctx.skip_is_loss()) return;
+        const mxlRational r = mxl_rate(o.fmt.grain_rate());
+        for (engine::Index i = from; i < to; ++i) ++st.flows[unit].loss_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+    }
+
     void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
         const std::uint32_t n = ut.unit;
         FlowStats& f = st.flows[n];
         const engine::InCounters& c = hub.in(eng.in_id(n, 0));
         engine::InCounters& s = seen[n];
+        const mxlRational r = mxl_rate(o.fmt.grain_rate());
+        const std::uint64_t ti = mxlIndexToTimestamp(&r, ut.index);
         switch (oc) {
             case engine::Outcome::Ready: {
                 f.inc("fields_ok");
                 const std::uint64_t t_commit = now_tai();
                 times.unit_done(ut.index, t_commit, true);
-                const mxlRational r = mxl_rate(o.fmt.grain_rate());
-                f.note_lateness(t_commit, mxlIndexToTimestamp(&r, ut.index), warm);
+                f.note_lateness(t_commit, ti, warm);
                 break;
             }
             case engine::Outcome::Lapped:
-                f.inc("lapped");
+                f.loss("lapped", ti);
                 times.unit_done(ut.index, now_tai(), false);
                 break;
             case engine::Outcome::GapBlocked:  // gamintojo nėra / užstrigęs
-                f.inc("missing_fields");
+                f.loss("missing_fields", ti);
                 missing_at = ut.index;
                 break;
             case engine::Outcome::GapClock: f.inc("clock_skips"); break;      // laikrodžio žingsnis — aplinka
@@ -215,13 +223,13 @@ struct LogoFn final : engine::TickFunction {
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapLate:
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
-                if (c.invalid > s.invalid) f.inc("in_invalid");
-                else if (c.too_late > s.too_late) f.inc("too_late");
-                else if (c.read_errors > s.read_errors) f.inc("read_errors");
+                if (c.invalid > s.invalid) f.loss("in_invalid", ti);
+                else if (c.too_late > s.too_late) f.loss("too_late", ti);
+                else if (c.read_errors > s.read_errors) f.loss("read_errors", ti);
                 else if (c.detaches > s.detaches) {
                     f.inc("detached");
-                    f.inc("missing_fields");
-                } else f.inc("late_fields");  // nesulaukta iki ribos → išėjimas necommit'inamas
+                    f.loss("missing_fields", ti);
+                } else f.loss("late_fields", ti);  // nesulaukta iki ribos → išėjimas necommit'inamas
                 break;
         }
         s = c;

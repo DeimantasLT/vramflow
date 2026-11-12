@@ -149,7 +149,7 @@ std::string map_json(const std::map<std::string, std::uint64_t>& m) {
     }
     return j + "}";
 }
-// [[sekundė, µs], …] — lateness_s / commit_lateness_s
+// [[sekundė, reikšmė], …] — lateness_s / commit_lateness_s (µs), loss_s (skaičius)
 std::string seconds_json(const std::map<std::uint64_t, std::uint64_t>& m) {
     std::string j = "[";
     for (const auto& [k, v] : m) {
@@ -180,6 +180,10 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
         if (!s.flows[i].lateness_s.empty()) {
             f.pop_back();
             f += std::string(f.size() > 1 ? "," : "") + "\"lateness_s\":" + seconds_json(s.flows[i].lateness_s) + "}";
+        }
+        if (!s.flows[i].loss_s.empty()) {
+            f.pop_back();
+            f += std::string(f.size() > 1 ? "," : "") + "\"loss_s\":" + seconds_json(s.flows[i].loss_s) + "}";
         }
         j += f;
     }

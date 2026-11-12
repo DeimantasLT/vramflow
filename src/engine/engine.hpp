@@ -75,6 +75,8 @@ public:
     // Šio indekso A paleidimo „laikymas“: dabar − momentas, kai paskutinis į batch'ą patekęs vienetas tapo
     // paruoštas (0 — niekas nelaikė). Ne §7 sąsajos dalis — diagnostikai ir testams.
     std::int64_t held_ns() const;
+    // Tik on_skip metu: true — praleidimas yra praradimas (late_skips), false — laikrodžio žingsnis arba įšilimas.
+    bool skip_is_loss() const;
 
     explicit TickContext(void* engine_impl) : e_(engine_impl) {}  // kuria tik variklis
 

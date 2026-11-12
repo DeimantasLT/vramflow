@@ -13,7 +13,9 @@ bet kurio kito proceso trumpas, bet platus GPU darbo pliūpsnis (cudaMemset, už
 kernel'is), kai GPU tuščiąja eiga nuslinkusi į P8 (210 MHz / atmintis 405 MHz). Perėjimo metu **visų** procesų GPU darbas
 sustoja 50–350 ms: aukos commit'ai vėluoja, praleidžiami 1–16 indeksų. CPU auka (`--impl cpu --storage host`) tų pačių
 įvykių metu nevėluoja niekada — tai GPU, ne OS planuoklio sutrikimas. Nuolatinė lengva GPU apkrova, laikanti GPU virš
-P8, sutrikimą pašalino visiškai (0 / 105 įvykių, kontrolė be jos — 29 / 55).
+P8, sutrikimą pašalino visiškai (0 / 105 įvykių, kontrolė be jos — 29 / 55). **Pataisa (§10):** paleidimo įvykių klasei
+„0 / 105“ negalioja be išlygos — su keepwarm stebėtas vienas 37,7 ms vėlus tick'as `logo` starto metu (fiso_stall[G]);
+tiksliniame 20 `logo --flows 8` G startų matavime — 0 / 20 (blogiausias 9,7 ms). Su keepwarm paleidimo įvykiai: 1 / 125.
 
 ## 1. Nesėkmingo paleidimo laiko juosta (`v13-mine/fiso-logo-G-stall`)
 
@@ -231,6 +233,35 @@ Du paleidimai (vienas „su“, vienas „be“) nesiskaičiuoja ir pakartoti: j
 tik dėl raktų, praradimų 0). Išvada: be keepwarm šis nešiojamas GPU vartų nepraeina ~1 iš 10 paleidimų (anksčiau 2 / 10),
 su keepwarm — 0 / 30. Todėl G vartai vykdomi su keepwarm, o `fgold_composite[G be keepwarm]` — tik INFO ranka (paleidžiama
 kiekvieną kartą, vartų neveikia), kad nešiojamo GPU elgsena liktų matoma.
+
+## 10. Paleidimo įvykis su keepwarm (pataisa „0 / 105“, 2026-11-12 vakaras)
+
+**Kas nutiko.** `fiso_stall[G]` (savikontrolės vartai, keepwarm įjungtas) — sveikas gamintojas `gen` G parašė 37,7 ms vėlų
+tick'ą (indeksas …916948) ~0,5 s po `logo --flows 8` G starto, 9,5 s prieš SIGSTOP; kiekvienas sveikas flow'as gavo po 1
+`late_fields`, vėlavimo maks. 68,7 ms. Vartai lygino viso gyvenimo funkcijos praradimus su gedimo lango aukštupio biudžetu,
+todėl paleidimo vėlavimas buvo priskirtas gedimui (FAIL). Tai **ne** izoliacijos klaida — bet tai keepwarm įvykis, kurio
+„0 / 105“ neapėmė: tos lentelės įvykiai buvo kito proceso CUDA darbas jau veikiant aukai, o čia — funkcijos startas su 8
+cuda-linear išėjimų kūrimu (8 × 28 MB `cudaMemset`, §7) ir `verify` startas po ~1 s.
+
+**Tikslinis matavimas.** 20 `logo --flows 8` G startų šalia veikiančio `gen` G (7 + 1 flow'as), keepwarm 64 MB / 5 ms
+įjungtas (`gpu_event_hiccup.py run … --victim G --rounds lifecycle --only logo8 --logo-n 8 --reps 20 --baseline 0
+--keep-warm 64,5`; žali duomenys `/root/build/vramflow/ghv/kw-logo8/`; pasyvus stebėtojas — kiekvieno indekso vėlavimas):
+
+| įvykis | įvykių | pliūpsnių > 30 ms | blogiausias ms | mediana ms | praleista |
+|---|---:|---:|---:|---:|---:|
+| `gen2G_start` (8-to įėjimo gamintojas) | 20 | 0 | 18,2 | 4,2 | 0 |
+| **`logo8_start`** | **20** | **0** | **9,7** | 1,8 | 0 |
+| `logo8_exit` | 20 | 0 | 1,4 | 0,9 | 0 |
+| `gen2G_term` | 20 | 0 | 28,2 | 2,9 | 0 |
+| fonas (be įvykių langų) | 21 743 indeksai | 0 | — | — | 0 |
+
+**Išvada.** Su keepwarm paleidimo įvykių klasė — **1 / 125** pliūpsnis > 30 ms (fiso_stall[G] 1 iš 105 + 20 tikslinių 0 / 20;
+tikslinis 0 / 20 reiškia tik, kad dažnis < ~15 % su 95 % pasikliautinumu (3 / n taisyklė), ne nulį). Paaiškinimas lieka §7: keepwarm sumažina,
+bet nepašalina kito proceso plataus GPU darbo poveikio (§9: ~20 ms ilgėjimai lieka); retas 37,7 ms — tos pačios klasės
+uodega. **Vartų pakeitimas** (`tests/functional/isolation.py`): funkcijos praradimai skaičiuojami tik gedimo lange (santraukos
+`loss_s` — praradimai kiekvienai indekso laiko sekundei), tas pats langas kaip aukštupio biudžetas; kontrolinis langas
+prasideda po funkcijos įšilimo (`--warmup` 5 s, buvo 3 s) **ir** po visų procesų paleidimo + 2 s; paleidimo vėlavimai
+nebepriskiriami gedimui ir neiškreipia kontrolės.
 
 ## Atkartojimas
 

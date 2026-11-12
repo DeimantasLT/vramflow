@@ -664,10 +664,20 @@ int run_enc(const Opts& o) {
             }
         }
 
+        // Variklio praleisti indeksai (T11): praradimai (late_skips_frames; skaitiklį rašo to_summary) — į loss_s sekundėms.
+        void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext& ctx) override {
+            if (!ctx.skip_is_loss()) return;
+            const mxlRational r = mxl_rate(o.fmt.grain_rate());
+            for (engine::Index i = from; i < to; ++i)
+                if (i % gpf == gpf - 1) ++st.flows[unit].loss_s[mxlIndexToTimestamp(&r, i) / 1'000'000'000];
+        }
+
         void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
             const std::uint32_t n = ut.unit;
             F = ut.index / gpf;
             FlowStats& fs = st.flows[n];
+            const mxlRational rt = mxl_rate(o.fmt.grain_rate());
+            const std::uint64_t ti = mxlIndexToTimestamp(&rt, ut.index);
             const engine::InCounters& c = hub.in(eng->in_id(n, 0));
             engine::InCounters& p = seen[n];
             const bool inv = c.invalid > p.invalid, tl = c.too_late > p.too_late, det = c.detaches > p.detaches;
@@ -676,17 +686,17 @@ int run_enc(const Opts& o) {
             switch (oc) {
                 case engine::Outcome::Ready: break;
                 case engine::Outcome::Lapped:
-                    fs.inc("lapped");
+                    fs.loss("lapped", ti);
                     release_unit(n);
                     audio_of_dropped(n, ut.index);
                     return;
-                case engine::Outcome::GapBlocked: fs.inc("missing_frames"); audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::GapBlocked: fs.loss("missing_frames", ti); audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti
                 case engine::Outcome::GapNoContent: audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapLate:
-                    fs.inc(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames");
+                    fs.loss(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames", ti);
                     audio_of_dropped(n, ut.index);
                     return;
             }
@@ -699,7 +709,7 @@ int run_enc(const Opts& o) {
             frame_of[n] = nullptr;
             if (!nvenc) {
                 if (!buf_of[n]) {
-                    fs.inc("frames_dropped_queue");
+                    fs.loss("frames_dropped_queue", ti);
                     audio_of_dropped(n, ut.index);
                     return;
                 }
@@ -712,7 +722,7 @@ int run_enc(const Opts& o) {
             item.frame = static_cast<std::int64_t>(F);
             item.t_ready = times.first(ut.index);
             if (!ports_audio.empty() && !take_audio(n, ut.index, item, ut.in.size() > gpf ? &ut.in[gpf] : nullptr)) {
-                fs.inc("audio_underrun_frames");
+                fs.loss("audio_underrun_frames", ti);
                 std::fill(item.l.begin(), item.l.end(), 0.f);
                 std::fill(item.r.begin(), item.r.end(), 0.f);
             }
@@ -722,7 +732,7 @@ int run_enc(const Opts& o) {
                 const bool test_drop = o.test_drop_every && item.t_ready >= test_drop_from && F % o.test_drop_every == 0;
                 if (s.q.size() >= kQueueMax || test_drop) {
                     g.unlock();
-                    fs.inc("frames_dropped_queue");
+                    fs.loss("frames_dropped_queue", ti);
                     push_audio_only(n, std::move(item));  // video atmestas, garsas — ne
                     return;
                 }
