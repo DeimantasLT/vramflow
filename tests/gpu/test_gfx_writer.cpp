@@ -1086,8 +1086,11 @@ TEST_CASE("gfx_writer: vfgfx_submit_at ribos — TOO_LATE, TOO_EARLY, QUEUE_FULL
     CHECK(vfgfx_submit_at(nullptr, 0, &f.f) == VFGFX_ERR_INVALID_ARG);
     const std::uint64_t now = vfgfx_current_index(w);
     CHECK(now == mxlGetCurrentIndex(&kRate));  // 128x72 interlaced, 25 kadrai/s -> grain'ų dažnis 50/1
-    CHECK(vfgfx_submit_at(w, now - 1, &f.f) == VFGFX_ERR_TOO_LATE);
-    CHECK(vfgfx_submit_at(w, now, &f.f) == VFGFX_ERR_TOO_LATE);  // ritmas prasidėtų nuo now + 1
+    vfgfx_stats s0 = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &s0) == 0);
+    const std::uint64_t past = (s0.next_pacing_index - 1) & ~1ull;  // kontraktas: < next_pacing_index -> TOO_LATE
+    CHECK(vfgfx_submit_at(w, past - 2, &f.f) == VFGFX_ERR_TOO_LATE);
+    CHECK(vfgfx_submit_at(w, past, &f.f) == VFGFX_ERR_TOO_LATE);
     CHECK(vfgfx_submit_at(w, now + 50 * VFGFX_SUBMIT_AT_MAX_LEAD_S + 100, &f.f) == VFGFX_ERR_TOO_EARLY);
     vfgfx_stats st = VFGFX_STATS_INIT;
     REQUIRE(vfgfx_get_stats(w, &st) == 0);
@@ -1262,4 +1265,138 @@ TEST_CASE("gfx_writer: vfgfx_flow_def klaidos", "[gfx_writer][flowdef]") {
     p = base();
     REQUIRE(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == 0);
     CHECK(std::string(vfgfx_last_error(nullptr)).empty());  // sėkmė išvalo
+}
+
+// --- Peržiūros 2 ir 6 punktai: indeksų semantika, ritmo pradžia, clock_backward ---------------------------------------
+
+// MXL indeksas apvalinamas iki artimiausio: „dabar“ = T(d) − 5 ms -> mxlTimestampToIndex == d, bet d commit'o laikas dar
+// nepraėjo, todėl ritmas privalo prasidėti nuo d (ne d + 1). „dabar“ = T(d) + 5 ms -> nuo d + 1.
+TEST_CASE("gfx_writer: ritmo pradžia — pirmas indeksas, kurio commit'o laikas nepraėjo (be praleidimo)", "[gfx_writer][mxl][index]") {
+    const int after = GENERATE(0, 1);  // 0: dabar = T(d) − 5 ms; 1: dabar = T(d) + 5 ms
+    Domain d(60);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    const std::uint64_t di = mxlGetCurrentIndex(&kRate) + 10;
+    const std::uint64_t t = after ? mxlIndexToTimestamp(&kRate, di) + 5'000'000 : mxlIndexToTimestamp(&kRate, di) - 5'000'000;
+    REQUIRE(mxlTimestampToIndex(&kRate, t) == di);
+    Recorder rec;
+    gi::PacingHooks hk;
+    hk.now = [t] { return t; };
+    hk.wait = [](std::uint64_t i, std::int64_t off, const std::atomic<bool>& stop) { return mxlv::func::wait_until(kRate, i, off, stop); };
+    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    CHECK(vfgfx_current_index(w) == di);  // MXL dabartinis indeksas (artimiausias)
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(st.next_pacing_index == di + static_cast<std::uint64_t>(after));
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    for (int k = 0; k < 200 && rec.size() < 1; ++k) std::this_thread::sleep_for(5ms);
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    REQUIRE(rec.size() >= 1);
+    CHECK(rec.snapshot()[0] == di + static_cast<std::uint64_t>(after));
+    vfgfx_writer_destroy(w);
+}
+
+TEST_CASE("gfx_writer: vfgfx_index_time_ns == mxlIndexToTimestamp flow'o grain'o dažniu", "[gfx_writer][mxl][index]") {
+    Domain d(61);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false, 30000, 1001).c_str(), nullptr, &w) == 0);
+    const mxlRational g{30000, 1001};
+    for (const std::uint64_t i : {std::uint64_t{0}, std::uint64_t{1}, mxlGetCurrentIndex(&g), mxlGetCurrentIndex(&g) + 7})
+        CHECK(vfgfx_index_time_ns(w, i) == mxlIndexToTimestamp(&g, i));
+    CHECK(vfgfx_current_index(w) - mxlGetCurrentIndex(&g) <= 1);
+    CHECK(vfgfx_index_time_ns(nullptr, 5) == 0);
+    vfgfx_writer_destroy(w);
+}
+
+// Ritmo gijos kontraktas: prieš kiekvieną laukimą stats.next_pacing_index == indeksas, kurį gija commit'ins (ir po
+// praleidimo dėl vėlavimo). Žudo mutantus „pace_next nedidinamas“ ir „praleidimas nepajudina pace_next“.
+TEST_CASE("gfx_writer: next_pacing_index — indeksas, kurį ritmas commit'ins kitą (ir po praleidimo)", "[gfx_writer][mxl][index]") {
+    Domain d(62);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    std::mutex m;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> seen;  // (laukiamas indeksas, next_pacing_index)
+    std::atomic<int> calls{0};
+    gi::PacingHooks hk;
+    hk.wait = [&](std::uint64_t i, std::int64_t off, const std::atomic<bool>& stop) {
+        vfgfx_stats st = VFGFX_STATS_INIT;
+        vfgfx_get_stats(w, &st);
+        {
+            std::lock_guard<std::mutex> l(m);
+            seen.emplace_back(i, st.next_pacing_index);
+        }
+        const bool b = mxlv::func::wait_until(kRate, i, off, stop);
+        if (calls.fetch_add(1) == 6) std::this_thread::sleep_for(100ms);  // ~5 laukai pavėlavimo
+        return b;
+    };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    std::this_thread::sleep_for(500ms);
+    // ritmo metu: per vėlu jau commit'intam ir prieš next_pacing_index esančiam indeksui
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    REQUIRE(st.last_committed_index != VFGFX_INDEX_NONE);
+    CHECK(vfgfx_submit_at(w, st.last_committed_index & ~1ull, &f.f) == VFGFX_ERR_TOO_LATE);
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(st.late_skips >= 2);
+    std::lock_guard<std::mutex> l(m);
+    REQUIRE(seen.size() >= 15);
+    std::size_t bad = 0;
+    for (const auto& [i, next] : seen)
+        if (i != next) {
+            ++bad;
+            UNSCOPED_INFO("laukiama " << i << ", next_pacing_index " << next);
+        }
+    CHECK(bad == 0);
+    vfgfx_writer_destroy(w);
+}
+
+// Restartas su skirtingais offset'ais (−40 ms, tada +100 ms) ir ritmas po vfgfx_write(cur + 8): indeksai griežtai didėja
+// (restartas niekada nekartoja commit'into indekso), o clock_backward lieka 0 — laikrodis nešoko (peržiūros 6 punktas).
+TEST_CASE("gfx_writer: restartas su kitu offset ir ritmas po rankinio rašymo į priekį — be pakartojimų, clock_backward 0",
+          "[gfx_writer][mxl][offset]") {
+    const int scenario = GENERATE(0, 1);
+    Domain d(63);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    Recorder rec;
+    gi::PacingHooks hk;
+    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
+    std::uint64_t manual = 0;
+    if (scenario == 0) {
+        REQUIRE(vfgfx_submit(w, &f.f) == 0);
+        REQUIRE(vfgfx_start_pacing(w, -40'000'000) == 0);
+        std::this_thread::sleep_for(200ms);
+        REQUIRE(vfgfx_stop_pacing(w) == 0);
+        REQUIRE(vfgfx_start_pacing(w, 100'000'000) == 0);
+        std::this_thread::sleep_for(400ms);
+    } else {
+        manual = vfgfx_current_index(w) + 8;
+        REQUIRE(vfgfx_write(w, manual, &f.f) == 0);
+        REQUIRE(vfgfx_submit(w, &f.f) == 0);
+        REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+        std::this_thread::sleep_for(400ms);
+    }
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    const auto all = rec.snapshot();
+    REQUIRE(all.size() >= 5);
+    for (std::size_t k = 1; k < all.size(); ++k) REQUIRE(all[k] > all[k - 1]);
+    if (scenario == 1) CHECK(all.front() == manual + 1);
+    vfgfx_stats st = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &st) == 0);
+    CHECK(st.clock_backward == 0);
+    CHECK(st.pacing_errors == 0);
+    vfgfx_writer_destroy(w);
 }

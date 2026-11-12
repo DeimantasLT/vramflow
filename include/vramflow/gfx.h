@@ -45,20 +45,23 @@
  *    vfgfx_start_pacing (the frames are then ready when pacing starts).
  *
  * GRAIN INDICES AND TIMING (paced mode)
- *  - Index i is committed at T(i) + offset_ns, T(i) = TAI start of grain i (mxlIndexToTimestamp at the flow grain rate).
- *    offset_ns > 0 commits later, < 0 earlier (ahead of time).
- *  - Guaranteed: indices are committed in strictly increasing order, never twice (also across stop/start), and a grain
- *    is never committed before its commit time. The first index after vfgfx_start_pacing is the first one whose commit
- *    time has not passed.
+ *  - Index i is committed at its commit time T(i) + offset_ns, where T(i) = vfgfx_index_time_ns(w, i) is the TAI time of
+ *    grain i (mxlIndexToTimestamp at the flow grain rate). offset_ns > 0 commits later, < 0 earlier (ahead of time).
+ *  - Guaranteed: indices are committed in strictly increasing order, never twice (also across stop/start, and never an
+ *    index at or below one already written with vfgfx_write), and a grain is never committed before its commit time.
+ *    The first index after vfgfx_start_pacing is the smallest index whose commit time has not passed (and that is
+ *    above every committed index); no index whose commit time is still ahead is skipped.
  *  - Not guaranteed: every index. If the thread wakes up late, the index it was waiting for is still committed (late),
- *    then the indices whose time has already passed are skipped (stats.late_skips) — no catch-up burst. If the clock
- *    steps backwards, the thread waits until time catches up (stats.clock_backward).
+ *    then the indices whose time has already passed are skipped (stats.late_skips) — no catch-up burst. If the TAI
+ *    clock steps backwards (detected against CLOCK_MONOTONIC_RAW, steps > 5 ms), the thread waits until time catches
+ *    up (stats.clock_backward). A distant commit time caused by offset_ns or by vfgfx_write ahead is not a clock step.
+ *  - stats.next_pacing_index: the index the pacing thread commits (or skips) next; when not pacing, the index pacing
+ *    would start with if started now with the last offset_ns (0 before the first start). No fixed relation to
+ *    vfgfx_current_index is promised; schedule by time with vfgfx_index_time_ns when that matters.
  *  - vfgfx_submit_at(w, first_index, frame):
  *      * accepted when stats.next_pacing_index <= first_index <= vfgfx_current_index(w) + VFGFX_SUBMIT_AT_MAX_LEAD_S x
  *        grain rate; earlier -> VFGFX_ERR_TOO_LATE, later -> VFGFX_ERR_TOO_EARLY (nothing is queued in either case);
- *      * next_pacing_index is the first index whose content the pacing thread has not chosen yet (with offset 0 normally
- *        vfgfx_current_index(w) + 1; when not pacing, the index pacing would start with now). Use first_index >=
- *        vfgfx_current_index(w) + 2 for a margin of one grain;
+ *      * first_index >= next_pacing_index + 2 leaves a margin of at least one grain period;
  *      * up to stats.queue_capacity (at least VFGFX_SUBMIT_AT_MIN_QUEUE) frames may be pending; one more fails with
  *        VFGFX_ERR_QUEUE_FULL. A frame for an index that is already pending replaces the pending one
  *        (stats.scheduled_replaced);
@@ -67,8 +70,10 @@
  *        thread processes (stats.scheduled_late); of several frames due at the same grain the one with the highest
  *        first_index wins, the others count as replaced. A pending frame is never shown before first_index;
  *      * vfgfx_submit does not clear the queue: pending frames still take over at their indices.
- *  - vfgfx_current_index(w): the index of the grain period that contains "now" (TAI) at the flow grain rate (same as
- *    mxlGetCurrentIndex for that rate); independent of offset_ns.
+ *  - vfgfx_current_index(w): MXL's current index at the flow grain rate, mxlTimestampToIndex(rate, now) — equal to
+ *    mxlGetCurrentIndex for that rate. MXL rounds to the NEAREST index: the result is the index i with
+ *    T(i) - P/2 <= now < T(i) + P/2 (P = grain period), so T(i) may still be up to half a period in the future.
+ *    Independent of offset_ns.
  *
  * FRAMES (vfgfx_frame)
  *  - pixel_format: VFGFX_PIXEL_RGBA8 (bytes R, G, B, A) or VFGFX_PIXEL_BGRA8 (bytes B, G, R, A — Chromium/browsers,
@@ -290,6 +295,8 @@ int vfgfx_submit_at(vfgfx_writer w, uint64_t first_index, const vfgfx_frame* f);
 
 /* Index of the grain period containing now (TAI) at the flow grain rate; VFGFX_INDEX_NONE for NULL. */
 uint64_t vfgfx_current_index(vfgfx_writer w);
+/* TAI time (ns) of grain `index` at the flow grain rate (mxlIndexToTimestamp); 0 for NULL. */
+uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index);
 /* Grains committed so far (both modes); 0 for NULL. */
 uint64_t vfgfx_committed(vfgfx_writer w);
 /* Fills *out; out->struct_size and out->flags are set by the caller (VFGFX_STATS_INIT / vfgfx_stats_init()). */

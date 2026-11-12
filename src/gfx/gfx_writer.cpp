@@ -379,8 +379,8 @@ struct vfgfx_writer_s {
 
     std::uint64_t now() const { return hooks.now ? hooks.now() : func::now_tai(); }
     std::uint64_t current_index() const { return mxlTimestampToIndex(&rate, now()); }
-    // Indeksas, kurio commit'o laikas (indekso laikas + offset_ns) jau atėjo: index_of(now − offset_ns), saugu be ženklo.
-    std::uint64_t due_index() const {
+    // now − offset_ns (saugu be ženklo): indekso i commit'o laikas T(i) + offset praėjo <=> T(i) <= shifted_now().
+    std::uint64_t shifted_now() const {
         std::uint64_t t = now();
         const std::int64_t off = offset_ns.load();
         if (off >= 0) {
@@ -389,11 +389,21 @@ struct vfgfx_writer_s {
         } else {
             t += 0 - static_cast<std::uint64_t>(off);  // beženklė neigimas: saugu ir INT64_MIN
         }
-        return mxlTimestampToIndex(&rate, t);
+        return t;
     }
-    // Indeksas, nuo kurio ritmas prasidėtų dabar: pirmas, kurio laikas dar nepraėjo; niekada ne <= jau commit'into.
+    // MXL indeksas (artimiausias) laikui now − offset_ns — vėlavimo / praleidimo taisyklei (kaip func::gen).
+    std::uint64_t due_index() const { return mxlTimestampToIndex(&rate, shifted_now()); }
+    // Pirmas indeksas, kurio commit'o laikas dar nepraėjo. MXL indeksas apvalinamas iki ARTIMIAUSIO, todėl due_index()
+    // gali būti indeksas, kurio laikas dar ateityje (iki pusės periodo) — jo praleisti negalima (peržiūros 2 punktas).
+    std::uint64_t first_not_passed() const {
+        const std::uint64_t t = shifted_now();
+        std::uint64_t i = mxlTimestampToIndex(&rate, t);
+        if (mxlIndexToTimestamp(&rate, i) <= t) ++i;
+        return i;
+    }
+    // Indeksas, nuo kurio ritmas prasidėtų dabar: pirmas, kurio commit'o laikas nepraėjo; niekada ne <= jau commit'into.
     std::uint64_t start_index() const {
-        std::uint64_t i = due_index() + 1;
+        std::uint64_t i = first_not_passed();
         const std::uint64_t last = last_index.load();
         if (last != VFGFX_INDEX_NONE) i = std::max(i, last + 1);
         return i;
@@ -467,8 +477,20 @@ void vfgfx_writer_s::pace_loop_body() {
         i = pace_next;  // start_pacing: start_index() (restartas niekada nekartoja commit'into indekso)
     }
     const std::size_t gb = gfx::grain_bytes(r);
+    // Laikrodžio šuolis atgal — tik tikras TAI šuolis CLOCK_MONOTONIC_RAW atžvilgiu (func::ClockWatch), ne „tolimas
+    // tikslas“: offset'o keitimas restarte ar rankinis rašymas į priekį tikslą nustumia toli be jokio šuolio (peržiūros 6 p.).
+    func::ClockWatch cw;
+    cw.stepped();
     while (!stop.load()) {
-        const bool back = hooks.wait ? hooks.wait(i, offset_ns.load(), stop) : func::wait_until(rate, i, offset_ns.load(), stop);
+        bool back = false;
+        if (hooks.wait) {
+            back = hooks.wait(i, offset_ns.load(), stop);  // testo laiko šaltinis pats praneša apie šuolį
+        } else {
+            func::wait_until(rate, i, offset_ns.load(), stop);
+            const std::uint64_t before = cw.back_ns;
+            cw.stepped();
+            back = cw.back_ns > before;
+        }
         if (stop.load()) break;
         if (back) bump(&gi::PacingStats::clock_backward);
         bool wrote = false;
@@ -887,6 +909,7 @@ int vfgfx_stop_pacing(vfgfx_writer w) {
 int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out) {
     return guarded(w, [&] { return get_stats_impl(w, out); });
 }
+uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index) { return w ? mxlIndexToTimestamp(&w->rate, index) : 0; }
 uint64_t vfgfx_committed(vfgfx_writer w) { return w ? w->committed.load() : 0; }
 uint64_t vfgfx_current_index(vfgfx_writer w) {
     if (!w) return VFGFX_INDEX_NONE;
