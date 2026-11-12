@@ -9,12 +9,14 @@ fsplit      — vieno indekso vienetai commit'inami skirtingose fazėse (A ir B 
               0 neatitikimų (mismatch_fields), verify missing + invalid ≤ funkcijos pačios suskaičiuoti praradimai tam flow'ui,
               sveiko flow'o praradimų 0; held_ms histograma netuščia (fazės iš tikrųjų skilo). logo C / H / G, composite H / G
               (--deadline-ms 30: C fazė yra).
-flate_stall — vėluojantis flow'as (kaip fsplit) ir SIGSTOP'intas flow'as TUO PAČIU metu (C fazės kelias: anksčiau paruoštas
-              pernešto indekso vienetas laukė užstrigusio iki C ribos): sveikų flow'ų praradimų 0, kiekvieno sveiko maks.
-              vėlavimas ≤ 2 · Wr + 10 ms, vėluojančio — 0 neatitikimų. logo C / G.
+flate_stall — vėluojantis ir užstrigęs flow'ai TAME PAČIAME indekse (aligned_cycles: abu SIGSTOP ties T(k) − 0,5 ms, vėluojantis
+              tęsiamas po 18,5 ms, užstrigęs — po 150 ms; 10 ciklų): C fazės kelias — paruoštas pernešto indekso vienetas laikomas
+              ≤ Wr nuo savo paruošimo, ne iki C ribos (1fa6d8d). Sveikų flow'ų praradimų 0, kiekvieno sveiko maks. vėlavimas
+              ≤ 2 · Wr + 10 ms, vėluojančio — 0 neatitikimų ir commit ≤ jo atėjimas + Wr + 3 ms. logo C / G.
 fcrashloop  — gen B nužudomas ir paleidžiamas iš naujo kas 2 s 20 s: sveikų flow'ų praradimų 0 (išskyrus aukštupio — gen A —
               eilutes gedimo lange), logo procesas be nuotėkių: /proc/<pid>/fd skaičius po ≤ prieš + 2, RSS augimas ≤ 16 MB,
-              G — GPU atminties (nvidia-smi memory.used) augimas ≤ 64 MB. logo C / G.
+              G — GPU atminties augimas: proceso paties (nvidia-smi --query-compute-apps) ≤ 16 MB, o kur tvarkyklė jo nerodo
+              (WDDM) — viso GPU memory.used medianos (5 matavimai) ≤ 64 MB. logo C / G.
 Testai tikrina tik iš išorės (procesai, signalai, exit kodai, santraukos, /proc, nvidia-smi).
 """
 import os
@@ -63,13 +65,40 @@ def proc_mem(pid):
         return None, None
 
 
+def smi_bin():
+    return "nvidia-smi" if subprocess.run(["which", "nvidia-smi"], capture_output=True).returncode == 0 else "/usr/lib/wsl/lib/nvidia-smi"
+
+
 def gpu_used_mb():
-    smi = "nvidia-smi" if subprocess.run(["which", "nvidia-smi"], capture_output=True).returncode == 0 else "/usr/lib/wsl/lib/nvidia-smi"
     try:
-        r = subprocess.run([smi, "--query-gpu=memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([smi_bin(), "--query-gpu=memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                           timeout=10)
         return int(r.stdout.split()[0])
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
+
+
+def proc_vram_mb(pid, samples=5):
+    """(MB, šaltinis): proceso PATIES GPU atmintis (nvidia-smi --query-compute-apps used_memory), kai tvarkyklė ją rodo; WDDM
+    (WSL2 nešiojamas) jos nerodo („Not available in WDDM driver model“, /proc/<pid>/maps CUDA rezervuoja VA iš anksto ir
+    nekinta) — tada viso GPU memory.used mediana iš `samples` matavimų per ~1 s (tas pats procesų rinkinys gyvas abiem
+    momentais). Šaltinis rašomas į rezultatą."""
+    vals = []
+    try:
+        r = subprocess.run([smi_bin(), "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        for ln in r.stdout.splitlines():
+            p = [x.strip() for x in ln.split(",")]
+            if len(p) == 2 and p[0] == str(pid) and p[1].isdigit():
+                return int(p[1]), "process"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for _ in range(samples):
+        v = gpu_used_mb()
+        if v is not None:
+            vals.append(v)
+        time.sleep(0.2)
+    return (sorted(vals)[len(vals) // 2] if vals else None), "gpu-median"
 
 
 def start_sources(out, sub, d, func, v, roles):
@@ -112,8 +141,37 @@ def run_func(out, sub, d, func, v, impl, storage):
     return fn, vf
 
 
-def scenario(out, name, func, tag, impl, storage, faults):
-    """faults: {"jitter": flow, "stall": flow, "restart": flow}; kiekvienas paveiktas flow'as — savo gen procesas."""
+FIELD_NS = 20_000_000  # 1080i50
+STOP_LEAD_NS = 500_000  # abu gamintojai sustabdomi 0,5 ms iki T(k): grain'as k dar neįrašytas
+JITTER_STOP_S = 0.0185  # vėluojantis tęsiamas ties T(k) + 18 ms: grain'as k ateina po b = T + 17,5 (C fazė, D = 30)
+STALL_STOP_S = 0.150   # užstrigęs — 7,5 lauko (≥ 3 praleidimai → Stalled, tada atsigauna)
+ALIGNED_CYCLES = 10
+
+
+def aligned_cycles(jit, stl):
+    """10 ciklų kas 1 s: abu gamintojai SIGSTOP ties T(k) − 0,5 ms (TAI), vėluojantis SIGCONT po 18,5 ms, užstrigęs — po 150 ms.
+    Indekse k abu vienetai pernešami į C: vėluojantis paruoštas ~T + 18,5…21, užstrigusio brolio grain'o nėra. Teisinga C
+    taisyklė (1fa6d8d): paruoštas laikomas ≤ Wr nuo t_r — commit ~atėjimas + 6 ms; be jos — iki C ribos T + 30."""
+    for _ in range(ALIGNED_CYCLES):
+        now = time.clock_gettime_ns(time.CLOCK_TAI)
+        k = now // FIELD_NS + 50  # ~1 s į priekį
+        at = k * FIELD_NS - STOP_LEAD_NS
+        while True:
+            left = at - time.clock_gettime_ns(time.CLOCK_TAI)
+            if left <= 0:
+                break
+            time.sleep(left / 1e9 if left > 3_000_000 else 0)
+        for pr in (jit, stl):
+            pr.p.send_signal(signal.SIGSTOP)
+        time.sleep(JITTER_STOP_S)
+        jit.p.send_signal(signal.SIGCONT)
+        time.sleep(STALL_STOP_S - JITTER_STOP_S)
+        stl.p.send_signal(signal.SIGCONT)
+
+
+def scenario(out, name, func, tag, impl, storage, faults, aligned=False):
+    """faults: {"jitter": flow, "stall": flow, "restart": flow}; kiekvienas paveiktas flow'as — savo gen procesas. aligned —
+    vietoj atsitiktinio „trūkčiojimo“ ir 2 s sustabdymo: aligned_cycles (flate_stall)."""
     sub = f"{name}-{func}-{tag}"
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
@@ -138,10 +196,12 @@ def scenario(out, name, func, tag, impl, storage, faults):
             return {"err": "šaltinių flow'ai neatsirado"}
         fn, vf = run_func(out, sub, d, func, v, impl, storage)
         time.sleep(4)
-        if "jitter" in faults:
+        if aligned:  # flate_stall: vėluojantis ir užstrigęs — tame pačiame indekse (C fazės kelias, žr. aligned_cycles)
+            aligned_cycles(procs["jitter"], procs["stall"])
+        elif "jitter" in faults:
             th.append(threading.Thread(target=jitter, args=(procs["jitter"], evt), daemon=True))
             th[-1].start()
-        if "stall" in faults:
+        if "stall" in faults and not aligned:
             procs["stall"].p.send_signal(signal.SIGSTOP)
             time.sleep(2)
             procs["stall"].p.send_signal(signal.SIGCONT)
@@ -163,7 +223,7 @@ def scenario(out, name, func, tag, impl, storage, faults):
     if sf is None or sv is None:
         return {"err": f"nėra santraukų ({func}={sf is not None}, verify={sv is not None})"}
     return {"rc": rc, "fn": sf, "verify": sv, "upstream": I.upstream([p for k, p in procs.items() if k.startswith("A")]),
-            "special": special}
+            "special": special, "jitter_up": I.upstream([procs["jitter"]]) if "jitter" in procs else None}
 
 
 def check_split(r, func):
@@ -219,7 +279,8 @@ def flate_stall(out):
         impl, storage = VARIANTS[tag]
         tid = f"flate_stall[logo-{tag}]"
         # C: sveiki 1 ir 3 (du gen, paveikti 0 ir 2); G: sveiki 0 ir 2 (paveikti 1 ir 3) — ne „paveikti visada paskutiniai“
-        r = scenario(out, "flatestall", "logo", tag, impl, storage, {"C": {"jitter": 0, "stall": 2}, "G": {"jitter": 1, "stall": 3}}[tag])
+        faults = {"C": {"jitter": 0, "stall": 2}, "G": {"jitter": 1, "stall": 3}}[tag]
+        r = scenario(out, "flatestall", "logo", tag, impl, storage, faults, aligned=True)
         if r.get("err"):
             res.append(F.result(tid, "FAIL", why=r["err"]))
             continue
@@ -232,8 +293,21 @@ def flate_stall(out):
             m = ff[n].get("lateness_max_us")
             if m is None or m / 1000.0 > lim:
                 bad.append(f"sveiko #{n} maks. vėlavimas {None if m is None else m / 1000.0} ms > {lim} ms")
+        # C fazės taisyklė (1fa6d8d): vėluojančio grain'as, atėjęs po b kartu su užstrigusiu broliu, commit'inamas ≤ jo atėjimas
+        # + Wr + 3 ms (apdorojimas, 1 ms laukimo gabalai; išmatuota +5,9 ms), ne ties C riba T + 30 (be taisyklės — +8,5…10,7). Atėjimas — vėluojančio gen paties commit'o
+        # vėlavimo maksimumas (commit_lateness_s); jis turi būti po b (kitaip scenarijus C kelio nepatikrino).
+        j = faults["jitter"]
+        up_s = list(((r.get("jitter_up") or {}).get("lat_s") or {}).values())
+        arr = max(up_s) if up_s else None
+        mj = (ff[j].get("lateness_max_us") or 0) / 1000.0 if j < len(ff) else None
+        jlim = None if arr is None else arr + I.WR_MS + 3.0
+        if arr is None or arr <= 17.5:
+            bad.append(f"vėluojančio gen maks. commit'as {arr} ms ≤ b = 17,5 ms (C kelias nepatikrintas)")
+        elif mj is None or mj > jlim:
+            bad.append(f"vėluojančio #{j} maks. vėlavimas {mj} ms > atėjimas {arr:.2f} + Wr + 3 = {jlim:.2f} ms (laukta C ribos?)")
         res.append(F.result(tid, "PASS" if not bad else "FAIL",
-                            why=f"exit={r['rc']} held_ms count={held}; {'; '.join(bad) or 'sveiki be praradimų, vėluojantis be neatitikimų'}"))
+                            why=f"exit={r['rc']} held_ms count={held}; vėluojančio #{j}: atėjimas {arr} ms, commit maks. {mj} ms; "
+                                f"{'; '.join(bad) or 'sveiki be praradimų, vėluojantis ≤ atėjimas + Wr'}"))
     return res
 
 
@@ -250,6 +324,7 @@ def fcrashloop(out):
         lg = None
         before = after = (None, None)
         vram0 = vram1 = None
+        vsrc = vsrc1 = None
         rl = None
         t_fault = None
         try:
@@ -261,7 +336,7 @@ def fcrashloop(out):
                 res.append(F.result(tid, "FAIL", why="logo išėjimai neatsirado"))
                 continue
             time.sleep(5)
-            before, vram0 = proc_mem(lg.p.pid), gpu_used_mb()
+            before, (vram0, vsrc) = proc_mem(lg.p.pid), proc_vram_mb(lg.p.pid)
             t_fault = I.tai_ns()
             for k in range(10):  # 20 s: kill -9 ir paleidimas iš naujo kas 2 s
                 gb.kill9()
@@ -269,7 +344,7 @@ def fcrashloop(out):
                 gb = F.FProc(out, f"{sub}/genB{k + 1}", "gen", d, "--flows", 1, "--flow-base", N - 1, "--duration", 120, *v)
                 time.sleep(1.7)
             time.sleep(4)  # paskutinis prisijungimas iš naujo ir nusistovėjimas
-            after, vram1 = proc_mem(lg.p.pid), gpu_used_mb()
+            after, (vram1, vsrc1) = proc_mem(lg.p.pid), proc_vram_mb(lg.p.pid)
             rl = lg.wait(timeout=60)
         finally:
             I.stop_all([lg, gb, ga])
@@ -292,10 +367,15 @@ def fcrashloop(out):
                 bad.append(f"fd {before[0]} → {after[0]}")
             if after[1] - before[1] > 16 * 1024:
                 bad.append(f"RSS {before[1]} → {after[1]} kB")
-        if tag == "G" and vram0 is not None and vram1 is not None and vram1 - vram0 > 64:
-            bad.append(f"GPU atmintis {vram0} → {vram1} MB")
+        # proceso paties skaičius (jei tvarkyklė rodo) — ≤ 16 MB; WDDM — viso GPU mediana, ≤ 64 MB (vienas nutekėjęs 10 laukų
+        # ring'as ~28 MB, 10 perkrovimų — ~280 MB)
+        vlim = 16 if vsrc == "process" else 64
+        if tag == "G" and (vram0 is None or vram1 is None or vsrc != vsrc1):
+            bad.append(f"GPU atmintis neišmatuota ({vram0} → {vram1}, {vsrc} / {vsrc1})")
+        elif tag == "G" and vram1 - vram0 > vlim:
+            bad.append(f"GPU atmintis ({vsrc}) {vram0} → {vram1} MB > +{vlim}")
         res.append(F.result(tid, "PASS" if not bad else "FAIL",
-                            why=f"exit={rl} fd {before[0]}→{after[0]} RSS {before[1]}→{after[1]} kB GPU {vram0}→{vram1} MB "
+                            why=f"exit={rl} fd {before[0]}→{after[0]} RSS {before[1]}→{after[1]} kB GPU ({vsrc}) {vram0}→{vram1} MB "
                                 f"reattached={fa.get('reattached')} aukštupio biudžetas={budget}; {'; '.join(bad) or 'be nuotėkių ir sveikų praradimų'}"))
     return res
 

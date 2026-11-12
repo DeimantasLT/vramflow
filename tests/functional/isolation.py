@@ -516,11 +516,21 @@ def logo_gate(fault, r):
 
 ENC_LOSS = ("late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
             "audio_underrun_frames")
+SAMPLES_PER_FRAME = 1920  # 1080i50: 48 kHz / 25
+AAC_FRAME = 1024
+FRAME_NS = 2 * FIELD_NS
+
+
+def aac_packets(frames):
+    """Laukiamas AAC paketų skaičius srautui, kurio visi kadrai su garsu: frames · 1920 / 1024 (± 2 — paskutinis neužpildytas
+    ir koderio išleidimas)."""
+    return frames * SAMPLES_PER_FRAME / AAC_FRAME
 
 
 def enc_gate(fault, r):
     """V12 vartai: kiekvienam sveikam srautui enc praradimai (ENC_LOSS, ir garsas) ≤ aukštupio biudžetas, frames_encoded ≥
-    25 · RUN_S − 1 − biudžetas, tyla ≤ 1920 · biudžetas mėginių, packets_audio > 0; TS be CC / sync klaidų; maks. vėlavimas
+    25 · RUN_S − 1 − biudžetas, tyla ≤ 1920 · biudžetas mėginių, packets_audio = frames_encoded · 1920 / 1024 ± 2; TS be
+    CC / sync klaidų; maks. vėlavimas
     gedimo lange kiekvienam sveikam (max_lateness_bad); paveiktam — missing_frames > 0."""
     bad = []
     budget = upstream_budget(r)
@@ -532,8 +542,9 @@ def enc_gate(fault, r):
             bad.append(f"sveiko #{n} frames_encoded={f.get('frames_encoded', 0)} < {25 * RUN_S - 1 - budget}")
         if f.get("audio_silence_samples", 0) > 1920 * budget:  # tyla tik už aukštupio prarastus kadrus (1080i50: 1920 / kadrui)
             bad.append(f"sveiko #{n} audio_silence_samples={f.get('audio_silence_samples', 0)} > {1920 * budget}")
-        if not f.get("packets_audio", 0):
-            bad.append(f"sveiko #{n} packets_audio == 0")
+        want_pa = aac_packets(f.get("frames_encoded", 0))
+        if abs(f.get("packets_audio", 0) - want_pa) > 2:  # anksčiau — tik „> 0“
+            bad.append(f"sveiko #{n} packets_audio={f.get('packets_audio', 0)} ≠ {want_pa:.0f} ± 2 (frames_encoded · 1920 / 1024)")
     sk = r.get("sink") or {}
     if sk.get("healthy_cc_errors", 0) or sk.get("healthy_sync_errors", 0):
         bad.append(f"TS klaidos sveikuose: {sk}")
@@ -545,11 +556,15 @@ def enc_gate(fault, r):
 
 def enc_audio_gate(fault, r):
     """fiso_enc_audio: sveikiems — enc_gate taisyklės (be paveikto missing_frames); paveiktam — video nenukentėjo
-    (frames_encoded ≥ 25 · RUN_S − 1 − biudžetas, video praradimų nėra), audio_underrun_frames > 0."""
+    (frames_encoded ≥ 25 · RUN_S − 1 − biudžetas, video praradimų nėra), audio_underrun_frames = (T(paskutinis) − gedimas) /
+    40 ms ± 3."""
     bad = [b for b in enc_gate(fault, r) if not b.startswith("paveikto missing_frames")]
     fa, budget = r["fn"]["affected"], upstream_budget(r)
-    if not fa.get("audio_underrun_frames", 0):
-        bad.append("paveikto audio_underrun_frames == 0 (garsas nebuvo prarastas?)")
+    # Garsas prarastas nuo gedimo iki pabaigos: laukiama (T(paskutinis) − gedimas) / 40 ms kadrų ± 3 (aptikimas ≤ 1 kadras,
+    # apvalinimas, gedimo momentas tarp kadrų) — anksčiau tik „> 0“.
+    want_u = round(((r.get("end_tai") or 0) - (r.get("fault_tai") or 0)) / FRAME_NS)
+    if abs(fa.get("audio_underrun_frames", 0) - want_u) > 3:
+        bad.append(f"paveikto audio_underrun_frames={fa.get('audio_underrun_frames', 0)} ≠ {want_u} ± 3 (nuo gedimo iki pabaigos)")
     if fa.get("frames_encoded", 0) < 25 * RUN_S - 1 - budget:
         bad.append(f"paveikto video frames_encoded={fa.get('frames_encoded', 0)} < {25 * RUN_S - 1 - budget}")
     vlost = {k: fa[k] for k in ENC_LOSS if k != "audio_underrun_frames" and fa.get(k)}
