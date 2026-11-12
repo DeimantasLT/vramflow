@@ -105,6 +105,8 @@ int main(int argc, char** argv) {
     common(e, o);
     inputs(e, o);
     e->add_option("--encoder", o.encoder, "nvenc | x264");
+    e->add_option("--deadline-ms", o.deadline_ms);
+    e->add_option("--read-offset-us", o.read_offset_us);
     e->add_option("--preset", o.preset);
     e->add_option("--tune", o.tune);
     e->add_option("--x264-preset", o.x264_preset);

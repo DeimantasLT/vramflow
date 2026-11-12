@@ -26,7 +26,7 @@ sutrikimas rašomas atskira INFO eilute (didžiausias gen A commit'o vėlavimas 
 SIGSTOP / SIGCONT / kill momento).
 
 Būsena: fiso_kill ir fiso_stall — VARTAI logo funkcijai nuo V10 (izoliacija variklyje; tvirtinimai — logo_gate()); fiso_composite
-— vartai nuo V11 (ta pati taisyklė, aukštupiai — gen ir gfxgen A); fiso_enc — kol kas INFO (vartais taps V12). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
+— vartai nuo V11 (ta pati taisyklė, aukštupiai — gen ir gfxgen A); fiso_enc — vartai nuo V12 (enc_gate()). FAIL ir tada, jei neveikia pati infrastruktūra (flow'ai neatsirado,
 nėra santraukos). Struktūruoti skaičiai — `before` / `after` laukuose (functional.json). „Prieš“ skaičiai —
 docs/rezultatai/2026-11-12-izoliacija-pries.md.
 
@@ -279,7 +279,8 @@ def run_enc(out, tag, impl, storage, enc, fault):
         sk = {}
     sflows = sk.get("flows") or []
     return {**common_record(fault, t_fault), "exit": {"enc": re_}, "fn": split_summary(se, ENC_KEYS, N),
-            "out_lateness": hist_of(se, "frame_lateness"), "fatal": se.get("fatal"),
+            "out_lateness": hist_of(se, "frame_lateness"), "fatal": se.get("fatal"), "upstream": upstream(ga),
+            "fn_flows": [flow_view(se, ENC_KEYS, [n]) for n in range(N - 1)],
             "sink": {"healthy_video_pes_min": min((f.get("video_pes", 0) for f in sflows[:N - 1]), default=None),
                      "healthy_cc_errors": sum(f.get("cc_errors", 0) for f in sflows[:N - 1]),
                      "healthy_sync_errors": sum(f.get("sync_errors", 0) for f in sflows[:N - 1]),
@@ -350,6 +351,32 @@ def logo_gate(fault, ctrl, r):  # noqa: C901 — taip pat composite (V11)
     return bad
 
 
+ENC_LOSS = ("late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames")
+
+
+def enc_gate(fault, ctrl, r):
+    """V12 vartai (planas §9 V12) su priskyrimu: kiekvienam sveikam srautui enc praradimai (ENC_LOSS) ≤ aukštupio biudžetas,
+    frames_encoded ≥ 25 · RUN_S − 1 − biudžetas; TS be CC / sync klaidų; frame_lateness p99 po gedimo ≤ be gedimo + Wr + 1 ms;
+    paveiktam — missing_frames > 0."""
+    bad = []
+    budget = upstream_budget(r)
+    for n, f in enumerate(r.get("fn_flows") or []):
+        lost = sum(f.get(k, 0) for k in ENC_LOSS)
+        if lost > budget:
+            bad.append(f"sveiko #{n} enc praradimai {lost} > aukštupio {budget} ({ {k: f[k] for k in ENC_LOSS if f.get(k)} })")
+        if f.get("frames_encoded", 0) < 25 * RUN_S - 1 - budget:
+            bad.append(f"sveiko #{n} frames_encoded={f.get('frames_encoded', 0)} < {25 * RUN_S - 1 - budget}")
+    sk = r.get("sink") or {}
+    if sk.get("healthy_cc_errors", 0) or sk.get("healthy_sync_errors", 0):
+        bad.append(f"TS klaidos sveikuose: {sk}")
+    p99a, p99b = r["out_lateness"].get("p99_ms"), ctrl["out_lateness"].get("p99_ms")
+    if p99a is None or p99b is None or p99a > p99b + WR_MS + 1.0:
+        bad.append(f"frame_lateness p99 {p99b} → {p99a} ms > +{WR_MS + 1.0} ms")
+    if not r["fn"]["affected"].get("missing_frames", 0):
+        bad.append("paveikto missing_frames == 0")
+    return bad
+
+
 def probe(out, name, runner, faults):
     """Kiekvienam variantui: kontrolinis (be gedimo) + su gedimu. logo (run_logo) — vartai (logo_gate), kiti — INFO."""
     res = []
@@ -369,8 +396,8 @@ def probe(out, name, runner, faults):
             if "upstream" in r:  # sveiko aukštupio sutrikimai — atskira INFO eilutė su skaičiais
                 res.append(F.result(f"{tid}:upstream", "INFO", why=f"sveikas aukštupis (gen A): be gedimo {ctrl.get('upstream')} | "
                                                                   f"su gedimu {r['upstream']}"))
-            if runner in (run_logo, run_composite):
-                bad = logo_gate(fault, ctrl, r)
+            if runner in (run_logo, run_composite, run_enc):
+                bad = enc_gate(fault, ctrl, r) if runner is run_enc else logo_gate(fault, ctrl, r)
                 if r.get("post"):
                     why += f" | po SIGCONT: {r['post']}"
                 res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") + why,

@@ -21,7 +21,7 @@ enum class EngineTiming { Legacy, Isolation };
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns);
 
 // Kur santraukoje rašyti variklio praleidimus: proceso lygiu (gen) ar kiekvienam flow'ui (logo, composite…).
-enum class SkipScope { Process, PerFlow };
+enum class SkipScope { Process, PerFlow, PerFlowFrames };  // PerFlowFrames — enc: *_skips_frames
 
 // Variklio rezultatas ir skaitikliai → Stats (first / last_index, clock_steps, clock_backward, *_skips). Raktai, kurių
 // reikšmė 0, nerašomi (kaip anksčiau — „įvykio“ skaitikliai atsiranda tik padidinti); clock_steps — tik Process (gen

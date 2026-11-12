@@ -50,11 +50,12 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
         put(st.proc, "clock_skips", u.clock_skips);
         return;
     }
+    const bool fr = scope == SkipScope::PerFlowFrames;
     for (std::uint32_t n = 0; n < units && n < st.flows.size(); ++n) {
         const engine::UnitCounters& u = hub.unit(eng.unit_id(n));
-        put(st.flows[n].c, "late_skips", u.late_skips);
-        put(st.flows[n].c, "warmup_skips", u.warmup_skips);
-        put(st.flows[n].c, "clock_skips", u.clock_skips);
+        put(st.flows[n].c, fr ? "late_skips_frames" : "late_skips", u.late_skips);
+        put(st.flows[n].c, fr ? "warmup_skips_frames" : "warmup_skips", u.warmup_skips);
+        put(st.flows[n].c, fr ? "clock_skips_frames" : "clock_skips", u.clock_skips);
     }
 }
 
