@@ -165,6 +165,53 @@ mechanika būtų tikėtina, bet nematuota.
 - `fiso_stall[G]:upstream` INFO eilutėse vėlavimas, sutampantis su P8 → P3, yra aplinkos įvykis; vartų taisyklė
   (praradimai ≤ aukštupio `late_skips + late_commits`) jį jau teisingai priskiria.
 
+## 9. Įrankis `vramflow-func keepwarm` ir harness'ai (po šio tyrimo)
+
+Mitigacija tapo gamybiniu įrankiu: `vramflow-func keepwarm` (numatyta `--size-mb 64 --interval-ms 5`, `--duration 0` — iki
+SIGINT / SIGTERM; kol veikia — tylus, pabaigoje viena santraukos eilutė). Užpildymas — `cudaMemsetAsync` + sync kas 5 ms
+(absoliutus periodas). `functional.py` ir `capacity.py` jį paleidžia kiekvienam GPU variantui (H, G) ir sustabdo prieš
+kiekvieną C variantą; `VRAMFLOW_GPU_KEEPWARM=0` išjungia; kiekvienas rezultatas turi lauką `keepwarm`.
+
+**Kaina** (nvidia-smi kas 100 ms, 40 s, be kitų procesų; žali duomenys `/root/build/vramflow/kw-cost/`):
+
+| | P-būsena | GPU užimtumas | galia | atminties taktas |
+|---|---|---:|---:|---:|
+| tuščia eiga | P8 (387 / 387 imčių) | 0 % | 2,6 W (p95 2,7) | 405 MHz |
+| keepwarm 64 MB / 5 ms | P4 (379), P3 (7) | 19,5 % (maks. 21) | 11,2 W (p95 12,5) | 6037 MHz |
+
+Vienas užpildymas — vid. 1,17 ms, maks. 2,38 ms (8968 užpildymai per 44,8 s, nė vienas ne ilgesnis už periodą).
+
+**Poveikis** — lemiamas bandymas pakartotas su pačiu įrankiu (`gpu_event_hiccup.py --keep-warm 64,5`; G auka 7 flow'ai;
+seka `mallocraw 512; memset 512 ×2; fill 512; memset 128; memset 64; spinw 50; free` + zondo kontekstas / pabaiga — 10
+įvykių paleidimui, 7 paleidimai kiekvienai pusei; žali duomenys `/root/build/vramflow/kw-effect/`):
+
+| | įvykių | pliūpsnių (> 30 ms arba praleista) | blogiausias ms | praleista indeksų | blogų indeksų už langų |
+|---|---:|---:|---:|---:|---:|
+| be keepwarm | 70 | **35** (fill 7 / 7, memset 512 14 / 14, memset 128 5 / 7, memset 64 2 / 7, spinw 50 7 / 7) | 367,5 | 290 | 0 |
+| su keepwarm | 70 | **0** | 21,5 (konteksto sukūrimas) | 0 | 0 |
+
+Kas lieka ir su keepwarm: kito proceso įvykiai (CUDA konteksto sukūrimas, platus darbas) vis tiek prailgina kitų GPU darbą
+iki ~20 ms (čia 21,5 ms; fiso_stall[G] — logo `proc_ms` maks. 14,3 ms, kai ties SIGCONT startuoja post `verify`). Tai jau
+ne praradimai (< 30 ms), bet vėlavimo maksimumai; izoliacijos maks. vėlavimo riba tai įskaičiuoja kaip Δproc.
+
+**Vartų patikimumas** (PASS / paleidimų; C variantas GPU nenaudoja — keepwarm jam niekada nepaleidžiamas, todėl „be“ —
+tik G; žali duomenys `/root/build/vramflow/meas/`, kiekvienas `functional.json` įrašas turi `keepwarm`):
+
+| Vartai | C (keepwarm niekada) | G su keepwarm | G be keepwarm |
+|---|---:|---:|---:|
+| fiso_kill | 5 / 5 | 5 / 5 (pirminė maks. riba: 4 / 5) | 5 / 5 |
+| fiso_stall | 5 / 5 | 5 / 5 | 5 / 5 (pirminė maks. riba: 4 / 5) |
+| fiso_composite | 5 / 5 | 5 / 5 | 5 / 5 |
+| fiso_enc (su garsu) | 5 / 5 | 5 / 5 | 5 / 5 |
+| fgold_logo | 10 / 10 | 10 / 10 | 10 / 10 |
+| fgold_composite | 10 / 10 | **10 / 10** | **8 / 10** (6 `late_fields` + 2 / 16 `missing_fields`) |
+| fgold_dec | 10 / 10 | 10 / 10 | 10 / 10 |
+
+Žinomas nestabilumas `fgold_composite[G]` (≈ 1 iš 5, 2–8 vėlių laukų) be keepwarm pasikartojo 2 / 10, su keepwarm — 0 / 10.
+Du fiso G nepavykimai buvo tik naujojo maks. vėlavimo vartų (praradimų 0): sveikas aukštupis (gen A) tuo metu pats vėlavo
+17,0 / 22,4 ms (kontroliniame 6,9 / 9,8 ms). Riba papildyta Δup (aukštupio maks. vėlavimo padidėjimas, kaip praradimų
+biudžetas); stulpeliuose — su ja perskaičiuota tų pačių įrašų (`before` / `after`) vartų išvada, skliaustuose — pirminė.
+
 ## Atkartojimas
 
 ```
@@ -174,4 +221,7 @@ export LD_LIBRARY_PATH=/root/src/mxl-pr653/install/Linux-Clang-Release/lib:/root
 python3 tests/perf/gpu_event_hiccup.py run OUT --victim G --rounds lifecycle,ctxcpu,alloc --reps 10 --baseline 3
 python3 tests/perf/gpu_event_hiccup.py run OUT --victim G --rounds narrow --reps 5 --baseline 0 --tag=-busy --keep-busy 64,5
 python3 tests/perf/gpu_event_hiccup.py analyze OUT
+# §9: tas pats su įrankiu ir vartų patikimumas
+python3 tests/perf/gpu_event_hiccup.py run OUT --victim G --rounds narrow --reps 7 --baseline 0 --tag=-kw --keep-warm 64,5   --narrow "mallocraw 512;memset 512;memset 512;fill 512;memset 128;memset 64;spinw 50;free"
+VRAMFLOW_GPU_KEEPWARM=0 FISO_VARIANTS=G python3 tests/functional/functional.py OUT --only fiso_kill,fiso_stall,fiso_composite,fiso_enc
 ```
