@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -27,9 +28,11 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "common/format.hpp"
+#include "engine/clock.hpp"
 #include "func/flows.hpp"
 #include "gfx/gfx_ref.hpp"
 #include "gfx/gfx_writer_internal.hpp"
@@ -227,6 +230,56 @@ struct FakeClock {
     }
 };
 
+// Ritmas virtualiu laiku (planas V14b, K-T9): variklio VirtualClock + laiko kabliukai (rašytojas gauna savo variklį).
+// Kabliukas wait(i) laukia testo leidimo (run), tada pastumia virtualų laiką iki T(i) + offset (+ late_once — gija
+// „pabudo vėlai“). run(n) grąžina, kai išnaudoti n atidarymai IR gija vėl laukia kito — visi n tick'ų apdoroti, todėl
+// skaičiai tikslūs ir nepriklauso nuo GPU / CPU apkrovos. VirtualClock ne gijoms saugus — prieiga po m.
+struct VirtualPace {
+    std::mutex m;
+    std::condition_variable cv;
+    mxlv::engine::VirtualClock clk;
+    std::uint64_t budget = 0, opened = 0, late_ns = 0;
+    bool waiting = false;
+    // Pradžia: 1 ms po dabartinio MXL indekso laiko (grain'ai artimi tikram laikui — MXL skaitytojas jų neatmeta).
+    VirtualPace() : clk(mxlIndexToTimestamp(&kRate, mxlGetCurrentIndex(&kRate)) + 1'000'000) {}
+    std::uint64_t now() {
+        std::lock_guard<std::mutex> l(m);
+        return clk.now_tai();
+    }
+    bool wait(std::uint64_t index, std::int64_t offset, const std::atomic<bool>& stop) {
+        std::unique_lock<std::mutex> l(m);
+        waiting = true;
+        cv.notify_all();
+        while (budget == 0 && !stop.load()) cv.wait_for(l, 1ms);
+        waiting = false;
+        if (stop.load()) return false;
+        --budget;
+        ++opened;
+        const std::uint64_t target = mxlIndexToTimestamp(&kRate, index) + static_cast<std::uint64_t>(offset);
+        if (clk.now_tai() < target) clk.advance(target - clk.now_tai());
+        if (late_ns) clk.advance(std::exchange(late_ns, 0));
+        cv.notify_all();
+        return false;
+    }
+    // Leidžia n tick'ų atidarymų ir laukia, kol visi apdoroti (gija vėl laukia).
+    void run(std::uint64_t n) {
+        std::unique_lock<std::mutex> l(m);
+        budget += n;
+        cv.notify_all();
+        REQUIRE(cv.wait_for(l, 10s, [&] { return budget == 0 && waiting; }));
+    }
+    void late_once(std::uint64_t ns) {
+        std::lock_guard<std::mutex> l(m);
+        late_ns = ns;
+    }
+    gi::PacingHooks hooks() {
+        gi::PacingHooks hk;
+        hk.now = [this] { return now(); };
+        hk.wait = [this](std::uint64_t i, std::int64_t off, const std::atomic<bool>& stop) { return wait(i, off, stop); };
+        return hk;
+    }
+};
+
 const gfx::Raster kR1080i{1920, 1080, true, true};
 
 void expect_strictly_consecutive(const std::vector<std::uint64_t>& v) {
@@ -286,7 +339,7 @@ TEST_CASE("gfx_writer: progresyvus 382x40 (plotis nesidalija iš 3/6/48), stride
 // teisingą kadrą. Trys keliai (gfx.h „CUDA FRAMES“): numatytas (cudaDeviceSynchronize) ir cuda_stream (įvykis
 // kviečiančiojo stream'e) — grain'as == kadras; VFGFX_FRAME_CALLER_SYNCED — biblioteka nelaukia, grain'as PRIVALO skirtis
 // (įrodo, kad testas atskiria atvejus). Tas pats prieš pristatomą .so su atskira cudart: tests/gpu/gfx_so_cuda_check.cu.
-TEST_CASE("gfx_writer: CUDA kadras be kviečiančiojo sinchronizavimo (R20)", "[gfx_writer][mxl]") {
+TEST_CASE("gfx_writer: CUDA kadras be kviečiančiojo sinchronizavimo (R20)", "[gfx_writer][mxl][realtime]") {
     const bool cuda_store = GENERATE(false, true);
     const int mode = GENERATE(0, 1, 2);  // 0 numatytas, 1 VFGFX_FRAME_CALLER_SYNCED, 2 cuda_stream
     if (!have_gpu()) SKIP("nėra CUDA įrenginio");
@@ -365,8 +418,8 @@ TEST_CASE("gfx_writer: klaidų kodai (INVALID_ARG, GEOMETRY, flow aprašas)", "[
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit >= 48/s, indeksai iš eilės == ref [PF-4]",
-          "[gfx_writer][mxl][pf4]") {
+TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit 50 tick'ų = 50 commit'ų, indeksai iš eilės == ref [PF-4]",
+          "[gfx_writer][mxl][pf4][virtual]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
     Domain d(4);
@@ -374,66 +427,59 @@ TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit >=
     vfgfx_writer w = nullptr;
     REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 1920, 1080, true).c_str(), storage_opts(cuda_store).c_str(), &w) == 0);
     Checker chk(d.inst, fid.id, kR1080i);
-    Recorder rec;
-    gi::PacingHooks hk;
-    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
-    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
     Frame a(1920, 1080, 11, VFGFX_ALPHA_STRAIGHT, cuda_store);
     Frame b(1920, 1080, 22, VFGFX_ALPHA_PREMULTIPLIED, cuda_store);
     const std::vector<std::uint8_t> ra[2] = {a.ref(kR1080i, 0), a.ref(kR1080i, 1)};
     const std::vector<std::uint8_t> rb[2] = {b.ref(kR1080i, 0), b.ref(kR1080i, 1)};
+    VirtualPace vp;
+    Recorder rec;
+    // Kiekvienas commit'as tikrinamas iškart ritmo gijoje (ring'as ribotas): pagal tuo metu laukiamą kadrą.
+    std::atomic<const std::vector<std::uint8_t>*> want{ra};
+    std::atomic<int> bad{0}, missing{0};
+    gi::PacingHooks hk = vp.hooks();
+    hk.on_commit = [&](std::uint64_t i) {
+        rec.add(i);
+        bool present = false;
+        if (!chk.matches(i, want.load()[i & 1], &present)) ++(present ? bad : missing);
+    };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
 
     REQUIRE(vfgfx_start_pacing(w, 0) == 0);
     CHECK(vfgfx_start_pacing(w, 0) == 2004);  // jau paleista
-    std::this_thread::sleep_for(500ms);
+    vp.run(25);
     CHECK(vfgfx_committed(w) == 0);  // [PF-4]: iki pirmo submit grain'ų nėra
     CHECK(rec.size() == 0);
-    CHECK(gi::pacing_stats(w).no_frame >= 20);
+    CHECK(gi::pacing_stats(w).no_frame == 25);
 
     REQUIRE(vfgfx_submit(w, &a.f) == 0);
-    const auto t0 = std::chrono::steady_clock::now();
-    std::size_t verified = 0, bad = 0, missing = 0;
-    auto verify_new = [&](const std::vector<std::uint8_t>* want) {
-        const auto snap = rec.snapshot();
-        for (; verified < snap.size(); ++verified) {
-            bool present = false;
-            if (!chk.matches(snap[verified], want[snap[verified] & 1], &present)) ++(present ? bad : missing);
-        }
-    };
-    while (std::chrono::steady_clock::now() - t0 < 1000ms) {
-        verify_new(ra);
-        std::this_thread::sleep_for(2ms);
-    }
-    const std::size_t n1 = rec.size();
-    CHECK(n1 >= 48);  // [PF-4]
-    CHECK(vfgfx_committed(w) >= 48);
+    vp.run(50);
+    CHECK(rec.size() == 50);  // [PF-4]: 50 tick'ų — lygiai 50 commit'ų
+    CHECK(vfgfx_committed(w) == 50);
     CHECK(vfgfx_write(w, 1, &a.f) == 2004);  // rankinis ritmo metu
     CHECK(std::strlen(vfgfx_last_error(w)) > 0);
 
-    // Naujas kadras: po poros laukų visi indeksai == b atitinkamo pariteto laukas (swap tik tarp kadrų, ne per pusę lauko).
+    // Naujas kadras: rodomas nuo kito ritmo apdorojamo grain'o — visi 20 tolesnių == b (swap tik tarp tick'ų).
     REQUIRE(vfgfx_submit(w, &b.f) == 0);
-    std::this_thread::sleep_for(100ms);
-    verified = rec.size();  // per swap'ą išleisti grain'ai gali būti seno ARBA naujo kadro — netikrinami
-    const auto t1 = std::chrono::steady_clock::now();
-    while (std::chrono::steady_clock::now() - t1 < 300ms) {  // lango (ring) dydis ribotas: tikrinam sekdami
-        verify_new(rb);
-        std::this_thread::sleep_for(2ms);
-    }
+    want.store(rb);
+    vp.run(20);
     vfgfx_stop_pacing(w);
     const auto all = rec.snapshot();
     expect_strictly_consecutive(all);
-    CHECK(all.size() >= 48 + 15);
+    CHECK(all.size() == 70);
     CHECK(bad == 0);
     CHECK(missing == 0);
     const auto st = gi::pacing_stats(w);
     CHECK(st.errors == 0);
+    CHECK(st.late_skips == 0);
+    CHECK(st.no_frame == 25);
+    CHECK(st.committed == 70);
     CHECK(st.committed == vfgfx_committed(w));
     CHECK(vfgfx_write(w, all.back() + 5, &a.f) == 0);  // po stop — vėl galima
     vfgfx_writer_destroy(w);
 }
 
 TEST_CASE("gfx_writer: ritmas — kryžminės atminties poros (host kadras -> cuda-linear, CUDA kadras -> host), progresyvus",
-          "[gfx_writer][mxl]") {
+          "[gfx_writer][mxl][realtime]") {
     if (!have_gpu()) SKIP("nėra CUDA įrenginio");
     const bool cuda_store = GENERATE(false, true);
     const gfx::Raster r{382, 40, false, true};
@@ -460,7 +506,7 @@ TEST_CASE("gfx_writer: ritmas — kryžminės atminties poros (host kadras -> cu
 }
 
 TEST_CASE("gfx_writer: laikrodžio šuolis atgal ritmo gijoje — joks indeksas du kartus, jokio catch-up [PF-5]",
-          "[gfx_writer][mxl][pf5]") {
+          "[gfx_writer][mxl][pf5][realtime]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
     Domain d(6);
@@ -501,89 +547,106 @@ TEST_CASE("gfx_writer: laikrodžio šuolis atgal ritmo gijoje — joks indeksas 
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: pavėlavusi gija — vėluojantis indeksas įrašomas, praleisti laukai skaičiuojami (kaip gen)", "[gfx_writer][mxl]") {
+TEST_CASE("gfx_writer: pavėlavusi gija — vėluojantis indeksas įrašomas, praleisti laukai skaičiuojami (kaip gen)",
+          "[gfx_writer][mxl][virtual]") {
     Domain d(7);
     FlowId fid;
     vfgfx_writer w = nullptr;
     REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    VirtualPace vp;
     Recorder rec;
-    std::atomic<int> calls{0};
-    gi::PacingHooks hk;
-    hk.wait = [&](std::uint64_t i, std::int64_t off, const std::atomic<bool>& stop) {
-        const bool b = mxlv::func::wait_until(i, off, stop);
-        if (calls.fetch_add(1) == 12) std::this_thread::sleep_for(70ms);  // gija „pasimetė“ ~3,5 lauko
-        return b;
-    };
+    gi::PacingHooks hk = vp.hooks();
     hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
     REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
     Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
     REQUIRE(vfgfx_submit(w, &f.f) == 0);
     REQUIRE(vfgfx_start_pacing(w, 0) == 0);
-    std::this_thread::sleep_for(700ms);
+    vp.run(12);
+    // 13-as atidarymas: gija „pabudo“ 65 ms (3,25 lauko) po T(c). Vėluojantis c įrašomas; artimiausias indeksas tada —
+    // c + 3, todėl c + 1 ir c + 2 praleidžiami (late_skips == 2), o c + 3 įrašomas tame pačiame tick'e (jo laikas praėjo).
+    vp.late_once(65'000'000);
+    vp.run(1);
+    vp.run(10);
     vfgfx_stop_pacing(w);
     const auto all = rec.snapshot();
-    REQUIRE(all.size() > 20);
-    // Lygiai viena pertrauka: vėluojantis indeksas (13-as iškvietimas) įrašytas, po jo praleista >= 2 laukų.
+    REQUIRE(all.size() == 12 + 2 + 10);
     int gaps = 0;
     for (std::size_t k = 1; k < all.size(); ++k) {
         REQUIRE(all[k] > all[k - 1]);
         if (all[k] != all[k - 1] + 1) {
             ++gaps;
-            CHECK(all[k] - all[k - 1] >= 3);
-            CHECK(all[k] - all[k - 1] <= 6);
+            CHECK(k == 13);  // pertrauka lygiai po vėluojančio (13-o) indekso
+            CHECK(all[k] - all[k - 1] == 3);
         }
     }
     CHECK(gaps == 1);
-    CHECK(gi::pacing_stats(w).late_skips >= 2);
+    const auto st = gi::pacing_stats(w);
+    CHECK(st.late_skips == 2);
+    CHECK(st.errors == 0);
+    CHECK(st.committed == all.size());
     vfgfx_writer_destroy(w);
 }
 
 // --- Fix round 1 ---------------------------------------------------------------------------------------------------------
 
-TEST_CASE("gfx_writer: offset_ns +60 ms / -20 ms — indeksai iš eilės, be praleidimų pastovioje būsenoje", "[gfx_writer][mxl][offset]") {
+TEST_CASE("gfx_writer: offset_ns +60 ms / -20 ms — indeksai iš eilės, commit'as lygiai T(i) + offset, be praleidimų",
+          "[gfx_writer][mxl][offset][virtual]") {
     const std::int64_t off = GENERATE(60'000'000, -20'000'000);
     Domain d(8);
     FlowId fid;
     vfgfx_writer w = nullptr;
     REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    VirtualPace vp;
     Recorder rec;
-    gi::PacingHooks hk;
-    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    std::atomic<int> off_time{0};  // commit'ai ne lygiai T(i) + offset virtualiu laiku
+    gi::PacingHooks hk = vp.hooks();
+    hk.on_commit = [&](std::uint64_t i) {
+        rec.add(i);
+        if (vp.clk.now_tai() != mxlIndexToTimestamp(&kRate, i) + static_cast<std::uint64_t>(off)) ++off_time;  // ritmo gija laiko vp.m nelaiko
+    };
     REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
     Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
     REQUIRE(vfgfx_submit(w, &f.f) == 0);
+    // Pirmas indeksas — pirmas, kurio commit'o laikas T(i) + offset dar nepraėjo virtualiu laiku.
+    const std::uint64_t t0 = vp.now();
+    std::uint64_t first = mxlTimestampToIndex(&kRate, t0 - static_cast<std::uint64_t>(off));
+    if (mxlIndexToTimestamp(&kRate, first) + static_cast<std::uint64_t>(off) <= t0) ++first;
     REQUIRE(vfgfx_start_pacing(w, off) == 0);
-    std::this_thread::sleep_for(700ms);
+    vp.run(50);
     vfgfx_stop_pacing(w);
     const auto all = rec.snapshot();
-    CHECK(all.size() >= 25);
+    REQUIRE(all.size() == 50);
+    CHECK(all.front() == first);
     expect_strictly_consecutive(all);
+    CHECK(off_time == 0);
     CHECK(gi::pacing_stats(w).late_skips == 0);
     CHECK(gi::pacing_stats(w).errors == 0);
-    // commit'as ties index laiku + offset: +60 ms -> grain'as pasirodo ne anksčiau nei laikas
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: stop -> start su neigiamu offset — indeksai nesikartoja", "[gfx_writer][mxl][offset]") {
+TEST_CASE("gfx_writer: stop -> start su neigiamu offset — indeksai nesikartoja ir neprarandami", "[gfx_writer][mxl][offset][virtual]") {
     Domain d(9);
     FlowId fid;
     vfgfx_writer w = nullptr;
     REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 128, 72, true).c_str(), nullptr, &w) == 0);
+    VirtualPace vp;
     Recorder rec;
-    gi::PacingHooks hk;
+    gi::PacingHooks hk = vp.hooks();
     hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
     REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
     Frame f(128, 72, 4, VFGFX_ALPHA_STRAIGHT, false);
     REQUIRE(vfgfx_submit(w, &f.f) == 0);
     for (int round = 0; round < 3; ++round) {
         REQUIRE(vfgfx_start_pacing(w, -30'000'000) == 0);
-        std::this_thread::sleep_for(150ms);
+        vp.run(7);
         REQUIRE(vfgfx_stop_pacing(w) == 0);
     }
+    // Virtualus laikas sustojus nejuda: restartas tęsia nuo paskutinio commit'into + 1 (ne kartoja, ne praleidžia).
     const auto all = rec.snapshot();
-    REQUIRE(all.size() >= 6);
-    for (std::size_t k = 1; k < all.size(); ++k) REQUIRE(all[k] > all[k - 1]);
+    REQUIRE(all.size() == 21);
+    expect_strictly_consecutive(all);
     CHECK(gi::pacing_stats(w).errors == 0);
+    CHECK(gi::pacing_stats(w).late_skips == 0);
     vfgfx_writer_destroy(w);
 }
 
@@ -633,7 +696,7 @@ TEST_CASE("gfx_writer: flow jau egzistuoja -> STATE; nežinomas deviceUuid -> IN
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksuota", "[gfx_writer][mxl]") {
+TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksuota", "[gfx_writer][mxl][realtime]") {
     Domain d(12);
     FlowId fid;
     vfgfx_writer w = nullptr;
@@ -652,7 +715,7 @@ TEST_CASE("gfx_writer: išimtis ritmo gijoje neužmuša proceso, klaida užfiksu
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: ritmo gijos commit klaida eina į ritmo klaidos lauką, ne į kviečiančiosios", "[gfx_writer][mxl]") {
+TEST_CASE("gfx_writer: ritmo gijos commit klaida eina į ritmo klaidos lauką, ne į kviečiančiosios", "[gfx_writer][mxl][realtime]") {
     Domain d(13);
     FlowId fid;
     vfgfx_writer w = nullptr;
@@ -681,7 +744,7 @@ TEST_CASE("gfx_writer: ritmo gijos commit klaida eina į ritmo klaidos lauką, n
 // Apsauga (capacity G, N >= 2 tyrimas): keli cuda-linear rašytojai viename procese, ritmo režimas, kaip gfxgen — visi sukuriami,
 // kiekvienam submit'inamas CUDA kadras (iškart atlaisvinamas), tada paleidžiamos visos ritmo gijos. Kiekvieno rašytojo ABU
 // paritetai turi būti == ref (bibliotekos būsena per rašytoją; capacity G N >= 2 klaidos šaltinis buvo gfxgen įkėlimas).
-TEST_CASE("gfx_writer: keli cuda-linear rašytojai viename procese, ritmas — visų paritetai == ref", "[gfx_writer][mxl][multi]") {
+TEST_CASE("gfx_writer: keli cuda-linear rašytojai viename procese, ritmas — visų paritetai == ref", "[gfx_writer][mxl][multi][realtime]") {
     if (!have_gpu()) SKIP("nėra CUDA įrenginio");
     constexpr int kW = 3;
     const gfx::Raster r{384, 216, true, true};
@@ -763,7 +826,7 @@ TEST_CASE("gfx_writer: host rašytuvas nekuria CUDA konteksto", "[gfx_writer][mx
 }
 
 // Planas §P2: biblioteka priima kiekvieną palaikomą dažnį (format.hpp), ritmas ir grain'ai — pagal flow formatą.
-TEST_CASE("gfx_writer: palaikomi formatai (25p, 29,97p, 59,94p, 50i, 59,94i) priimami ir rašomi == ref", "[gfx_writer][mxl][format]") {
+TEST_CASE("gfx_writer: palaikomi formatai (25p, 29,97p, 59,94p, 50i, 59,94i) priimami ir rašomi == ref", "[gfx_writer][mxl][format][realtime]") {
     struct R {
         int num, den;
         bool interlaced;
@@ -927,7 +990,7 @@ TEST_CASE("gfx_writer: vfgfx_get_stats — struct_size, flags, nežinomi baitai 
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: BGRA kadras == ref (host/cuda-linear x host/CUDA kadras, rankinis ir ritmo)", "[gfx_writer][mxl][bgra]") {
+TEST_CASE("gfx_writer: BGRA kadras == ref (host/cuda-linear x host/CUDA kadras, rankinis ir ritmo)", "[gfx_writer][mxl][bgra][realtime]") {
     const bool cuda_store = GENERATE(false, true);
     const bool cuda_mem = GENERATE(false, true);
     if ((cuda_store || cuda_mem) && !have_gpu()) SKIP("nėra CUDA įrenginio");
@@ -975,7 +1038,7 @@ TEST_CASE("gfx_writer: BGRA kadras == ref (host/cuda-linear x host/CUDA kadras, 
     if (dev) cudaFree(dev);
 }
 
-TEST_CASE("gfx_writer: vfgfx_get_stats abiem režimais", "[gfx_writer][mxl][stats]") {
+TEST_CASE("gfx_writer: vfgfx_get_stats abiem režimais", "[gfx_writer][mxl][stats][realtime]") {
     Domain d(54);
     FlowId fid;
     vfgfx_writer w = nullptr;
@@ -1018,7 +1081,7 @@ TEST_CASE("gfx_writer: vfgfx_get_stats abiem režimais", "[gfx_writer][mxl][stat
 }
 
 // Kadro tikslumas (audito 5 radinys): submit_at(i+3, B) ir submit_at(i+5, C) — B lygiai nuo i+3, C lygiai nuo i+5, ne anksčiau.
-TEST_CASE("gfx_writer: vfgfx_submit_at — kadrai pasirodo lygiai nurodytuose indeksuose", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: vfgfx_submit_at — kadrai pasirodo lygiai nurodytuose indeksuose", "[gfx_writer][mxl][submit_at][realtime]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
     // progresyvus 50p: kadras gali prasidėti bet kuriuo indeksu (interlaced flow'e — tik lyginiu, viršutiniu lauku)
@@ -1137,7 +1200,7 @@ TEST_CASE("gfx_writer: sena cudart klaida gijoje nesugadina vfgfx_write (auditas
 }
 
 // cuda_stream kelias nelaukia nesusijusių GPU darbų (kitas stream'as), numatytasis — laukia (cudaDeviceSynchronize).
-TEST_CASE("gfx_writer: cuda_stream — nelaukiama kito stream'o darbų, numatytasis laukia", "[gfx_writer][mxl]") {
+TEST_CASE("gfx_writer: cuda_stream — nelaukiama kito stream'o darbų, numatytasis laukia", "[gfx_writer][mxl][realtime]") {
     if (!have_gpu()) SKIP("nėra CUDA įrenginio");
     const bool use_stream = GENERATE(false, true);
     Domain d(58);
@@ -1276,7 +1339,7 @@ TEST_CASE("gfx_writer: vfgfx_flow_def klaidos", "[gfx_writer][flowdef]") {
 
 // MXL indeksas apvalinamas iki artimiausio: „dabar“ = T(d) − 5 ms -> mxlTimestampToIndex == d, bet d commit'o laikas dar
 // nepraėjo, todėl ritmas privalo prasidėti nuo d (ne d + 1). „dabar“ = T(d) + 5 ms -> nuo d + 1.
-TEST_CASE("gfx_writer: ritmo pradžia — pirmas indeksas, kurio commit'o laikas nepraėjo (be praleidimo)", "[gfx_writer][mxl][index]") {
+TEST_CASE("gfx_writer: ritmo pradžia — pirmas indeksas, kurio commit'o laikas nepraėjo (be praleidimo)", "[gfx_writer][mxl][index][realtime]") {
     const int after = GENERATE(0, 1);  // 0: dabar = T(d) − 5 ms; 1: dabar = T(d) + 5 ms
     Domain d(60);
     FlowId fid;
@@ -1320,7 +1383,7 @@ TEST_CASE("gfx_writer: vfgfx_index_time_ns == mxlIndexToTimestamp flow'o grain'o
 
 // Ritmo gijos kontraktas: prieš kiekvieną laukimą stats.next_pacing_index == indeksas, kurį gija commit'ins (ir po
 // praleidimo dėl vėlavimo). Žudo mutantus „pace_next nedidinamas“ ir „praleidimas nepajudina pace_next“.
-TEST_CASE("gfx_writer: next_pacing_index — indeksas, kurį ritmas commit'ins kitą (ir po praleidimo)", "[gfx_writer][mxl][index]") {
+TEST_CASE("gfx_writer: next_pacing_index — indeksas, kurį ritmas commit'ins kitą (ir po praleidimo)", "[gfx_writer][mxl][index][realtime]") {
     Domain d(62);
     FlowId fid;
     vfgfx_writer w = nullptr;
@@ -1368,7 +1431,7 @@ TEST_CASE("gfx_writer: next_pacing_index — indeksas, kurį ritmas commit'ins k
 // Restartas su skirtingais offset'ais (−40 ms, tada +100 ms) ir ritmas po vfgfx_write(cur + 8): indeksai griežtai didėja
 // (restartas niekada nekartoja commit'into indekso), o clock_backward lieka 0 — laikrodis nešoko (peržiūros 6 punktas).
 TEST_CASE("gfx_writer: restartas su kitu offset ir ritmas po rankinio rašymo į priekį — be pakartojimų, clock_backward 0",
-          "[gfx_writer][mxl][offset]") {
+          "[gfx_writer][mxl][offset][realtime]") {
     const int scenario = GENERATE(0, 1);
     Domain d(63);
     FlowId fid;
@@ -1469,7 +1532,7 @@ struct PacedWriter {
 
 // Peržiūros atkūrimas: keturi submit_at ne ritmo metu, jų laikas praeina -> jie neužima eilės (QUEUE_FULL buvo klaida),
 // o vėlesnis vfgfx_submit(B) + start rodo B (ne seną A).
-TEST_CASE("gfx_writer: submit_at — praėję įrašai neužima eilės, submit atšaukia suplanuotus", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: submit_at — praėję įrašai neužima eilės, submit atšaukia suplanuotus", "[gfx_writer][mxl][submit_at][realtime]") {
     PacedWriter pw(70);
     Abc k;
     const std::uint64_t n = even_up(next_index(pw.w) + 2);
@@ -1492,7 +1555,7 @@ TEST_CASE("gfx_writer: submit_at — praėję įrašai neužima eilės, submit a
 }
 
 // Praėję įrašai sutraukiami: naujausias tampa dabartiniu turiniu (vėlai), ankstesnis — pakeistas.
-TEST_CASE("gfx_writer: submit_at — praėję įrašai: naujausias tampa dabartiniu (late), kiti pakeisti", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: submit_at — praėję įrašai: naujausias tampa dabartiniu (late), kiti pakeisti", "[gfx_writer][mxl][submit_at][realtime]") {
     PacedWriter pw(71);
     Abc k;
     REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
@@ -1514,7 +1577,7 @@ TEST_CASE("gfx_writer: submit_at — praėję įrašai: naujausias tampa dabarti
     CHECK(st.queue_depth == 0);
 }
 
-TEST_CASE("gfx_writer: vfgfx_cancel_scheduled — laukiantys kadrai atšaukiami, dabartinis lieka", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: vfgfx_cancel_scheduled — laukiantys kadrai atšaukiami, dabartinis lieka", "[gfx_writer][mxl][submit_at][realtime]") {
     PacedWriter pw(72);
     Abc k;
     CHECK(vfgfx_cancel_scheduled(nullptr) == VFGFX_ERR_INVALID_ARG);
@@ -1536,7 +1599,7 @@ TEST_CASE("gfx_writer: vfgfx_cancel_scheduled — laukiantys kadrai atšaukiami,
 }
 
 // Eilė išlieka per stop/start: kadras pasirodo lygiai savo indekse ir ne anksčiau.
-TEST_CASE("gfx_writer: submit_at — eilė išlieka per stop / start", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: submit_at — eilė išlieka per stop / start", "[gfx_writer][mxl][submit_at][realtime]") {
     PacedWriter pw(73);
     Abc k;
     REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
@@ -1558,7 +1621,7 @@ TEST_CASE("gfx_writer: submit_at — eilė išlieka per stop / start", "[gfx_wri
 }
 
 // Ne iš eilės pateikti submit_at (vėlesnis pirmas): eilė rikiuojama pagal indeksą.
-TEST_CASE("gfx_writer: submit_at — ne iš eilės pateikti kadrai rodomi pagal indeksą", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: submit_at — ne iš eilės pateikti kadrai rodomi pagal indeksą", "[gfx_writer][mxl][submit_at][realtime]") {
     PacedWriter pw(74);
     Abc k;
     REQUIRE(vfgfx_submit(pw.w, &k.a.f) == 0);
@@ -1578,7 +1641,7 @@ TEST_CASE("gfx_writer: submit_at — ne iš eilės pateikti kadrai rodomi pagal 
 }
 
 // Konvertuojant ritmo gija pasirinko indekso turinį -> TOO_LATE ir nieko neįdedama (pakartotinė patikra po convert).
-TEST_CASE("gfx_writer: submit_at — indeksas praėjo konvertuojant -> TOO_LATE", "[gfx_writer][mxl][submit_at]") {
+TEST_CASE("gfx_writer: submit_at — indeksas praėjo konvertuojant -> TOO_LATE", "[gfx_writer][mxl][submit_at][realtime]") {
     gi::PacingHooks hk;
     hk.after_convert = [] { std::this_thread::sleep_for(120ms); };
     PacedWriter pw(75, hk);
@@ -1794,7 +1857,7 @@ static_assert(sizeof(vfgfx_flow_params) == 104 && offsetof(vfgfx_flow_params, wi
 // Kviečiančioji gija turi savo (ne pirminį, cuCtxCreate) kontekstą, kaip NVENC SDK / FFmpeg stiliaus programos. Po
 // kiekvieno bibliotekos kvietimo jos dabartinis kontekstas privalo likti tas pats (MXL cuda-linear backend'as ir mūsų
 // cudart perjungia į pirminį).
-TEST_CASE("gfx_writer: kviečiančiojo CUDA kontekstas atstatomas po bibliotekos kvietimų", "[gfx_writer][mxl][cudactx]") {
+TEST_CASE("gfx_writer: kviečiančiojo CUDA kontekstas atstatomas po bibliotekos kvietimų", "[gfx_writer][mxl][cudactx][realtime]") {
     if (!have_gpu()) SKIP("nėra CUDA įrenginio");
     REQUIRE(cuInit(0) == CUDA_SUCCESS);
     CUdevice dev = 0;
@@ -1842,7 +1905,7 @@ std::size_t task_count() {
 // Visi to paties (grain'ų dažnis, offset_ns, GPU) rašytojai be laiko kabliukų dalijasi viena ritmo gija (planas V14, A10):
 // 32 vfgfx_start_pacing prideda lygiai vieną giją procesui, o kiekvienas rašytojas commit'ina kiekvieną indeksą (be
 // praleidimų ir klaidų). on_commit kabliukas laiko nekeičia, todėl rašytojo į atskirą variklį neperkelia.
-TEST_CASE("gfx_writer: 32 rašytojai — viena ritmo gija", "[gfx_writer][mxl][shared]") {
+TEST_CASE("gfx_writer: 32 rašytojai — viena ritmo gija", "[gfx_writer][mxl][shared][realtime]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
     constexpr int kW = 32;

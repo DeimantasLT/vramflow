@@ -123,7 +123,10 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
     # CUDA::cuda_driver — tik testui (kviečiančiojo cuCtxCreate konteksto atstatymo patikra); biblioteka jo nelinkuoja.
     target_link_libraries(vramflow-gfx-writer-tests PRIVATE mxlv_gfx_writer mxlv_gfx_ref CUDA::cuda_driver Catch2::Catch2WithMain)
     set_target_properties(vramflow-gfx-writer-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
-    catch_discover_tests(vramflow-gfx-writer-tests)
+    # Tikro laiko ritmo testai ([realtime] žyma, planas V14b): LABELS realtime, serializuojami su kitais GPU / laiko testais
+    # (RESOURCE_LOCK gpu). Virtualaus laiko ([virtual]) ir API testai laiko nelaukia — be apribojimų.
+    catch_discover_tests(vramflow-gfx-writer-tests TEST_SPEC "~[realtime]")
+    catch_discover_tests(vramflow-gfx-writer-tests TEST_SPEC "[realtime]" PROPERTIES LABELS realtime RESOURCE_LOCK gpu)
 
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_FOUND)
