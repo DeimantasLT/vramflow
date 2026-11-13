@@ -440,6 +440,12 @@ int run_logo(const Opts& o_in) {
     bool engine_loss = false;
     std::uint32_t failed = 0;
     if (!rc) {
+        // C2 (išmatuota 2026-11-13, 20 paleidimų G): pirmas tick'as prisijungdavo prie įėjimų PATS (VideoIn::open — reader'is,
+        // cuda-linear payload'o atvaizdavimas) ir trukdavo iki ~18 ms, todėl antras tick'as atsidarydavo pavėlavęs (9/20
+        // paleidimų > 5 ms, vienas — warmup_skips). Jau esantys įėjimai prijungiami PRIEŠ variklį; vėliau atsiradę — kaip
+        // anksčiau, tick'e (ne dažniau kaip kas 100 ms).
+        if (immediate)
+            for (auto& s : in) s.poll(inst, now_tai());
         const engine::RunResult res = eng.run(fn);
         es.finish();  // paskutinė statistikos eilutė (Σ eilučių == santrauka)
         engine_loss = res.any_loss;
