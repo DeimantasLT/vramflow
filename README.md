@@ -354,13 +354,20 @@ Options of the MXL video writers (`gen`, `logo`, `composite`, `dec`) — every i
 | `--hold-ms N` | `freeze`: how long to repeat, default 1000 |
 
 Timing of the readers (`logo`, `composite`, `enc`): an input that is not there by the deadline `D` after `T(i)` makes
-that index a gap. `--deadline-ms 0` (default) means **`D = 3·P/4`** of the grain period `P`: 15 ms at 50 grains/s
+that index a gap. `--deadline-ms 0` (default) means **`D = 3·P/4`** of the grain period `P` (for `enc`: `3·P/2`, see
+below): 15 ms at 50 grains/s
 (1080i50, 1080p50, 720p50), 30 ms at 25p, 12.5 ms at 59.94 Hz; a value above `2P − G` is clamped with a warning. The
 summary states the effective value (`deadline_us`, proc). WSL2 measurement campaigns (`tests/perf/capacity.py`) and
 the functional harness (`tests/functional/functional.py`: `gen`, `logo`, `enc`, `composite`) pass `--deadline-ms 30`
 explicitly, because GPU scheduling hiccups of 17–30 ms are common there; the tests that pin the default timing (isolation
 gates, `ffmt_logo`) pass `--deadline-ms 0` and attribute an index the upstream itself delivered late to the upstream. `gen --deadline-ms` sets only the threshold of its own "late commit" counter and stderr line
 (default: the same `3·P/4`, i.e. what a reader with the default deadline would miss).
+
+`enc` has its own default: a frame's audio is complete only at `T(j) + P` (a real-time audio writer finishes the block
+at the end of its period), so with `D = 3·P/4` all real-time audio would be lost. Until the edge timing contract exists,
+`enc --deadline-ms 0` means **`D = 3·P/2`** (30 ms at 50 grains/s, 60 ms at 25p) and the audio input is *expected* at
+`T + P`: audio arriving there is on time (not counted late every frame), and the engine does not hold the first cut of
+the other streams waiting for it.
 
 Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` — the gaps this
 function caused because an input it needed was missing or late. Gaps that are not this function's loss are counted by
@@ -516,7 +523,7 @@ Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`,
 | `composite`: `layer_absent`, `layer_absent_<k>` | Output indices composed without a layer (INVALID, not attached, stalled, gone, late or rejected): the layer was transparent and the base passed through. Not a loss |
 | `lateness_max_us` (per flow) | Largest commit lateness after `T(i)` of this flow after warm-up, µs (`enc`: frame queued). The `out_lateness` histogram covers the whole tick |
 | hist `proc_ms` / `wait_ms` / `held_ms` | `proc_ms` — processing only (kernels, sync, commit; summed over the phases of one index); `wait_ms` — tick open → first processing; `held_ms` — only for an index processed in more than one phase: time spent waiting for late inputs between phases |
-| `enc`: `audio_underrun_frames` | The frame's audio was not there when the frame was encoded (silence is encoded instead). Audio is a *wanted* input: the engine waits for it at most until the first cut `a(i)` and never on the engine thread, so one stream without audio does not delay the others |
+| `enc`: `audio_underrun_frames` | The frame's audio was not there when the frame was encoded (silence is encoded instead). Audio is a *wanted* input, expected at `T + P`: the engine waits for it at most until the frame's deadline `D` (default `3·P/2`) and the first cut `a(i)` of the other streams never waits for it, so one stream with late or no audio does not delay the others |
 | `dec`: `clock_overrun_frames`, `clock_overflow_drops` | Frames dropped because a backward clock step of `S` made the tick wait: at most `ceil(S / frame)` frames, once, at the first frame tick after the step. Everything else above the buffer limit is `overrun_frames` (exit `4`)
 
 ---

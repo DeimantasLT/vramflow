@@ -4,6 +4,7 @@
 // enc garso laukimo sutartis.
 #include <catch2/catch_test_macros.hpp>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -170,5 +171,72 @@ TEST_CASE("review6: 3 — interlaced freeze: turinys nelyginiame indekse laikoma
     const auto* e = out.find(kB + 1);
     REQUIRE(e != nullptr);
     CHECK(e->kind == RecordingOutput::Kind::Commit);  // turinys — nuo lyginio (kadro ribos)
+    CHECK_FALSE(res.any_loss);
+}
+
+// --- Punktas 4: enc garso laukimo sutartis -----------------------------------------------------------------------------
+// Kadro garsas baigiamas ties T(j) + P (realaus laiko rašytojas). enc numatytoji riba D = 3P/2 (30 ms prie 50 Hz) ir Wanted
+// garso įėjimas laukiamas ties T + P (EdgeTiming::expect_ns = P): sveikas srautas nėra „vėlus“ kiekvieną kadrą (late == 0),
+// kiekvienas kadras apdorojamas su garsu (be tylos), o kito srauto kadras (garsas iškart) nelaikomas iki a(i).
+TEST_CASE("review6: 4 — garsas ties T + P su expect P: be tylos, ne vėlus, kiti nelaikomi", "[engine][review6][audio]") {
+    constexpr std::int64_t kP = 20'000'000;
+    VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
+    RecordingFunction fn(clk);
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    EngineConfig cfg = Rig::test_config();
+    cfg.cuts.deadline_ns = 3 * kP / 2;  // enc numatytoji (peržiūra 2026-11-13 p. 4)
+    std::vector<std::unique_ptr<ScriptedInput>> video, audio;
+    for (int u = 0; u < 2; ++u) {
+        video.push_back(std::make_unique<ScriptedInput>(clk));
+        audio.push_back(std::make_unique<ScriptedInput>(clk));
+    }
+    audio[0]->arrival = [](Index) { return kP + 300'000; };   // kadro garsas baigiamas ties T + P (+0,3 ms rašymas)
+    audio[1]->arrival = [](Index) { return std::int64_t{1'300'000}; };  // garsas iškart po video
+    TickEngine eng(cfg, clk, hub, stop);
+    for (std::uint32_t u = 0; u < 2; ++u) {
+        UnitSpec s;
+        s.name = "enc" + std::to_string(u);
+        s.in.push_back(InputSpec{video[u].get(), {}, 2, Need::Required, InMode::Exact});
+        s.in.push_back(InputSpec{audio[u].get(), EdgeTiming{0, kP}, 1, Need::Wanted, InMode::Exact});
+        s.stride = 2;
+        s.residue = 1;
+        std::uint32_t id = 0;
+        std::string why;
+        REQUIRE(eng.add_unit(s, id, why));
+    }
+    struct Seen {
+        std::uint8_t phase;
+        std::int64_t at;
+        bool audio;
+    };
+    std::map<std::pair<std::uint32_t, Index>, Seen> seen;
+    fn.on_process = [&](const Batch& b, TickContext&) {
+        for (const UnitTick& ut : b.units)
+            seen[{ut.unit, ut.index}] = {b.phase, static_cast<std::int64_t>(clk.now_tai()) - T(ut.index), ut.in[2].ptr != nullptr};
+    };
+    fn.on_end_tick = [&](Index i, TickContext&) {
+        if (i >= 1101) stop = true;
+    };
+    const RunResult res = eng.run(fn);
+    check_run(fn, res, 0, nullptr, 2, 1);
+    check_run(fn, res, 1, nullptr, 2, 1);
+    std::uint64_t n0 = 0;
+    for (Index i = 1021; i <= 1099; i += 2) {
+        INFO("i = " << i);
+        REQUIRE(seen.count({0, i}) == 1);
+        CHECK(seen[{0, i}].audio);  // garsas yra — ne tyla
+        CHECK(seen[{0, i}].at == kP + 300'000);  // apdorojama garso atėjimu
+        REQUIRE(seen.count({1, i}) == 1);
+        CHECK(seen[{1, i}].audio);
+        // kitas srautas nelaikomas iki a(i) = T + 5,5 ms: apdorojamas savo garso atėjimu (A nelaukia garso, laukiamo ties T + P,
+        // todėl vienetas su garsu iškart pateks į B fazę — ne laikymas)
+        CHECK(seen[{1, i}].at == 1'300'000);
+        ++n0;
+    }
+    CHECK(n0 == 40);
+    const InCounters& a0 = hub.in(eng.in_id(0, 1));
+    CHECK(a0.late == 0);  // laukiamas ties T + P — laiku
+    CHECK(a0.lost == 0);
     CHECK_FALSE(res.any_loss);
 }

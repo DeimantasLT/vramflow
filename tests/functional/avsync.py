@@ -177,9 +177,10 @@ def late_audio_run(out, sub, impl, storage, enc, port, D, late_ms, n=4):
         cap = subprocess.Popen([sys.executable, str(AV_OFFSET), str(ts), "--capture-port", str(port), "--seconds", str(D + 3),
                                 "--json", str(av_json)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
-        # --deadline-ms 30 aiškiai (V20): scenarijus — realaus laiko garso rašytojas, kadro garsas ateina ~T + 20 ms; su
-        # numatytąja 3·P/4 = 15 ms (50 laukų/s) jis visada pavėluotų. Kontrolinis paleidimas — su ta pačia riba.
-        ea = (["--encoder", enc, "--audio", 1, "--port-base", port, "--deadline-ms", 30] +
+        # Numatytosios enc ribos (peržiūra 2026-11-13 p. 4): kadro garsas ateina ~T + P = T + 20 ms, enc numatytoji riba
+        # 3P/2 = 30 ms ir garsas laukiamas ties T + P. Anksčiau čia buvo prisegta --deadline-ms 30 — ji slėpė, kad numatytoji
+        # 3·P/4 = 15 ms visą realaus laiko garsą praranda. --deadline-ms 0 — aiškiai „numatyta“ (harness'as kitaip prideda 30).
+        ea = (["--encoder", enc, "--audio", 1, "--port-base", port, "--deadline-ms", 0] +
               (["--x264-preset", "ultrafast"] if enc == "x264" else []))
         e = F.FProc(out, sub, "enc", d, "--flows", n, "--duration", D, "--warmup", 2, *ea, *v)
         re_ = e.wait(timeout=D + 60)

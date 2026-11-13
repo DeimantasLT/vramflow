@@ -152,6 +152,21 @@ TEST_CASE("timing: --deadline-ms numatyta = 3·P/4 (50 Hz — 15 ms, 25 Hz — 3
     CHECK(func::engine_config(o, func::EngineTiming::Isolation, 500'000).cuts.deadline_ns == 30'000'000);
 }
 
+// Peržiūra 2026-11-13 p. 4: enc numatytoji riba — 3·P/2 (kadro garsas baigiamas ties T + P), garsas laukiamas ties T + P;
+// aiški --deadline-ms nepakitusi.
+TEST_CASE("timing: enc --deadline-ms numatyta = 3·P/2 (50 Hz — 30 ms, 25p — 60 ms), garsas laukiamas ties T + P", "[func][timing]") {
+    func::Opts o;
+    o.fmt = vramflow::kFmt1080i50;
+    CHECK(func::enc_deadline_ns(o) == 30'000'000);
+    CHECK(func::enc_audio_expect_ns(o) == 20'000'000);
+    std::string why;
+    REQUIRE(vramflow::parse_format("1080p25", o.fmt, why));
+    CHECK(func::enc_deadline_ns(o) == 60'000'000);
+    CHECK(func::enc_audio_expect_ns(o) == 40'000'000);
+    o.deadline_ms = 25;
+    CHECK(func::enc_deadline_ns(o) == 25'000'000);
+}
+
 TEST_CASE("gap_policy: GapFill — Repeat == to paties pariteto šaltinis, Black == Y 64 / C 512, Invalid — žymė (host, cuda-linear)",
           "[func][gap][mxl]") {
     const bool cuda = GENERATE(false, true);

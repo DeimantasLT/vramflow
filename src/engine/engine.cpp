@@ -191,6 +191,22 @@ struct TickEngine::Impl {
     }
     // Laukiamas įėjimas: Required ir Wanted (Wanted — iki vieneto paskutinės ribos), kol Live ir neišspręstas.
     static bool waitable(const In& in) { return !in.done && in.spec.need != Need::Optional && in.st.live(); }
+    // Briaunos sutartis (EdgeTiming::expect_ns, peržiūra 2026-11-13 p. 4): įėjimas laukiamas ties T(j) + expect_ns. Jei tai
+    // vėliau nei A riba, A jo nelaukia (kvorumas nelaikomas iki a(i) dėl įėjimo, kuris pagal sutartį ateina vėliau) — jis
+    // laukiamas B / C fazėse iki vieneto ribos, o „laiku“ jam reiškia ≤ a(i) + expect_ns (ne Late kiekvieną kadrą).
+    bool after_a(const Unit& u, const In& in) const {
+        return in.spec.timing.expect_ns > 0 && T(jidx(u, in)) + in.spec.timing.expect_ns > recs[u.cur & 1].cuts.a;
+    }
+    // Kaip ready(u, false), bet be įėjimų, kurie pagal sutartį ateina po A ribos (A laukimo sprendimui).
+    bool ready_a(const Unit& u) const {
+        for (std::uint32_t k = 0; k < u.nin; ++k) {
+            const In& in = ins[u.in0 + k];
+            if (in.ok || in.spec.need == Need::Optional || after_a(u, in)) continue;
+            if (in.spec.need == Need::Wanted && in.done) continue;
+            return false;
+        }
+        return true;
+    }
 
     // Įvykis operatoriui (be alokacijų: tekstas — steko buferis).
     void emit(EventKind k, std::uint32_t id, Index idx, std::int64_t value, const char* text) {
@@ -759,7 +775,7 @@ struct TickEngine::Impl {
             In& in = ins[u.in0 + k];
             InCounters& c = hub.in(in.hub);
             if (in.ok) {
-                in.st.on_ready(c, in.ready_at <= r.cuts.a);
+                in.st.on_ready(c, in.ready_at <= r.cuts.a + in.spec.timing.expect_ns);  // laiku — pagal briaunos sutartį
             } else if (!in.done && in.spec.need == Need::Wanted && in.st.live()) {
                 if (in.st.on_missed(c)) in.st.note_head(in.spec.port->head());
             }
@@ -778,6 +794,7 @@ struct TickEngine::Impl {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             In& in = ins[u.in0 + k];
             if (in.ok || in.done || !in.st.live() || in.spec.need == Need::Optional) continue;
+            if (after_a(u, in)) continue;  // pagal sutartį ateina po A — neparuoštas ties A nėra vėlavimas
             const bool alive = in.spec.port->writer_alive();
             in.st.on_unready_at_a(alive, hub.in(in.hub));
             if (!alive) {
@@ -796,7 +813,7 @@ struct TickEngine::Impl {
             any = true;
             if (u.stage == Stage::WaitA) {
                 any_q = true;
-                if (!ready(u, false)) wait = true;
+                if (!ready_a(u)) wait = true;  // įėjimų, laukiamų po A (briaunos sutartis), A nelaukia
             }
         });
         const bool no_quorum = !any_q;
@@ -1025,6 +1042,8 @@ struct TickEngine::Impl {
             for (std::uint32_t k = 0; k < u.nin; ++k) {
                 const auto gk = static_cast<std::int64_t>(u.in0 + k);
                 if (!waitable(ins[static_cast<std::size_t>(gk)])) continue;
+                // A aibėje — ne įėjimas, laukiamas po A ribos (kitaip ašis jo lauktų iki a(i), brolių nepastebėdama)
+                if (u.stage == Stage::WaitA && after_a(u, ins[static_cast<std::size_t>(gk)])) continue;
                 if (pivot < 0 || ins[static_cast<std::size_t>(gk)].ewma >= ins[static_cast<std::size_t>(pivot)].ewma)
                     pivot = gk;
             }
@@ -1114,7 +1133,7 @@ struct TickEngine::Impl {
                     const Index h = in.spec.port->head();
                     const auto lw = static_cast<std::int64_t>(in.spec.port->last_write_tai());
                     const std::int64_t ready_at = (h == j && lw > 0) ? lw : T(j);  // h > j — atėjo anksčiau už head'ą
-                    in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a);
+                    in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a + in.spec.timing.expect_ns);
                 } else if (p == Probe::Invalid) {
                     in.st.on_invalid_grain(c);
                 } else if (p == Probe::Gone) {  // flow atkurtas / ištrintas — kaip ir kitur: Detached, prisijungs iš naujo

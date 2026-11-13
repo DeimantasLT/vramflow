@@ -785,6 +785,12 @@ int run_enc(const Opts& o) {
     // Startas — wait-all (V18): enc MXL išėjimų neturi, įėjimų laukta prieš variklį (attach_inputs)
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
     ecfg.start = engine::StartMode::WaitAll;
+    // Peržiūra 2026-11-13 p. 4: kadro garsas baigiamas ties T + P — numatytoji enc riba 3P/2 (aiški --deadline-ms nepakitusi)
+    ecfg.cuts.deadline_ns = enc_deadline_ns(o);
+    {
+        std::string warn;
+        if (engine::clamp_deadline(ecfg.cuts, warn)) std::fprintf(stderr, "[enc] %s\n", warn.c_str());
+    }
     st.proc["deadline_us"] = static_cast<std::uint64_t>(ecfg.cuts.deadline_ns / 1000);  // efektyvi riba D (V20)
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
@@ -792,7 +798,8 @@ int run_enc(const Opts& o) {
         u.name = flow_id(o.in_role, o.flow_base + n);
         u.in.push_back(engine::InputSpec{&ports_in[n], {}, static_cast<std::uint8_t>(gpf), engine::Need::Required, engine::InMode::Exact});
         if (n < ports_audio.size())  // garsas: Wanted — laukiamas kaip Required iki paskutinės ribos, tada be jo (tyla)
-            u.in.push_back(engine::InputSpec{&ports_audio[n], {}, 1, engine::Need::Wanted, engine::InMode::Exact});
+            u.in.push_back(engine::InputSpec{&ports_audio[n], engine::EdgeTiming{0, enc_audio_expect_ns(o)}, 1, engine::Need::Wanted,
+                                             engine::InMode::Exact});
         u.stride = static_cast<std::uint32_t>(gpf);
         u.residue = static_cast<std::uint32_t>(gpf - 1);
         std::uint32_t id = 0;

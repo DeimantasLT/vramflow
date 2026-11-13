@@ -29,6 +29,11 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
 
 // Efektyvi --deadline-ms riba ns (V20, K-T2): 0 — auto 3·P/4 pagal flow grain'ų dažnį (--format); kitaip — nurodyta.
 std::int64_t deadline_ns(const Opts& o);
+// enc (peržiūra 2026-11-13 p. 4, iki briaunų laiko sutarties): kadro garsas baigiamas ties T(j) + P, todėl numatytoji enc riba
+// — 3·P/2 (50 Hz — 30 ms, 25p — 60 ms; > 2P − G apkarpoma), aiški --deadline-ms — nepakitusi; garso (Wanted) įėjimas laukiamas
+// ties T + P (enc_audio_expect_ns).
+std::int64_t enc_deadline_ns(const Opts& o);
+std::int64_t enc_audio_expect_ns(const Opts& o);
 
 // --on-loss reikšmė → politika (invalid | freeze | black | leave; nežinoma — invalid, CLI ją jau atmeta).
 engine::GapPolicy gap_policy(const std::string& s);

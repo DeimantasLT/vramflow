@@ -16,6 +16,13 @@ std::int64_t deadline_ns(const Opts& o) {
     return engine::default_cuts(o.fmt.grain_rate()).deadline_ns;  // 3·P/4 (K-T2)
 }
 
+std::int64_t enc_deadline_ns(const Opts& o) {
+    if (o.deadline_ms > 0) return static_cast<std::int64_t>(o.deadline_ms) * 1'000'000;
+    return 3 * engine::period_ns(o.fmt.grain_rate()) / 2;
+}
+
+std::int64_t enc_audio_expect_ns(const Opts& o) { return engine::period_ns(o.fmt.grain_rate()); }
+
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns) {
     const vramflow::Rational rate = o.fmt.grain_rate();
     const std::int64_t dl = deadline_ns(o);
