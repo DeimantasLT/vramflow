@@ -299,14 +299,13 @@ def fgfx1(out):
 COMP_VARIANTS = [("C", "cpu", "host"), ("H", "gpu", "host"), ("G", "gpu", "cuda-linear")]
 
 
-# Įėjimų laukimo riba: gen / gfxgen (kiti procesai WSL2) kartais vėluoja > 15 ms (išmatuota: ~1 iš 3000 lauko-flow'ų), todėl
-# funkciniuose testuose 30 ms (kaip logo numatytoji); našumo matavimas (užduotis 10) naudoja 15.
-COMP_DEADLINE_MS = int(os.environ.get("FCOMP_DEADLINE_MS", "30"))
-# V20 (K-T2): funkcijų numatytoji riba — auto 3·P/4 (15 ms prie 50 Hz). Funkciniai testai veikia WSL2, kur gen / GPU procesų
-# sutrikimai 17–30 ms nėra reti (pilname paleidime prie 15 ms — 2 tokie indeksai per 65 testus), todėl, kaip kampanijos (K-T2),
-# jie nurodo 30 ms aiškiai: FProc prideda --deadline-ms FUNC_DEADLINE_MS gen / logo / enc procesams, kurių testas jos nenurodė.
-# Numatytąją laiką tikrinantys testai (izoliacijos vartai, ffmt_logo) nurodo --deadline-ms 0 (auto) patys.
-FUNC_DEADLINE_MS = int(os.environ.get("FFUNC_DEADLINE_MS", "30"))
+# Įėjimų laukimo riba (V24): su briaunos sutartimi riba D skaičiuojama nuo T + E (E — aukštupio skelbiama commit'o riba), todėl
+# gen / gfxgen pabudimo drebėjimą (WSL2 17–30 ms nuo T, kai riba buvo nuo T) dengia pati fazė: harness'as nebeprisega 30 ms —
+# 0 = numatytoji 3·P/4 visiems (gen / logo / enc / composite). Prisegta lieka tik ten, kur testas tikrina C fazę (targeted.py,
+# --deadline-ms 30 > P: pernešimas). FCOMP_DEADLINE_MS / FFUNC_DEADLINE_MS — kampanijoms, kurios nori kitos ribos.
+COMP_DEADLINE_MS = int(os.environ.get("FCOMP_DEADLINE_MS", "0"))
+# FProc prideda --deadline-ms FUNC_DEADLINE_MS gen / logo / enc procesams, kurių testas jos nenurodė (0 — auto).
+FUNC_DEADLINE_MS = int(os.environ.get("FFUNC_DEADLINE_MS", "0"))
 DEADLINE_SUBS = ("gen", "logo", "enc")
 
 
