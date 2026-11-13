@@ -94,6 +94,9 @@ struct Opts {
     std::uint32_t layers = 1;        // K: grafikos sluoksnių (flow'ų) skaičius vienam šaltiniui, <= 8
     std::string layer_geom;          // "logo,full,full,full" (logo 384x216, full 1920x1080, arba WxH); tuščia = k=0 logo, kiti full
     std::string gfx_mode = "pace";   // pace | manual
+    // gfxgen pace (testinė, paslėpta): rašytojai sukuriami ir ritmas paleidžiamas, bet kadras NIEKADA nesubmit'inamas —
+    // bibliotekos ritmas commit'ina tik „be kadro“ grain'us (INVALID). composite sluoksnio testams (peržiūra 2026-11-13 p. 1).
+    bool test_no_submit = false;
     // composite
     std::vector<std::string> layer_xy;    // "X,Y" kiekvienam sluoksniui (K kartų)
     std::vector<float> opacity;           // kiekvienam sluoksniui (tuščia = visi 1.0)
@@ -104,6 +107,9 @@ struct Opts {
     std::string mode = "logo";
     std::uint32_t every = 25;
     std::uint32_t lag_fields = 4;
+    // verify --mode composite: sluoksnio k nebuvimas indeksuose [I1, I2] — "K:I1-I2[@N]" (kartojama; @N — tik flow'ui N). absent — tame lange
+    // laukiamas etalonas BE sluoksnio k; either — priimamas ir su juo, ir be jo (perėjimo langai, kai tiksli riba nežinoma).
+    std::vector<std::string> layer_absent, layer_either;
     // enc
     std::string encoder = "nvenc";
     std::string preset = "p4";

@@ -85,6 +85,10 @@ An earlier version of the script exited with code 4 (about 4 % missing fields): 
 the library. The graphics source ran for a fixed time from the start while the compositors started 3 s later and ran for
 longer than the source, and with Edge the first frame needed several seconds. Starting the compositors after the first
 commit and stopping the source after them removed it (exit 0 in every one of the 5 Edge runs and the 1 synthetic run made after the fix).
+Since then the compositor itself changed: a graphics layer is optional, so a source that is not there yet, still has no
+frame (INVALID grains) or stops is transparent for those indices (`layer_absent`), the base passes through, and it is not a
+loss of the output (no exit 4 from that alone). The ordering in `run-demo.sh` is kept so that the check sees graphics from
+the first compositor index on.
 
 Assumptions and limits of this check:
 

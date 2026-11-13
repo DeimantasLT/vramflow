@@ -1107,6 +1107,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in targeted.TESTS.items()})
     import service  # tarnybos gyvavimo ciklas (fsvc_run, fsvc_loss, fsvc_second_signal, fsvc_fail_unit)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in service.TESTS.items()})
+    import review6  # šeštos peržiūros testai (composite sluoksniai, INVALID turinys, aukštupio spragos, enc garsas, re-attach)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in review6.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():

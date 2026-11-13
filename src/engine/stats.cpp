@@ -34,6 +34,8 @@ const char* to_string(EventKind k) {
         case EventKind::FormatChange: return "format_change";
         case EventKind::ClockStep: return "clock_step";
         case EventKind::Warning: return "warning";
+        case EventKind::LayerAbsent: return "layer_absent";
+        case EventKind::LayerPresent: return "layer_present";
     }
     return "?";
 }

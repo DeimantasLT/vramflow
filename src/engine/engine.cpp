@@ -1326,8 +1326,11 @@ struct TickEngine::Impl {
         for (const Unit& u : units) res.unit_failures += hub.unit(u.hub).failures;
         // Praradimai — vieneto lygiu (kiekvienas indeksas baigiasi lygiai vienu rezultatu); išėjimų spragų skaitikliai —
         // tų pačių vieneto spragų pasekmė. Laikrodžio įvykiai ir šaltinio „nėra turinio“ — ne praradimas.
-        for (std::size_t k = 0; k < hub.inputs(); ++k)
-            if (hub.in(static_cast<std::uint32_t>(k)).lost != 0) res.any_loss = true;
+        // Įėjimo `lost` — praradimas tik būtinam (Required) įėjimui. Wanted / Optional (composite sluoksnis, enc garsas)
+        // trūkumas — to įėjimo būsena: vienetas be jo commit'ina pilną indeksą, o funkcija skaičiuoja savo pasekmę
+        // (layer_absent, audio_underrun_frames).
+        for (const In& in : ins)
+            if (in.spec.need == Need::Required && hub.in(in.hub).lost != 0) res.any_loss = true;
         for (std::size_t k = 0; k < hub.outputs(); ++k)
             if (hub.out(static_cast<std::uint32_t>(k)).commit_errors != 0) res.any_loss = true;
         for (std::size_t k = 0; k < hub.units(); ++k) {

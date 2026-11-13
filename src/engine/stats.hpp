@@ -77,7 +77,9 @@ private:
 // įėjimas / išėjimas; ClockStep, Warning — nenaudojamas). text — nukopijuojamas (be alokacijų), ilgesnis — nukerpamas.
 enum class EventKind : std::uint8_t {
     UnitFailed, UnitRetryFailed, UnitRecovered, InputAttached, InputReattached, InputDetached, InputStalled, InputResumed,
-    OutputError, OutputRecovered, FormatChange, ClockStep, Warning
+    OutputError, OutputRecovered, FormatChange, ClockStep, Warning,
+    // Neprivalomas įėjimas (composite sluoksnis): nebenaudojamas (skaidrus) / vėl naudojamas — praneša funkcija, ne variklis
+    LayerAbsent, LayerPresent
 };
 const char* to_string(EventKind);
 struct Event {

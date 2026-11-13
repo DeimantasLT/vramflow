@@ -117,7 +117,10 @@ TEST_CASE("review4: Wanted be grain'o iki paskutinės ribos — vienetas tęsia 
     for (const auto& e : r.fn.ends)
         if (e.unit == 0 && e.index == kI) CHECK(e.outcome == Outcome::Ready);
     CHECK(r.hub.in(r.eng->in_id(0, 1)).lost == 1);
-    CHECK(res.any_loss);  // garso grain'as prarastas — praradimas (exit 4 griežtame režime)
+    // Peržiūra 2026-11-13 p. 1: variklio any_loss — tik būtinų (Required) įėjimų `lost`. Wanted (garso) trūkumo pasekmę
+    // skaičiuoja funkcija: enc — audio_underrun_frames (praradimas, exit 4 griežtame režime, kaip anksčiau); composite
+    // sluoksnis — layer_absent (ne praradimas). Anksčiau čia buvo CHECK(res.any_loss).
+    CHECK_FALSE(res.any_loss);
 }
 
 TEST_CASE("review4: C fazė — po A + B + ankstyvo C atėjęs iki c(i) vienetas apdorojamas paskutiniu batch'u, ne spraga",

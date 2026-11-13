@@ -292,9 +292,15 @@ committed with `MXL_GRAIN_FLAG_INVALID` (counted in `stats.no_frame`, not in `st
 the current frame repeats until it is replaced. This is a behaviour change of release 0.2 (before, nothing was committed
 until the first frame); see *GAPS* in `gfx.h`.
 
-A graphics flow behaves like any other flow. If a source stops or restarts, the compositor does not invent a picture:
-it commits that output index according to its `--on-loss` policy (default: an INVALID grain), and output content
-continues when the source returns.
+**A failed graphics layer never takes the programme off air.** In `composite` only the base is required; every layer is
+optional. A layer that is INVALID (for example a paced writer before its first frame), not attached yet, stalled, gone,
+late at the unit's deadline, or rejected (geometry, storage or rate do not fit; checked when it first attaches) is fully
+transparent for that index: the base passes through bit-exactly — the output equals the reference without that layer.
+Each such index is counted per output as `layer_absent` (and `layer_absent_<k>`), the change of state is an operator event
+(`layer_absent` / `layer_present`), and it is never a loss of the output. A layer that comes back is used again from the
+next index (interlaced: from the next frame boundary, an even index). With `--base none` and every layer absent the output
+is transparent black (key 0), not a gap. Only a missing or INVALID **base** makes the output index a gap, committed
+according to `--on-loss` (default: an INVALID grain).
 
 ### 5.3 Example: an OGraf graphic over video
 
@@ -418,8 +424,8 @@ stderr every 5 s.
   `--on-loss` until the input appears (default: INVALID grains). These start-up gaps are counted per flow as
   `gap_startup` and are not losses. An input that appears with another storage than expected is rejected like a format
   change (`--on-format-change`). `--start wait-all` keeps the old behaviour: wait for all inputs, then create the outputs.
-- `composite`, `enc` and `verify` wait for their inputs before they start (`composite`: the output raster depends on the
-  layer inputs; `enc` has no MXL outputs).
+- `composite`, `enc` and `verify` wait for their inputs before they start (`composite`: only for its base flows — the
+  output raster is the base's; layers are optional and attach whenever they appear; `enc` has no MXL outputs).
 
 | Option (readers) | Meaning |
 |---|---|
@@ -492,6 +498,7 @@ Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`,
 | `logo`: `gap_late_commits`, `gap_late_commit_min_us` / `_max_us` | Gaps committed at the deadline because an input was late (not because it was gone): how many, and how late after `T(i)` the gap grain was committed (≈ `D`) |
 | `read_errors` (per flow) | Replaces the old `read_status_<code>` keys: any unexpected read status of an input. The status code itself is no longer in the summary |
 | `reopen_mismatch` (`composite`) | The input that came back with another format (with `--on-format-change exit`, exit `6`) |
+| `composite`: `layer_absent`, `layer_absent_<k>` | Output indices composed without a layer (INVALID, not attached, stalled, gone, late or rejected): the layer was transparent and the base passed through. Not a loss |
 | `lateness_max_us` (per flow) | Largest commit lateness after `T(i)` of this flow after warm-up, µs (`enc`: frame queued). The `out_lateness` histogram covers the whole tick |
 | hist `proc_ms` / `wait_ms` / `held_ms` | `proc_ms` — processing only (kernels, sync, commit; summed over the phases of one index); `wait_ms` — tick open → first processing; `held_ms` — only for an index processed in more than one phase: time spent waiting for late inputs between phases |
 | `enc`: `audio_underrun_frames` | The frame's audio was not there when the frame was encoded (silence is encoded instead). Audio is a *wanted* input: the engine waits for it at most until the first cut `a(i)` and never on the engine thread, so one stream without audio does not delay the others |

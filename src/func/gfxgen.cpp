@@ -270,7 +270,7 @@ int run_gfxgen(const Opts& o) {
     cw.stepped();
     if (!rc && !manual) {
         // --- pace: kadras 0 vieną kartą, tada bibliotekos ritmo gija ---
-        for (std::size_t i = 0; i < src.size() && !rc; ++i) {
+        for (std::size_t i = 0; i < src.size() && !rc && !o.test_no_submit; ++i) {  // --test-no-submit: be kadro
             Src& s = src[i];
             vramflow::gfx::gfx_content(o.run_seed, s.n, s.k, 0, s.r.w, s.r.h, s.h[0].data());
             if (upload && upload_h2d(s.d[0], s.h[0].data(), s.bytes()) != cudaSuccess) { st.fatal = "cudaMemcpy"; rc = 2; break; }
@@ -305,7 +305,7 @@ int run_gfxgen(const Opts& o) {
         const std::uint64_t expected = idx0 && idx1 >= idx0 ? idx1 - idx0 + 1 : 0;
         // Ritmo gijos sėkmės taisyklė (bibliotekos stop_pacing klaidų negrąžina): ≥ 1 s trukmės bėgime flow turi commit'inti
         // bent 90 % tikėtinų laukų, o 0 commit'ų — visada klaida. Pažeidimas → klaidų skaitiklis (→ rc 3) + vfgfx_last_error tekstas.
-        const bool judge = !stop.load() && o.duration_s >= 1.0 && expected > 0;
+        const bool judge = !stop.load() && o.duration_s >= 1.0 && expected > 0 && !o.test_no_submit;
         for (std::size_t i = 0; i < src.size(); ++i) {
             const std::uint64_t cm = vfgfx_committed(src[i].w);
             st.flows[i].inc("commits", cm);

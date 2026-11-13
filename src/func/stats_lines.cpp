@@ -153,7 +153,9 @@ void StatsLines::event(const engine::Event& e, const engine::StatsNames& n) {
         case EventKind::InputDetached:
         case EventKind::InputStalled:
         case EventKind::InputResumed:
-        case EventKind::FormatChange: names = n.in; break;
+        case EventKind::FormatChange:
+        case EventKind::LayerAbsent:
+        case EventKind::LayerPresent: names = n.in; break;
         case EventKind::OutputError:
         case EventKind::OutputRecovered: names = n.out; break;
         case EventKind::ClockStep:

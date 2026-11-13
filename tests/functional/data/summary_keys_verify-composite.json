@@ -49,6 +49,9 @@
   "top": [],
   "proc": [],
   "hist": [],
-  "flows": []
+  "flows": [
+   "samples_absent",
+   "samples_either_absent"
+  ]
  }
 }

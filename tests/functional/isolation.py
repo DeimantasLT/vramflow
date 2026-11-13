@@ -107,14 +107,15 @@ ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
 FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skips", "lapped", "too_late", "in_invalid", "read_errors",
            "missing_fields", "detached", "flow_invalid", "reopened", "reattached", "stalls", "lateness_max_us", "gap_invalid",
-           "gap_frozen", "gap_black", "gap_startup", "gap_late_commits", "gap_late_commit_min_us", "gap_late_commit_max_us")
+           "gap_frozen", "gap_black", "gap_startup", "gap_late_commits", "gap_late_commit_min_us", "gap_late_commit_max_us",
+           "layer_absent")
 DEADLINE_US = 15_000  # V20 (K-T2): numatytoji --deadline-ms = 3·P/4 prie 50 Hz
 DEADLINE_TOL_US = 1_000
 ENC_KEYS = ("frames_encoded", "late_frames", "late_skips_frames", "warmup_skips_frames", "clock_skips_frames", "missing_frames",
             "lapped", "too_late", "in_invalid", "frames_dropped_queue", "encode_errors", "mux_errors", "reattached",
             "audio_underrun_frames", "audio_silence_samples", "packets_audio", "lateness_max_us")
 VER_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "too_late", "read_errors", "reattached", "in_reattached",
-            "marker_bad", "verify_skipped", "check_dropped")
+            "marker_bad", "verify_skipped", "check_dropped", "samples_either_absent")
 # Paveikto flow'o spragų turinio patikra (verify --flows 1 --every 1; V17 K3): kaip klasifikuoti išėjimo grain'ai be įėjimo.
 GAP_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "outside_diff_fields", "marker_bad", "verify_skipped",
             "sample_lapped", "gap_repeat", "gap_black", "gap_other", "gap_repeat_first", "gap_repeat_last", "gap_black_first",
@@ -419,9 +420,11 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
                     "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", RUN_S, "--warmup", WARM_S, *v)
         if not F.wait_flows(d, [F.role_flow_id(6, n) for n in range(N)], 30):
             return {"err": "composite išėjimo flow'ai neatsirado"}
+        # Paveikto flow'o sluoksnis nužudomas: jis skaidrus (peržiūra 2026-11-13 p. 1) — paveiktam priimamas ir etalonas be
+        # sluoksnio (--layer-either …@victim, bitas į bitą); sveikiems — tik su sluoksniu (griežtai, kaip anksčiau).
         va = F.FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo",
                      "--gfx-mode", "pace", "--base", "gen", "--out-format", "v210", "--every", 5, "--duration", VERIFY_S,
-                     "--warmup", 1, *xy, "--opacity", "1.0", *F.vimpl(impl, storage))
+                     "--warmup", 1, *xy, "--opacity", "1.0", "--layer-either", f"0:0-{1 << 62}@{victim}", *F.vimpl(impl, storage))
         mark_ready()
         t_fault = apply_fault(fault, xb, t0)
         rv = va.wait(timeout=VERIFY_S + 60)
@@ -623,13 +626,11 @@ def p99_bad(r, what):
     return bad
 
 
-def logo_gate(fault, r):
-    """V10 / V11 vartai: kiekvienam sveikam flow'ui funkcijos praradimai (FN_LOSS) ir verify missing + invalid ≤ aukštupio
-    biudžetas (upstream_budget; be aukštupio sutrikimų — 0), mismatch == 0 visada; kiekvieno sveiko maks. vėlavimas gedimo lange
-    ≤ max_lateness_bad riba; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir po SIGCONT POST_S s be praradimų.
-    Grąžina neatitikimų sąrašą (tuščias — PASS)."""
+def healthy_bad(r):
+    """Sveikų flow'ų vartai (logo ir composite): funkcijos praradimai (FN_LOSS) ir verify missing + invalid ≤ aukštupio
+    biudžetas (upstream_budget; be aukštupio sutrikimų — 0), mismatch == 0 visada; kiekvieno sveiko maks. vėlavimas ir lango
+    p99 gedimo lange ≤ ribos."""
     bad = []
-    fa = r["fn"]["affected"]
     budget = upstream_budget(r)
     hv = healthy_of(r["victim"])
     for n, f in zip(hv, r.get("fn_flows") or []):
@@ -645,6 +646,35 @@ def logo_gate(fault, r):
             bad.append(f"verify sveiko #{n} mismatch={v['mismatch_fields']}")
     bad += max_lateness_bad(r, "out_lateness")
     bad += p99_bad(r, "out_lateness")
+    return bad
+
+
+def composite_gate(fault, r):
+    """fiso_composite: sveikiems — healthy_bad. Paveiktam (jo sluoksnio rašytojas nužudytas; peržiūra 2026-11-13 p. 1 —
+    sluoksnis neprivalomas): išėjimas be spragų (missing_fields, gap_* ir kiti praradimai == 0), layer_absent ≈ indeksų nuo
+    gedimo iki pabaigos (≥ 80 %), verify paveiktam: 0 neatitikimų, 0 missing / invalid, tikrinta ir be sluoksnio
+    (samples_either_absent > 0). Anksčiau paveiktas turėjo missing_fields > 0 ir INVALID spragas — sugedęs sluoksnis nuimdavo
+    programą."""
+    bad = healthy_bad(r)
+    fa, va = r["fn"]["affected"], r["verify"]["affected"]
+    lost = {k: fa[k] for k in FN_LOSS + ("gap_invalid", "gap_frozen", "gap_black") if fa.get(k)}
+    if lost:
+        bad.append(f"paveikto išėjimo spragos / praradimai {lost} (sluoksnis neprivalomas — laukta 0)")
+    want = ((r.get("end_tai") or 0) - (r.get("fault_tai") or 0)) // FIELD_NS
+    if fa.get("layer_absent", 0) < 0.8 * want:
+        bad.append(f"paveikto layer_absent={fa.get('layer_absent', 0)} < 80 % iš {want}")
+    if va.get("mismatch_fields", 0) or va.get("missing", 0) or va.get("invalid", 0):
+        bad.append(f"paveikto verify mismatch={va.get('mismatch_fields', 0)} missing={va.get('missing', 0)} invalid={va.get('invalid', 0)}")
+    if not va.get("samples_either_absent", 0):
+        bad.append("paveikto verify samples_either_absent == 0 (be sluoksnio netikrinta)")
+    return bad
+
+
+def logo_gate(fault, r):
+    """V10 / V11 vartai: sveikiems — healthy_bad; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir po SIGCONT POST_S s
+    be praradimų. Grąžina neatitikimų sąrašą (tuščias — PASS)."""
+    bad = healthy_bad(r)
+    fa = r["fn"]["affected"]
     if not fa.get("missing_fields", 0):
         bad.append("paveikto missing_fields == 0")
     if fault == "kill":
@@ -795,7 +825,7 @@ def probe(out, name, runner, faults):
     for (tag, impl, storage, enc), pos in [(v, p) for v in variants() for p in POSITIONS]:
         tid = f"{name}[{tag}:{pos}]"
         args = (out, tag, impl, storage) + ((enc,) if runner in (run_enc, run_enc_audio) else ())
-        gate = {run_enc: enc_gate, run_enc_audio: enc_audio_gate}.get(runner, logo_gate)
+        gate = {run_enc: enc_gate, run_enc_audio: enc_audio_gate, run_composite: composite_gate}.get(runner, logo_gate)
         use_n("enc" if runner in (run_enc, run_enc_audio) else "other", tag)
         for fault in faults:
             r = runner(*args, fault, pos)

@@ -101,6 +101,36 @@ int verify_composite(const Opts& o, Stats& st) {
     std::vector<gfx::Raster> geom;
     std::string err;
     if (!parse_layer_geoms(o, geom, err)) { st.fatal = err; return 1; }
+    // --layer-absent / --layer-either K:I1-I2 — sluoksnio nebuvimo langai (composite: trūkstamas sluoksnis skaidrus)
+    struct Window {
+        std::uint32_t k;
+        std::uint64_t i1, i2;
+        bool strict;
+        int flow;  // < 0 — visiems flow'ams; kitaip tik flow'ui n (`@N`)
+    };
+    std::vector<Window> windows;
+    for (int strict = 1; strict >= 0; --strict)
+        for (const std::string& w : strict ? o.layer_absent : o.layer_either) {
+            unsigned k = 0, fl = 0;
+            unsigned long long a = 0, b = 0;
+            int used = 0, used2 = 0;
+            const bool parsed = std::sscanf(w.c_str(), "%u:%llu-%llu%n", &k, &a, &b, &used) == 3;
+            const bool at = parsed && static_cast<std::size_t>(used) < w.size() &&
+                            std::sscanf(w.c_str() + used, "@%u%n", &fl, &used2) == 1 && static_cast<std::size_t>(used + used2) == w.size();
+            if (!parsed || (static_cast<std::size_t>(used) != w.size() && !at) || k >= K || b < a || (at && fl >= N)) {
+                st.fatal = std::string(strict ? "--layer-absent" : "--layer-either") + " '" + w +
+                           "': tikimasi K:I1-I2[@N] (K < --layers, I1 <= I2, N < --flows)";
+                return 1;
+            }
+            windows.push_back(Window{k, a, b, strict != 0, at ? static_cast<int>(fl) : -1});
+        }
+    // Sluoksnių kaukės indeksui i: būtinai nėra (absent) ir galbūt nėra (either)
+    auto masks = [&](std::uint32_t n, std::uint64_t i, std::uint32_t& must, std::uint32_t& maybe) {
+        must = maybe = 0;
+        for (const Window& w : windows)
+            if (i >= w.i1 && i <= w.i2 && (w.flow < 0 || static_cast<std::uint32_t>(w.flow) == n)) (w.strict ? must : maybe) |= 1u << w.k;
+        maybe &= ~must;
+    };
     const gfx::Raster base_r{o.fmt.raster.w, o.fmt.raster.h, o.fmt.raster.interlaced, false};
     const bool inter = base_r.interlaced;
     const media::Dim dim{base_r.w, base_r.h};
@@ -149,6 +179,8 @@ int verify_composite(const Opts& o, Stats& st) {
         const std::uint64_t t0 = now_tai();
         const std::uint64_t fr = manual ? (inter ? job.i / 2 : job.i) : 0;
         if (has_base) media::ref::gen_field(gen_params(o, o.flow_base + job.n), job.i, dim, inter, base.data());
+        std::uint32_t must = 0, maybe = 0;
+        masks(job.n, job.i, must, maybe);
         bool ok = true;
         for (std::uint32_t k = 0; k < K && ok; ++k) {
             LayerCache& c = cache[static_cast<std::size_t>(job.n) * K + k];
@@ -167,15 +199,36 @@ int verify_composite(const Opts& o, Stats& st) {
             }
             lay[k] = gfx::Layer{c.grain[parity].data(), g, lx[k], ly[k], lop[k]};
         }
-        ok = ok && gfx::ref::composite(has_base ? reinterpret_cast<const std::uint8_t*>(base.data()) : nullptr, base_r, lay.data(),
-                                       static_cast<int>(K), out_r, parity, exp.data());
+        // Etalonas be `omit` kaukės sluoksnių (composite trūkstamą sluoksnį praleidžia — tvarka išlaikoma)
+        std::vector<gfx::Layer> used;
+        auto compose = [&](std::uint32_t omit) {
+            used.clear();
+            for (std::uint32_t k = 0; k < K; ++k)
+                if (!(omit & (1u << k))) used.push_back(lay[k]);
+            return gfx::ref::composite(has_base ? reinterpret_cast<const std::uint8_t*>(base.data()) : nullptr, base_r, used.data(),
+                                       static_cast<int>(used.size()), out_r, parity, exp.data());
+        };
+        ok = ok && compose(must);
         if (!ok) {  // parametrai nesutampa su etalono sutartimi - patikra neįmanoma; tai klaida, ne tylus praleidimas
             f.inc("expect_failed");
             return;
         }
         w.expect.add(now_tai() - t0);
         f.inc("samples");
-        if (crc32c(exp.data(), out_bytes) == crc32c(job.act.data(), out_bytes)) return;
+        if (must) f.inc("samples_absent");  // tikrinta prieš etaloną be sluoksnio (--layer-absent)
+        const std::uint32_t act_crc = crc32c(job.act.data(), out_bytes);
+        if (crc32c(exp.data(), out_bytes) == act_crc) return;
+        if (maybe) {  // perėjimo langas: priimamas ir etalonas be „galbūt“ sluoksnių
+            if (!compose(must | maybe)) {
+                f.inc("expect_failed");
+                return;
+            }
+            if (crc32c(exp.data(), out_bytes) == act_crc) {
+                f.inc("samples_either_absent");
+                return;
+            }
+            compose(must);  // diagnostikai — pagrindinis etalonas
+        }
         std::uint64_t bad = 0;
         for (std::size_t b = 0; b + 4 <= out_bytes; b += 4)
             if (std::memcmp(exp.data() + b, job.act.data() + b, 4) != 0) ++bad;
