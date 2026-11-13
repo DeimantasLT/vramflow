@@ -174,18 +174,20 @@ TEST_CASE("review6: 3 — interlaced freeze: turinys nelyginiame indekse laikoma
     CHECK_FALSE(res.any_loss);
 }
 
-// --- Punktas 4: enc garso laukimo sutartis -----------------------------------------------------------------------------
-// Kadro garsas baigiamas ties T(j) + P (realaus laiko rašytojas). enc numatytoji riba D = 3P/2 (30 ms prie 50 Hz) ir Wanted
-// garso įėjimas laukiamas ties T + P (EdgeTiming::expect_ns = P): sveikas srautas nėra „vėlus“ kiekvieną kadrą (late == 0),
-// kiekvienas kadras apdorojamas su garsu (be tylos), o kito srauto kadras (garsas iškart) nelaikomas iki a(i).
-TEST_CASE("review6: 4 — garsas ties T + P su expect P: be tylos, ne vėlus, kiti nelaikomi", "[engine][review6][audio]") {
+// --- Punktas 4: enc garso laukimo sutartis — dabar briaunos sutarties atvejis (V24, K-T10) -----------------------------
+// Kadro garsas baigiamas ties T(j) + P (realaus laiko rašytojas): garso įėjimas skelbia expect P, todėl variklio fazė E = P
+// (viena fazė varikliui) ir tick'as atidaromas ties T + P + ro — VISI vienetai (ir tas, kurio garsas ateina iškart) apdorojami
+// A fazėje su garsu, niekas nevėlus, riba D = 3P/4 skaičiuojama nuo T + E (atskiros enc ribos 3P/2 nebėra).
+// Pakeistas lūkestis (V24): anksčiau (atskira taisyklė, D = 3P/2) srautas su garsu iškart apdorojamas ties T + 1,3 ms; pagal
+// K-T10 skirtingo gylio įėjimai viename variklyje gauna didžiausią vėlinimą (rizika R11, dokumentuota).
+TEST_CASE("review6: 4 — garsas ties T + P su expect P: fazė E = P, be tylos, niekas nevėlus", "[engine][review6][audio]") {
     constexpr std::int64_t kP = 20'000'000;
     VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
     RecordingFunction fn(clk);
     StatsHub hub;
     std::atomic<bool> stop{false};
     EngineConfig cfg = Rig::test_config();
-    cfg.cuts.deadline_ns = 3 * kP / 2;  // enc numatytoji (peržiūra 2026-11-13 p. 4)
+    // numatytoji D = 3P/4 (nuo T + E) — atskiros enc ribos nebėra
     std::vector<std::unique_ptr<ScriptedInput>> video, audio;
     for (int u = 0; u < 2; ++u) {
         video.push_back(std::make_unique<ScriptedInput>(clk));
@@ -226,16 +228,17 @@ TEST_CASE("review6: 4 — garsas ties T + P su expect P: be tylos, ne vėlus, ki
         INFO("i = " << i);
         REQUIRE(seen.count({0, i}) == 1);
         CHECK(seen[{0, i}].audio);  // garsas yra — ne tyla
-        CHECK(seen[{0, i}].at == kP + 300'000);  // apdorojama garso atėjimu
+        CHECK(seen[{0, i}].phase == 0);
+        CHECK(seen[{0, i}].at == kP + 500'000);  // t_open = T + E + ro: garsas jau commit'intas (T + P + 0,3 ms)
         REQUIRE(seen.count({1, i}) == 1);
         CHECK(seen[{1, i}].audio);
-        // kitas srautas nelaikomas iki a(i) = T + 5,5 ms: apdorojamas savo garso atėjimu (A nelaukia garso, laukiamo ties T + P,
-        // todėl vienetas su garsu iškart pateks į B fazę — ne laikymas)
-        CHECK(seen[{1, i}].at == 1'300'000);
+        CHECK(seen[{1, i}].phase == 0);
+        CHECK(seen[{1, i}].at == kP + 500'000);  // viena fazė varikliui (K-T10)
         ++n0;
     }
     CHECK(n0 == 40);
     const InCounters& a0 = hub.in(eng.in_id(0, 1));
+    CHECK(eng.expect_ns() == kP);
     CHECK(a0.late == 0);  // laukiamas ties T + P — laiku
     CHECK(a0.lost == 0);
     CHECK_FALSE(res.any_loss);

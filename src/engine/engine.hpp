@@ -15,6 +15,7 @@
 
 #include "engine/clock.hpp"
 #include "engine/cuts.hpp"
+#include "engine/edge.hpp"
 #include "engine/gap_state.hpp"
 #include "engine/ports.hpp"
 #include "engine/stats.hpp"
@@ -182,6 +183,11 @@ public:
     bool unit_ever_failed(std::uint32_t unit) const;
     Index unit_fail_index(std::uint32_t unit) const;  // pirmo gedimo indeksas (kNoIndex — nesugedo); testų apskaitai
     bool in_late(std::uint32_t unit, std::uint32_t input) const;
+    // Briaunos sutartis (§6 D7, V24): variklio fazė Φ = E + ro, E = max(EngineConfig::cuts.expect_ns, įėjimų expect_ns)
+    // (viena fazė varikliui, K-T10; galioja po add_unit) ir vieneto išėjimų skelbiamos reikšmės (commit_bound — riba, K-T14).
+    std::int64_t phase_ns() const;
+    std::int64_t expect_ns() const;
+    OutputTiming output_timing(std::uint32_t unit) const;
 
 private:
     friend class TickContext;

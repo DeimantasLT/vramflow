@@ -20,9 +20,13 @@ struct GrainRef {
     const void* ptr = nullptr;
     std::uint32_t flags = 0;
 };
+// Briaunos sutartis (§6 D7, V24; engine/edge.hpp): expect_ns — aukštupio skelbiama commit'o riba po T(j) (žyma
+// commit-bound-ns arba --input-expect-ms); variklio fazė E = max(expect_ns) per visus įėjimus. content_delay_ns — aukštupio
+// turinio vėlinimas (žyma content-delay-ns), išėjimo content_delay skaičiuoti.
 struct EdgeTiming {
     std::int32_t index_offset = 0;  // ≤ 0: įėjimo indeksas j = i + index_offset
     std::int64_t expect_ns = 0;
+    std::int64_t content_delay_ns = 0;
 };
 
 // Flow adresas (domenas, flow UUID). Planas nurodo runtime::FlowRef iš [P] E0 — jo dar nėra, todėl kol kas čia.

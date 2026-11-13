@@ -45,6 +45,7 @@ public:
     std::uint32_t slots = 10;
 
     std::uint64_t waits = 0, probes = 0, alive_calls = 0, attach_calls = 0;
+    Index last_probe = kNoIndex;  // paskutinis probe(j) indeksas (index_offset testams)
 
     bool attach_poll(std::uint64_t now) override {
         ++attach_calls;
@@ -74,6 +75,7 @@ public:
     }
     Probe probe(Index j, GrainRef& out) override {
         ++probes;
+        last_probe = j;
         if (gone && gone(clk_.now_tai())) return Probe::Gone;
         const Index h = head();
         if (h == kNoIndex || j > h) return Probe::NotYet;

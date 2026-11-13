@@ -197,6 +197,9 @@ struct TickEngine::Impl {
     bool after_a(const Unit& u, const In& in) const {
         return in.spec.timing.expect_ns > 0 && T(jidx(u, in)) + in.spec.timing.expect_ns > recs[u.cur & 1].cuts.a;
     }
+    // Įėjimo laukimas po variklio fazės: max(0, expect_ns − E). Kai E = max(expect_ns) (add_unit) — visada 0; lieka tam, kad
+    // aukštupio riba niekada nebūtų pridėta du kartus (a(i) jau turi E).
+    std::int64_t extra_expect(const In& in) const { return std::max<std::int64_t>(0, in.spec.timing.expect_ns - cfg.cuts.expect_ns); }
     // Kaip ready(u, false), bet be įėjimų, kurie pagal sutartį ateina po A ribos (A laukimo sprendimui).
     bool ready_a(const Unit& u) const {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
@@ -775,7 +778,7 @@ struct TickEngine::Impl {
             In& in = ins[u.in0 + k];
             InCounters& c = hub.in(in.hub);
             if (in.ok) {
-                in.st.on_ready(c, in.ready_at <= r.cuts.a + in.spec.timing.expect_ns);  // laiku — pagal briaunos sutartį
+                in.st.on_ready(c, in.ready_at <= r.cuts.a + extra_expect(in));  // laiku — pagal briaunos sutartį
             } else if (!in.done && in.spec.need == Need::Wanted && in.st.live()) {
                 if (in.st.on_missed(c)) in.st.note_head(in.spec.port->head());
             }
@@ -1133,7 +1136,7 @@ struct TickEngine::Impl {
                     const Index h = in.spec.port->head();
                     const auto lw = static_cast<std::int64_t>(in.spec.port->last_write_tai());
                     const std::int64_t ready_at = (h == j && lw > 0) ? lw : T(j);  // h > j — atėjo anksčiau už head'ą
-                    in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a + in.spec.timing.expect_ns);
+                    in.st.on_ready(c, ready_at <= cuts_for(j, cfg.cuts).a + extra_expect(in));
                 } else if (p == Probe::Invalid) {
                     in.st.on_invalid_grain(c);
                 } else if (p == Probe::Gone) {  // flow atkurtas / ištrintas — kaip ir kitur: Detached, prisijungs iš naujo
@@ -1410,10 +1413,12 @@ bool TickEngine::add_unit(const UnitSpec& s, std::uint32_t& unit, std::string& w
         return false;
     }
     for (const InputSpec& i : s.in)
-        if (i.port == nullptr || i.grains == 0 || i.timing.index_offset > 0) {
+        if (i.port == nullptr || i.grains == 0 || i.timing.index_offset > 0 || i.timing.expect_ns < 0) {
             why = "įėjimo aprašas";
             return false;
         }
+    // Briaunos sutartis (§6 D7, K-T10): viena fazė varikliui — E = max(expect_ns) per visus įėjimus
+    for (const InputSpec& i : s.in) d.cfg.cuts.expect_ns = std::max(d.cfg.cuts.expect_ns, i.timing.expect_ns);
     for (const OutputPort* o : s.out)
         if (o == nullptr) {
             why = "išėjimas nullptr";
@@ -1469,6 +1474,21 @@ bool TickEngine::unit_ever_failed(std::uint32_t unit) const { return d_->units[u
 Index TickEngine::unit_fail_index(std::uint32_t unit) const { return d_->units[unit].fail_index; }
 bool TickEngine::in_late(std::uint32_t unit, std::uint32_t input) const {
     return d_->ins[d_->units[unit].in0 + input].st.late();
+}
+
+std::int64_t TickEngine::phase_ns() const { return engine::phase_ns(d_->cfg.cuts); }
+std::int64_t TickEngine::expect_ns() const { return d_->cfg.cuts.expect_ns; }
+OutputTiming TickEngine::output_timing(std::uint32_t unit) const {
+    const Impl::Unit& u = d_->units[unit];
+    EdgeTiming e[64];
+    std::int64_t cd = 0;
+    // content_delay — be alokacijų: įėjimai gabalais po 64
+    for (std::uint32_t k0 = 0; k0 < u.nin; k0 += 64) {
+        const std::uint32_t n = std::min<std::uint32_t>(64, u.nin - k0);
+        for (std::uint32_t k = 0; k < n; ++k) e[k] = d_->ins[u.in0 + k0 + k].spec.timing;
+        cd = std::max(cd, content_delay_ns(std::span<const EdgeTiming>(e, n), d_->cfg.cuts.rate));
+    }
+    return OutputTiming{commit_bound_ns(d_->cfg.cuts, u.nin == 0), cd};
 }
 
 }  // namespace mxlv::engine
