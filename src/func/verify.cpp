@@ -10,7 +10,8 @@
 //                       kaip composite / gfxgen); grandinės (--layer-flow) nepalaikomos;
 //    abiem — barkodas (indeksas, paritetas, flow) == laukiamas;
 //  * INVALID grain'as (peržiūra 2026-11-13 p. 2): turinys tikrinamas kaip žymės nepaisančio skaitytojo — jis turi būti juodas
-//    (v210: Y 64 / C 512; v210a: ir key 0): invalid_black / invalid_not_black (pastarasis — verifikacijos klaida);
+//    (v210: Y 64 / C 512; v210a: ir key 0): invalid_black / invalid_not_black (pastarasis — verifikacijos klaida). Rašytojo
+//    praleistas indeksas (MXL INVALID su validSlices 0 — turinys senas, D4) — invalid_skipped, ne klaida;
 //  * mode=audio — gen garso flow'ai: kiekvienas blokas == gen garsas arba tyla (audio_ok / silence), kita — audio_bad.
 // Lap patikra po D2H: jei writer'is galėjo perrašyti slot'ą kopijavimo metu, imtis atmetama (sample_lapped).
 #include <cuda_runtime_api.h>
@@ -66,8 +67,14 @@ bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint3
 namespace {
 // INVALID grain'o turinys — juodas? Tikrinamas kas o.every-tas (kaip imtys); D2H tik tada. Neatitikimas — verifikacijos klaida
 // (žymės nepaisantis skaitytojas rodytų pasenusį ring'o kadrą).
+// D4: rašytojo praleistas indeksas (MXL INVALID, validSlices 0, senas turinys) — invalid_skipped, ne klaida: juodą neša tik
+// VRAMFlow commit'intos spragos.
 void check_invalid_payload(const VideoIn& v, const std::uint32_t* p, const std::vector<std::uint8_t>& black, std::uint64_t i,
-                           FlowStats& f, std::vector<std::uint8_t>& buf) {
+                           FlowStats& f, std::vector<std::uint8_t>& buf, const mxlGrainInfo& info) {
+    if (invalid_kind(info) == InvalidKind::Skipped) {
+        f.inc("invalid_skipped");
+        return;
+    }
     buf.resize(black.size());
     if (v.cuda) {
         if (cudaMemcpy(buf.data(), p, buf.size(), cudaMemcpyDeviceToHost) != cudaSuccess) {
@@ -314,7 +321,7 @@ int verify_composite(const Opts& o, Stats& st) {
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
             if (info.flags & MXL_GRAIN_FLAG_INVALID) {
                 f.inc("invalid");
-                if ((i + n) % o.every == 0) check_invalid_payload(out[n], p, black, i, f, ibuf);
+                if ((i + n) % o.every == 0) check_invalid_payload(out[n], p, black, i, f, ibuf, info);
                 continue;
             }
             f.inc("present");
@@ -569,7 +576,7 @@ int run_verify(const Opts& o_in) {
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
             if (info.flags & MXL_GRAIN_FLAG_INVALID) {
                 f.inc("invalid");
-                if ((i + n) % o.every == 0) check_invalid_payload(out[n].in(), p, black_v210, i, f, ibuf);
+                if ((i + n) % o.every == 0) check_invalid_payload(out[n].in(), p, black_v210, i, f, ibuf, info);
                 continue;
             }
             f.inc("present");

@@ -39,10 +39,16 @@
  *     INVALID grain (see GAPS). Observable for a 0.2 client: stats.last_committed_index is no longer
  *     VFGFX_INDEX_NONE before the first frame, and vfgfx_write after vfgfx_stop_pacing needs an index above the last
  *     INVALID grain the thread committed (not only above the last frame). stats.no_frame counts those grains.
- *   - INVALID grains carry a payload: transparent black (fill Y 64 / Cb Cr 512, key 0), written once per ring slot,
- *     so a reader that ignores the flag never sees stale or random slot memory. Content grains are unchanged.
+ *   - INVALID grains that the library COMMITS (no current frame; flags INVALID, validSlices == totalSlices) carry a
+ *     payload: transparent black (fill Y 64 / Cb Cr 512, key 0), written once per ring slot. Indices the pacer never
+ *     committed at all (the thread woke more than a grain late and skipped them, stats.late_skips; not filled while
+ *     late) are marked INVALID by MXL itself when the next index is opened: validSlices == 0 and the payload is the
+ *     OLD slot content. A reader that ignores the flag can therefore still see a stale grain after a skip; check
+ *     MXL_GRAIN_FLAG_INVALID (or validSlices) on every grain. Content grains are unchanged.
  *   - New field vfgfx_stats.last_frame_index (in former reserved space; sizeof(vfgfx_stats) unchanged): the last index
  *     committed WITH a frame, VFGFX_INDEX_NONE before the first one; last_committed_index also counts INVALID grains.
+ *     A client built against 0.3 must check vfgfx_version() >= 0.3 before relying on it: a 0.2 library with the same
+ *     SONAME leaves the field 0 (formerly reserved), which is a valid-looking index.
  *  0.2.0 — ABI epoch 1 (SONAME .so.1, symbol node VFGFX_1), extensible structs, vfgfx_submit_at, BGRA, CUDA frames.
  *
  * WRITER LIFETIME

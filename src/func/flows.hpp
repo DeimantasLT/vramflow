@@ -67,6 +67,15 @@ struct ClockWatch {
 // plokštuma — 0 (skaidru). Dydis — gfx::grain_bytes(r). Bendras variklio spragoms, INVALID turiniui ir bibliotekai.
 std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r);
 
+// INVALID grain'o kilmė (peržiūra D4): Committed — rašytojas jį commit'ino kaip spragą (VideoOut::commit_invalid: validSlices ==
+// totalSlices, VRAMFlow turinys juodas); Skipped — rašytojas šio indekso niekada necommit'ino (praleido: vėlavo / stringo,
+// K-T6), MXL jį pažymėjo INVALID atidarydamas vėlesnį indeksą (validSlices == 0, turinys — senas slot'o kadras); None — ne INVALID.
+enum class InvalidKind { None, Committed, Skipped };
+inline InvalidKind invalid_kind(const mxlGrainInfo& g) {
+    if ((g.flags & MXL_GRAIN_FLAG_INVALID) == 0) return InvalidKind::None;
+    return g.validSlices >= g.totalSlices && g.totalSlices > 0 ? InvalidKind::Committed : InvalidKind::Skipped;
+}
+
 // Plokštumų išdėstymas prieš rastrą: planeCount, fill poslinkis 0, key iškart po fill (poslinkis = fill_bytes), dydžiai ir
 // pitch = eilučių ilgiai. Tuščias tekstas — tinka; kitaip klaidos aprašas. Naudoja VideoOut::create ir VideoIn::open.
 std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r);

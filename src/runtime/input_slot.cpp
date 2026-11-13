@@ -127,6 +127,20 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
             return state_;
         }
     }
+    // Pirmas prisijungimas (peržiūra D6): ta pati taisyklė — tik flow'as, kuris RAŠOMAS (lastWriteTime ne senesnis kaip
+    // kStaleNs arba head pajudėjo nuo ankstesnio bandymo). Kitaip nužudyto gamintojo pasenęs flow + kito skaitytojo flock
+    // („gyvas“ mxlIsFlowActive) būtų prijungtas ir pirmi tick'ai skaitytų seną ring'ą.
+    if (state_ == State::Waiting) {
+        mxlFlowRuntimeInfo rt{};
+        const bool info = mxlFlowReaderGetRuntimeInfo(fresh.r, &rt) == MXL_STATUS_OK;
+        const bool recent = info && rt.lastWriteTime + kStaleNs >= now_tai_ns;
+        const bool moved = waiting_head_ != 0 && h > waiting_head_;
+        waiting_head_ = h;
+        if (!(recent || moved)) {
+            fresh.release(inst);
+            return state_;
+        }
+    }
     in_ = std::move(fresh);
     if (!have_want_) {
         want_ = in_.fmt;

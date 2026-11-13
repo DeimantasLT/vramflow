@@ -38,6 +38,7 @@ public:
     enum class State { Waiting, Attached, Detached, Mismatch };
     static constexpr std::uint64_t kRetryNs = 100'000'000;  // prisijungimo bandymas ne dažniau kaip kas 100 ms
     static constexpr std::uint64_t kAliveNs = 10'000'000;   // gyvumo patikra po 10 ms TOO_EARLY iš eilės, tada kas 10 ms
+    static constexpr std::uint64_t kStaleNs = 1'000'000'000;  // pirmas prisijungimas: lastWriteTime ne senesnis (D6)
 
     InputSlot(std::string flow_id, const vramflow::VideoFormat* expect, FormatChange on_change);
     InputSlot(InputSlot&& o) noexcept;  // perkeltas slot'as reader'io nebeturi (neatlaisvina dar kartą)
@@ -92,6 +93,7 @@ private:
     std::uint64_t early_since_ = 0;  // nuo kada grain'o nėra (TOO_EARLY iš eilės); 0 — paskutinis skaitymas pavyko
     std::uint64_t reattached_ = 0;
     std::uint64_t detach_head_ = 0, detach_tai_ = 0;  // paskutinio atjungimo head ir momentas (re-attach sąlygai)
+    std::uint64_t waiting_head_ = 0;  // Waiting: head ankstesniame bandyme (pirmo prisijungimo „rašomas“ sąlygai)
     std::string reason_;
 };
 

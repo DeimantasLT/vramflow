@@ -291,6 +291,65 @@ TEST_CASE("gap_policy: INVALID grain'as — žymė IR juodas turinys, juoda kart
     o.release(d.inst);
 }
 
+// Peržiūra D4: INVALID ne visada juodas. VRAMFlow commit'inta spraga — INVALID, validSlices == totalSlices, juodas turinys;
+// indeksas, kurio rašytojas NIEKADA necommit'ino (praleido — vėlavo / stringo, K-T6), MXL pažymimas INVALID, kai rašytojas
+// atidaro vėlesnį indeksą: validSlices == 0, turinys — senas slot'o kadras. invalid_kind juos atskiria (verify: invalid_skipped
+// — ne klaida; invalid_not_black — tik VRAMFlow spragai).
+TEST_CASE("gap_policy: INVALID — VRAMFlow spraga (juoda) ir rašytojo praleistas indeksas (senas turinys) atskiriami", "[func][gap][mxl]") {
+    Domain d(23);
+    VideoOut o;
+    std::string err;
+    REQUIRE(o.create(d.inst, func::video_def(func::kRoleLogo, 3, 1, k1080i), opts_for(false), err, k1080i));
+    o.id = func::flow_id(func::kRoleLogo, 3);
+    GapFill gf(GapPolicy::Invalid, false);
+    REQUIRE(gf.prepare(o.raster, err));
+    MxlVideoOutput port(o, gf.copy(), gf.flush(), gf.black(o.raster));
+    const std::uint32_t n = o.layout.slotCount;
+    Index i = 2000;
+    for (std::uint32_t k = 0; k < n; ++k) REQUIRE(commit_pattern(port, i++, false));
+    REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));  // VRAMFlow spraga: i0
+    const Index gap = i - 1;
+    const Index skipped = i;  // rašytojas šio indekso nekomitina (variklio praleidimas)
+    ++i;
+    REQUIRE(commit_pattern(port, i++, false));
+    Reader r(d.inst, o.id);
+    mxlGrainInfo gi{}, si{}, ci{};
+    const std::uint32_t* p = nullptr;
+    REQUIRE(r.in.get(gap, 0, gi, p) == MXL_STATUS_OK);
+    REQUIRE(r.in.get(skipped, 0, si, p) == MXL_STATUS_OK);
+    REQUIRE(r.in.get(i - 1, 0, ci, p) == MXL_STATUS_OK);
+    CHECK((gi.flags & MXL_GRAIN_FLAG_INVALID) != 0);
+    CHECK((si.flags & MXL_GRAIN_FLAG_INVALID) != 0);
+    CHECK(func::invalid_kind(gi) == func::InvalidKind::Committed);
+    CHECK(func::invalid_kind(si) == func::InvalidKind::Skipped);
+    CHECK(func::invalid_kind(ci) == func::InvalidKind::None);
+    std::uint32_t fl = 0;
+    CHECK(read_grain(r.in, gap, &fl) == black_grain(o.raster));
+    CHECK(read_grain(r.in, skipped, &fl) != black_grain(o.raster));  // senas slot'o kadras (todėl ne klaida, o invalid_skipped)
+    o.release(d.inst);
+}
+
+// Peržiūra D6: pirmas prisijungimas — tik prie RAŠOMO flow'o (lastWriteTime ≤ 1 s arba head pajudėjo), kaip re-attach.
+TEST_CASE("input_slot: pirmas prisijungimas — ne prie pasenusio flow'o, prisijungia, kai jis vėl rašomas", "[func][mxl][input_slot]") {
+    Domain d(24);
+    VideoOut o;
+    std::string err;
+    REQUIRE(o.create(d.inst, func::video_def(func::kRoleGen, 4, 1, k1080i), opts_for(false), err, k1080i));
+    o.id = func::flow_id(func::kRoleGen, 4);
+    GapFill gf(GapPolicy::Invalid, false);
+    REQUIRE(gf.prepare(o.raster, err));
+    MxlVideoOutput port(o, gf.copy(), gf.flush(), gf.black(o.raster));
+    const Index i0 = mxlGetCurrentIndex(&func::kFieldRate);
+    REQUIRE(commit_pattern(port, i0, false));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));  // flow'as nebeRašomas > kStaleNs
+    runtime::InputSlot s(o.id, &k1080i, runtime::FormatChange::Exit);
+    CHECK(s.poll(d.inst, mxlGetTime()) == runtime::InputSlot::State::Waiting);  // pasenęs — neprijungiamas
+    REQUIRE(commit_pattern(port, i0 + 70, false));                             // vėl rašomas
+    CHECK(s.poll(d.inst, mxlGetTime() + runtime::InputSlot::kRetryNs) == runtime::InputSlot::State::Attached);
+    CHECK(s.reattached() == 0);
+    s.release();
+    o.release(d.inst);
+}
 
 namespace {
 // Šaltinis be turinio (dec underrun / ritmas be submit modelis): kiekvienam indeksui no_content → spraga atidarymo metu;
