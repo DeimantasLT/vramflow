@@ -13,7 +13,10 @@
 namespace mxlv::engine {
 
 enum class Probe : std::uint8_t { Ready, Invalid, NotYet, TooLate, Gone, Error };
-enum class Need : std::uint8_t { Required, Wanted, Optional };  // Wanted: laukiama, bet vienetas tęsia be jo (enc garsas)
+// Wanted: laukiama iki vieneto paskutinės ribos, tada be jo (enc garsas). UntilA: laukiama TIK iki a(i) ir tik kol įėjimas
+// nėra Late — vėluojantis ar neparuoštas ties a(i) tam indeksui nenaudojamas (composite sluoksnis, peržiūra D2): vieneto
+// commit'o riba ir programos vėlavimas nuo jo nepriklauso. Optional: nelaukiama visai.
+enum class Need : std::uint8_t { Required, Wanted, Optional, UntilA };
 enum class InMode : std::uint8_t { Exact, Latest };             // Latest: naujausias ne vėlesnis nei j (mv plytelė)
 
 struct GrainRef {

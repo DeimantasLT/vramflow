@@ -123,6 +123,7 @@ struct CompositeFn final : engine::TickFunction {
     std::vector<std::uint64_t> seen_reatt;
     std::vector<Check> check;             // sluoksnio patikra; indeksas — įėjimo a
     std::vector<std::uint8_t> present;    // sluoksnis naudojamas (1) / skaidrus (0); pradžioje 1 — pirmas trūkumas praneša
+    std::vector<std::uint32_t> ready_run;  // nesant: kadrų iš eilės, kai sluoksnis paruoštas (grįžimo histerezė, D3)
     std::vector<std::string> absent_key;  // "layer_absent_<k>"
     std::vector<std::string> seen_reason;  // sluoksnio slot'o paskutinė atmetimo priežastis (formato pokyčio įvykiui)
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
@@ -134,7 +135,7 @@ struct CompositeFn final : engine::TickFunction {
         : o(o_), st(st_), hub(hub_), eng(eng_), in(in_), cpu(cpu_), host_gpu(host_gpu_), has_base(has_base_), K(K_), per(per_), lx(lx_),
           ly(ly_), lop(lop_), lay(lay_), out_r(out_r_), s_in(s_in_), s_out(s_out_), pool(pool_), stream(stream_), warm(warm_),
           seen(in_.size()), seen_reatt(in_.size(), 0), check(in_.size(), Check::Unknown), present(in_.size(), 1),
-          seen_reason(in_.size()) {
+          ready_run(in_.size(), 0), seen_reason(in_.size()) {
         jobs.reserve(o.flows);
         job_out.reserve(o.flows);
         host_dst.reserve(o.flows);
@@ -206,18 +207,25 @@ struct CompositeFn final : engine::TickFunction {
             }
     }
 
-    // Ar sluoksnis k naudojamas išėjimo n indekse i (ref — variklio grain'as). Trūkstamas — skaidrus: skaitiklis ir įvykis
-    // būsenos pokyčiui; grįžęs — interlaced rastre nuo lyginio indekso (kadro riba), kitaip iškart.
+    // Ar sluoksnis k naudojamas išėjimo n indekse i (ref — variklio grain'as). Trūkstamas — skaidrus: skaitiklis ir VIENAS
+    // įvykis būsenos pokyčiui (peržiūra D3). Grįžimas — tik kadro riba (interlaced: lyginis indeksas, abu laukai su tuo pačiu
+    // sluoksnių rinkiniu) ir tik po --layer-return-frames kadrų iš eilės, kai sluoksnis paruoštas (histerezė: ties riba
+    // „plaukiojantis“ sluoksnis nemirksi kas kadrą). Išnykimas — iškart (to lauko turinio nėra; jei trūksta tik apatinio lauko,
+    // viršutinis jau commit'intas su sluoksniu — vienas kadras perėjime neišvengiamas be kadro vėlinimo).
     bool use_layer(std::uint32_t n, std::uint32_t k, engine::Index i, const engine::GrainRef& ref) {
         const std::size_t a = layer_in(n, k);
         const bool invalid = (ref.flags & MXL_GRAIN_FLAG_INVALID) != 0;
         const bool avail = check[a] == Check::Ok && ref.ptr != nullptr && !invalid;
-        if (avail && !present[a] && (!out_r[n].interlaced || (i & 1) == 0)) {
+        const bool frame_start = !out_r[n].interlaced || (i & 1) == 0;
+        if (!present[a] && frame_start) ready_run[a] = avail ? ready_run[a] + 1 : 0;
+        if (avail && !present[a] && frame_start && ready_run[a] >= std::max<std::uint32_t>(1, o.layer_return_frames)) {
             present[a] = 1;
+            ready_run[a] = 0;
             hub.event(engine::EventKind::LayerPresent, eng.in_id(n, layer_slot(k)), now_tai(), i, static_cast<std::int64_t>(k),
                       "sluoksnis vėl naudojamas");
         } else if (!avail && present[a]) {
             present[a] = 0;
+            ready_run[a] = 0;
             const char* why = check[a] == Check::Rejected ? "sluoksnis atmestas — skaidrus"
                               : check[a] == Check::Unknown ? "sluoksnis neprisijungęs — skaidrus"
                               : invalid                    ? "sluoksnio grain'as INVALID — skaidrus"
@@ -539,7 +547,7 @@ int run_composite(const Opts& o) {
         // bazė — Required (jos nėra → spraga pagal --on-loss); sluoksniai — Wanted: laukiami iki vieneto ribos, tada be jų (skaidrūs)
         for (std::uint32_t s = 0; s < per; ++s)
             u.in.push_back(engine::InputSpec{&ports_in[n * per + s], edges[n * per + s].t, 1,
-                                             has_base && s == 0 ? engine::Need::Required : engine::Need::Wanted, engine::InMode::Exact});
+                                             has_base && s == 0 ? engine::Need::Required : engine::Need::UntilA, engine::InMode::Exact});
         u.out.push_back(&ports_out[n]);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }

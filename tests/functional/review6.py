@@ -49,7 +49,9 @@ def verify_args(base, ofmt, dur, v, windows):
     for kind, k, a, b in windows:
         w += [f"--layer-{kind}", f"{k}:{a}-{b}"]
     return ["--mode", "composite", "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--gfx-mode", "pace", "--base", base,
-            "--out-format", ofmt, "--every", 2, "--duration", dur, "--warmup", 1, "--layer-xy", "1488,64", "--opacity", "0.7",
+            # --every 3 (ne 2): imtys ir lyginiuose, ir NElyginiuose (apatiniuose) laukuose — sluoksnio rinkinys turi sutapti abiem
+            # kadro laukams (peržiūra D3; su --every 2 flow'ui 0 buvo tikrinami tik viršutiniai laukai)
+            "--out-format", ofmt, "--every", 3, "--duration", dur, "--warmup", 1, "--layer-xy", "1488,64", "--opacity", "0.7",
             *w, *v]
 
 

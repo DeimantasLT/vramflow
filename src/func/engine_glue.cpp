@@ -263,6 +263,15 @@ void EngineStats::finish() {
 }
 
 int engine_rc(const engine::RunResult& r, Stats& st) {
+    // Diagnostika (C2): pirmų tick'ų atidarymo vėlavimas — „[engine] opens: late_us[/skips] …“ į stderr
+    if (const char* t = std::getenv("VRAMFLOW_TRACE_OPENS"); t && *t == '1') {
+        std::string s = "[engine] opens:";
+        for (std::uint32_t k = 0; k < r.traced_opens; ++k) {
+            s += ' ' + std::to_string(r.open_late_us[k]);
+            if (r.open_skips[k]) s += '/' + std::to_string(r.open_skips[k]);
+        }
+        std::fprintf(stderr, "%s\n", s.c_str());
+    }
     switch (r.reason) {
         case engine::EndReason::Fatal:
             if (st.fatal.empty()) st.fatal = r.fatal;

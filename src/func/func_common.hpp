@@ -112,6 +112,9 @@ struct Opts {
     std::string base = "gen";             // gen | none
     std::string out_format = "v210";      // v210 | v210a
     std::vector<std::string> layer_flow;  // "k:UUID" — k-tojo sluoksnio (0-based) flow ID perrašymas
+    // Sluoksnio grįžimo histerezė (peržiūra D3): išnykęs sluoksnis vėl naudojamas tik po tiek kadrų iš eilės, kai jis paruoštas
+    // iki a(i) (1 — iškart nuo kito kadro).
+    std::uint32_t layer_return_frames = 12;
     // verify
     std::string mode = "logo";
     std::uint32_t every = 25;

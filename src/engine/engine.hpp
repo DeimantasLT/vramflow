@@ -161,6 +161,12 @@ struct RunResult {
     std::uint64_t unit_failures = 0, unit_recoveries = 0, unit_retries = 0;  // per visą paleidimą (įvykiai)
     std::string failed_why;          // pirmo sugedusio vieneto priežastis (santraukai)
     std::string warn;                // ne fatalūs įspėjimai (pvz. --rt-priority be teisių)
+    // Diagnostika (pirmų tick'ų pabudimas, C2): pirmų kTraceOpens tick'ų atidarymo vėlavimas (dabar − t_open, µs) ir prieš tą
+    // atidarymą praleistų indeksų skaičius (T11). Pildoma visada (be alokacijų), spausdina glue (VRAMFLOW_TRACE_OPENS=1).
+    static constexpr std::uint32_t kTraceOpens = 128;
+    std::int32_t open_late_us[kTraceOpens] = {};
+    std::uint16_t open_skips[kTraceOpens] = {};
+    std::uint32_t traced_opens = 0;
 };
 
 class TickEngine {

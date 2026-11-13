@@ -425,11 +425,14 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
                     "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", RUN_S, "--warmup", WARM_S, *v)
         if not F.wait_flows(d, [F.role_flow_id(6, n) for n in range(N)], 30):
             return {"err": "composite išėjimo flow'ai neatsirado"}
-        # Paveikto flow'o sluoksnis nužudomas: jis skaidrus (peržiūra 2026-11-13 p. 1) — paveiktam priimamas ir etalonas be
-        # sluoksnio (--layer-either …@victim, bitas į bitą); sveikiems — tik su sluoksniu (griežtai, kaip anksčiau).
+        # Paveikto flow'o sluoksnis nužudomas: jis skaidrus (peržiūra 2026-11-13 p. 1). Peržiūra D3: „bet kuris“ langas — tik
+        # perėjimas (planuotas nužudymo momentas ± 1 s), prieš jį — griežtai SU sluoksniu, po jo — griežtai BE sluoksnio
+        # (anksčiau --layer-either visam paveikto flow'o paleidimui); sveikiems — tik su sluoksniu (kaip anksčiau).
+        kill_idx = int((time.clock_gettime(time.CLOCK_TAI) + FAULT_AT - (time.monotonic() - t0)) * 50)
         va = F.FProc(out, sub, "verify", d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo",
                      "--gfx-mode", "pace", "--base", "gen", "--out-format", "v210", "--every", 5, "--duration", VERIFY_S,
-                     "--warmup", 1, *xy, "--opacity", "1.0", "--layer-either", f"0:0-{1 << 62}@{victim}", *F.vimpl(impl, storage))
+                     "--warmup", 1, *xy, "--opacity", "1.0", "--layer-either", f"0:{kill_idx - 50}-{kill_idx + 50}@{victim}",
+                     "--layer-absent", f"0:{kill_idx + 51}-{1 << 62}@{victim}", *F.vimpl(impl, storage))
         mark_ready()
         t_fault = apply_fault(fault, xb, t0)
         rv = va.wait(timeout=VERIFY_S + 60)
@@ -951,6 +954,8 @@ def with_cpusets(fn, default=""):
     return run
 
 
-TESTS = {k: with_cpusets(v, "split" if k == "fiso_teeth" else "") for k, v in {
+# Peržiūra D7: vartai ir jų „dantys“ — TOMIS PAČIOMIS sąlygomis (gamintojai ir tikrinama funkcija atskiruose branduoliuose
+# visiems; anksčiau — tik fiso_teeth, todėl dantys buvo rodomi kitomis sąlygomis nei vartai). FISO_CPUSETS= — be susiejimo.
+TESTS = {k: with_cpusets(v, "split") for k, v in {
     "fiso_teeth": fiso_teeth, "fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite,
     "fiso_enc": fiso_enc, "fiso_enc_audio": fiso_enc_audio}.items()}

@@ -206,6 +206,7 @@ struct TickEngine::Impl {
             const In& in = ins[u.in0 + k];
             if (in.ok || in.spec.need == Need::Optional || after_a(u, in)) continue;
             if (in.spec.need == Need::Wanted && in.done) continue;
+            if (in.spec.need == Need::UntilA && (in.done || in.st.late())) continue;
             return false;
         }
         return true;
@@ -229,6 +230,8 @@ struct TickEngine::Impl {
             const In& in = ins[u.in0 + k];
             if (in.ok || in.spec.need == Need::Optional) continue;
             if (in.spec.need == Need::Wanted && (in.done || final_cut)) continue;  // paskutinė riba — be jo
+            // UntilA: po a(i) (ar Late — nelaukiamas visai) vienetas tęsia be jo
+            if (in.spec.need == Need::UntilA && (in.done || final_cut || in.st.late() || recs[u.cur & 1].a_done)) continue;
             return false;
         }
         return true;
@@ -237,7 +240,7 @@ struct TickEngine::Impl {
     bool fresh(const Unit& u) const {
         for (std::uint32_t k = 0; k < u.nin; ++k) {
             const In& in = ins[u.in0 + k];
-            if (!in.ok && !in.done && in.spec.need != Need::Optional && in.st.miss_run() >= 1) return false;
+            if (!in.ok && !in.done && in.spec.need != Need::Optional && in.spec.need != Need::UntilA && in.st.miss_run() >= 1) return false;
         }
         return true;
     }
@@ -461,7 +464,8 @@ struct TickEngine::Impl {
                 else in.done = true;  // Wanted / Optional be rašytojo — tęsiama be jo
                 continue;
             }
-            if (in.st.late() && in.spec.need != Need::Optional) on_time = false;  // klasę lemia Required ir Wanted
+            // klasę lemia Required ir Wanted (UntilA — niekada: vėluojantis sluoksnis vieneto į B neperkelia)
+            if (in.st.late() && in.spec.need != Need::Optional && in.spec.need != Need::UntilA) on_time = false;
         }
         if (u.nin == 0) {
             if (u.no_content) return gap_unit(u, Outcome::GapNoContent, 0);
@@ -490,7 +494,23 @@ struct TickEngine::Impl {
         const Index idx = r.idx;
         std::int64_t latest_ready = INT64_MIN;
         for (Unit& u : units) {
-            if (u.stage == Stage::None || u.cur != idx || !pred(u)) continue;
+            if (u.stage == Stage::None || u.cur != idx) continue;
+            // UntilA (sluoksnis): vienas neblokuojantis bandymas prieš sprendimą — paruoštas iki šiol naudojamas, kitaip nebelaukiamas
+            for (std::uint32_t k = 0; k < u.nin && phase == 0; ++k) {
+                In& in = ins[u.in0 + k];
+                if (in.spec.need != Need::UntilA || in.ok || in.done || !in.st.live()) continue;
+                try_resolve(u, in);
+                // head nepajudėjo — vis tiek vienas tiesioginis probe: perkurtas / ištrintas flow'as (FLOW_INVALID → Gone) kitaip
+                // nebūtų pastebėtas (UntilA nelaukiamas blokuojančiai), o naujo rašytojo gyvumas (mxlIsFlowActive pagal ID)
+                // jo neatskleidžia
+                if (!in.ok && !in.done && in.spec.grains == 1) {
+                    GrainRef& ref = grefs[u.g0 + in.g];
+                    const Probe p = in.spec.port->probe(jidx(u, in), ref);
+                    if (p == Probe::Ready) mark_ok(u, in, jidx(u, in));
+                    else if (p != Probe::NotYet) apply_fail(u, in, p);
+                }
+            }
+            if (!pred(u)) continue;
             bool hold = false;  // K-T5: interlaced freeze / black — turinys grįžta tik kadro riba
             for (std::uint32_t m = 0; m < u.nout; ++m)
                 if (!outs[u.out0 + m].gs.may_resume(idx, outs[u.out0 + m].port->interlaced())) hold = true;
@@ -779,7 +799,7 @@ struct TickEngine::Impl {
             InCounters& c = hub.in(in.hub);
             if (in.ok) {
                 in.st.on_ready(c, in.ready_at <= r.cuts.a + extra_expect(in));  // laiku — pagal briaunos sutartį
-            } else if (!in.done && in.spec.need == Need::Wanted && in.st.live()) {
+            } else if (!in.done && (in.spec.need == Need::Wanted || in.spec.need == Need::UntilA) && in.st.live()) {
                 if (in.st.on_missed(c)) in.st.note_head(in.spec.port->head());
             }
         }
@@ -1146,8 +1166,11 @@ struct TickEngine::Impl {
             } else if (s == InState::Stalled) {
                 const Index h = in.spec.port->head();
                 if (in.st.on_stalled_head(h)) continue;  // T10
-                GrainRef g;  // pigus probe be laukimo: atkurtas flow (FLOW_INVALID) → Detached → prisijungs iš naujo
-                if (in.spec.port->probe(h == kNoIndex ? 0 : h, g) == Probe::Gone) {
+                // pigus probe be laukimo: atkurtas flow (FLOW_INVALID) → Detached → prisijungs iš naujo. Skaitomas BŪSIMAS indeksas
+                // h + 1: MXL flow'o galiojimą tikrina tik TOO_EARLY atveju (PosixDiscreteFlowReader::completeRead), todėl jau
+                // esamo head skaitymas perkurto flow'o niekada nepastebėdavo (sluoksnis likdavo Stalled ant seno flow'o)
+                GrainRef g;
+                if (in.spec.port->probe(h == kNoIndex ? 0 : h + 1, g) == Probe::Gone) {
                     in.st.on_gone(c);
                     detach(in);
                     continue;
@@ -1184,6 +1207,10 @@ struct TickEngine::Impl {
         r.opening = true;
         newest = c;
         ++hub.engine().ticks;
+        if (res.traced_opens < RunResult::kTraceOpens) {
+            const std::int64_t late = (now() - r.cuts.open) / 1000;
+            res.open_late_us[res.traced_opens++] = static_cast<std::int32_t>(std::clamp<std::int64_t>(late, INT32_MIN, INT32_MAX));
+        }
         if (res.first_index == kNoIndex) res.first_index = c;
         res.last_index = c;
         ctx_index = c;
@@ -1337,6 +1364,8 @@ struct TickEngine::Impl {
             const Index last = last_opened_by(now());
             if (last > next) {
                 const Index to = align_up(last);
+                if (res.traced_opens < RunResult::kTraceOpens)
+                    res.open_skips[res.traced_opens] = static_cast<std::uint16_t>(std::min<Index>(to - next, 65535));
                 skip(next, to);
                 next = to;
                 if (now() < cuts_for(next, cfg.cuts).open) continue;

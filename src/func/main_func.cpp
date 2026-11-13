@@ -141,6 +141,9 @@ int main(int argc, char** argv) {
     cp->add_option("--opacity", o.opacity, "sluoksnio nepermatomumas 0…1 (K kartų; numatytasis 1)");
     cp->add_option("--base", o.base, "gen (bazė flow_id(--in-role, n)) | none (tik su --out-format v210a)")->check(CLI::IsMember({"gen", "none"}));
     cp->add_option("--out-format", o.out_format, "v210 | v210a")->check(CLI::IsMember({"v210", "v210a"}));
+    cp->add_option("--layer-return-frames", o.layer_return_frames,
+                   "išnykęs sluoksnis vėl naudojamas po tiek kadrų iš eilės, kai paruoštas laiku (numatyta 12; 1 — iškart)")
+        ->check(CLI::Range(1u, 100000u));
     cp->add_option("--layer-flow", o.layer_flow, "K:UUID — k-tojo (0…K-1) sluoksnio flow ID (visiems išėjimams), pvz. kito composite išėjimas");
     cp->add_option("--deadline-ms", o.deadline_ms, kDeadlineHelp);
     cp->add_option("--read-offset-us", o.read_offset_us);
