@@ -6,6 +6,18 @@
 > **V20** (`--deadline-ms` 0 = auto `3·P/4`; `gen` „vėlaus commit'o“ slenkstis — tas pats; WSL2 kampanijos — 30 aiškiai)
 > — įgyvendinta. Žemiau — pirminis planas.
 >
+> **Būsena 2026-11-13 (vakaras):** įgyvendinta ir **V24** (briaunos laiko sutartis): `engine/edge.hpp` (fazė, skelbiama riba,
+> `content_delay`, rinkinio lygiavimas, ring'o gylio patikra, žymų tekstas), žymos visų funkcijų išėjimuose,
+> `--input-expect-ms`, `--input-offset`, `--in-flow-base`, TAI preflight (`--allow-bad-clock`), funkciniai `fchain5`,
+> `fchain5_kill`, `fforeign_expect`. V22, V23 — neįgyvendinti (laukia tinklo etapo / P4).
+> **Nukrypimai nuo plano:** (1) šaltinio (`gen`, `dec`, `gfxgen`) riba — `t_open + P/4 + G` (ta pati D7 formulė su numatytuoju
+> Wr; legacy ribų Wr = D į ją neįeina); (2) žymos skaitomos tik paleidžiant — vėliau atsiradęs įėjimas laikomas „be žymos“
+> (fazė vienam varikliui nekeičiama veikiant, K-T10); (3) garso įėjimas be žymos — `expect = P` (realaus laiko rašytojas), ne 0;
+> (4) `enc` atskira garso taisyklė (D = 3P/2, expect P) pašalinta — tai sutarties reikšmė; (5) rinkinio lygiavimas — tik
+> `enc` (video + garsas), garsas mėginiais (`AudioFrames::sample_shift`); (6) peržiūra D2: naujas `Need::UntilA` (composite
+> sluoksnis laukiamas tik iki a(i)); (7) pirmų 128 tick'ų atidarymo vėlavimo diagnostika `RunResult::open_late_us`
+> (`VRAMFLOW_TRACE_OPENS=1`).
+>
 > **Būsena (pirminė):** planas, **laukia autoriaus patvirtinimo**. Kodas nekeistas, niekas nekompiliuota ir nepaleista (tuo metu kitas
 > agentas taisė kompiliatoriaus įspėjimus; GPU neliesta). Teiginiai apie VRAMFlow kodą — iš skaitymo `git show HEAD:<kelias>`,
 > HEAD = `98b92c1`. Teiginiai apie MXL — iš `/root/src/mxl-pr653` @ `6dddc91d92f5` ir kiekvienas pažymėtas

@@ -1,5 +1,19 @@
 # VRAMFlow „production-grade“ programa (P1–P10) — įgyvendinimo planas
 
+> **Įgyvendinimo būsena (2026-11-13):**
+> - **P5a** (README writer / reader sutartis, spragų politikos pagalbininkas) — įgyvendinta: README §5.1, `GapFill`,
+>   `--on-loss` (K3, tick variklio V17). Papildyta: ne kiekvienas INVALID grain'as juodas (rašytojo praleisti indeksai — MXL
+>   INVALID su senu turiniu; `verify` — `invalid_skipped`).
+> - **P5b** (sąveika su MXL įrankiais, K4) — išmatuota: `docs/rezultatai/2026-11-13-saveika-su-mxl-irankiais.md`, testai
+>   `tests/functional/interop.py`. Rastas ir pataisytas VRAMFlow defektas: flow aprašo JSON pabėgimai (`video\/v210`).
+>   Numatytoji `--on-loss` nekeista (sprendimas — autoriaus; žr. rezultatų išvadas).
+> - **P6** (paleidimas / sustabdymas, nuoma, re-attach) — įgyvendinta (`runtime/`; tick variklio V18, V19); 2026-11-13 —
+>   ir pirmas prisijungimas tik prie rašomo flow'o.
+> - **P7** (gyva statistika) — įgyvendinta (tick variklio V21: `StatsSink`, `--stats-file`, operatoriaus įvykiai).
+> - **P10** — P10a (CUDA architektūros, `3725b38`) ir P10b (`382x40` šakninė priežastis R20, `55752df`) įgyvendinti; P10c
+>   (skriptų pervadinimas) — šioje sesijoje nepatikrinta.
+> - Briaunos laiko sutartis (tick variklio V24) — įgyvendinta 2026-11-13.
+
 > **Būsena:** planas, **laukia autoriaus patvirtinimo**. Kodas nekeistas, niekas nekompiliuota ir nepaleista —
 > visi teiginiai apie kodą paremti skaitymu (failas:eilutė), ne vykdymu. Kur reikia vykdymo — pažymėta **[nepatikrinta čia]**.
 > **Vykdytojams:** superpowers:executing-plans arba subagent-driven-development; kiekvienas P — atskira šaka ir

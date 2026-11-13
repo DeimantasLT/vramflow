@@ -233,6 +233,12 @@ Rules worth knowing:
   transparent) — once per ring slot per outage: a slot that already holds black from this outage is only flagged again,
   and a slot overwritten by real content loses the mark. Audio flows have no flag: a missing audio block is committed
   as silence (`gen`: `gap_silence` per flow).
+- **Not every INVALID grain is black.** Only grains a VRAMFlow writer *commits* as gaps carry black (they have
+  `validSlices == totalSlices`). Indices a writer never commits — the engine or the library pacer woke up more than a
+  grain late and skipped them (`late_skips`, `clock_skips`; they are not filled while the writer is already late,
+  decision K-T6) — are marked INVALID by MXL itself when the next index is opened, with `validSlices == 0` and the
+  **old** slot payload. So always honour the flag; `verify` counts the first kind as `invalid_black` /
+  `invalid_not_black` (the latter is an error) and the second as `invalid_skipped` (not an error).
 - A grain flagged `MXL_GRAIN_FLAG_INVALID` reads as OK; check `info.flags` and `info.index` (MXL does not check that
   the index you got is the one you asked for).
 - **An INVALID grain means "no content for this index", not an error of the flow.** A reader that is itself a writer
@@ -468,6 +474,60 @@ stderr every 5 s.
 - A restarted producer removes the stale flows of its killed predecessor (`mxlGarbageCollectFlows`) before it creates its
   own, so a restart with the same flow IDs works. A flow that still has a live writer is never removed.
 - `SIGINT` / `SIGTERM` while waiting for inputs ends the function cleanly with exit code `0`.
+- A composite **layer** that comes back with another format is not attached; it stays transparent (`layer_absent`),
+  one operator event and `layer_format_mismatch` per new reason, and the programme continues. Only the **base** follows
+  `--on-format-change`.
+- A layer is waited for only until the first cut a(i) (`T + E + ro + Wr`), never to the final cut, so layers never
+  delay the programme or its advertised bound. A layer that disappeared is used again only after
+  `--layer-return-frames` consecutive frames on time (default 12), and only from a frame boundary.
+
+### Chain timing (edge contract)
+
+Every VRAMFlow output flow advertises in its flow definition when its grains are committed at the latest:
+
+| Tag | Value (decimal ns, one string) |
+|---|---|
+| `urn:x-vramflow:tag:commit-bound-ns` | upper bound of the commit time of grain `i` after `T(i)` — a **bound**, not a measurement |
+| `urn:x-vramflow:tag:content-delay-ns` | how far the content is behind its origin (only grows with `--input-offset`) |
+
+A function reads the tags of its inputs when it starts and opens each tick at `T(i) + E + ro`, where `E` is the largest
+input bound (one phase per process). Its own bound is `E + ro + Wr + G` (50 Hz: `+ 0.5 + 5 + 3` ms; sources `gen`,
+`dec`, `gfxgen`: `ro + P/4 + G` = 8 ms). So each stage finds its inputs already committed, nobody is late by design,
+and the latency adds up visibly — 50 Hz chain `gen → logo → logo → composite → enc`: 8, 16.5, 25, 33.5 and 42 ms.
+The values are in the summary (`proc`: `expect_us`, `phase_us`, `commit_bound_us`, `content_delay_us`,
+`inputs_tagged`, `inputs_untagged`, `ring_lag_us`, `ring_safe_us`) and in one stderr line at start.
+
+| Option (readers) | Meaning |
+|---|---|
+| `--input-expect-ms X` | commit bound of an input **without** VRAMFlow tags (foreign writer); a tag wins. Default `0` for video, one grain period for audio (a real-time audio writer finishes the samples of grain `i` at `T(i) + P`) |
+| `--input-offset K` | read grain `i + K` (`K ≤ 0`) — e.g. when a delay does not fit the ring; adds `−K · P` to `content-delay-ns` |
+| `--in-flow-base B` | first input flow number (default `--flow-base`), for chains in one domain (`logo → logo`) |
+| `--deadline-ms D` | last cut, counted from `T(i) + E` (default `3·P/4`) |
+| `--allow-bad-clock` | start even if the kernel TAI offset is not 37 s (otherwise exit 2: indices would not match other processes) |
+
+- Tags are read at start. An input that appears only later (started after its reader) counts as untagged; restart the
+  reader to pick up its tag, or start chains top-down.
+- The accumulated delay must fit the ring of the input: a reader refuses to start (exit 2) when `E + D − K·P` exceeds
+  `(slots − 2) · P` of the domain history (default 200 ms = 10 grains at 50 Hz; safe up to 160 ms) and warns above half
+  of it. Raise the history before the flows are created: `<domain>/options.json` with
+  `{"urn:x-mxl:option:history_duration/v1.0": 500000000}`.
+- `enc` reads video and audio of a bundle aligned: with different `content-delay-ns` the earlier member is read later by
+  the difference (video in grains, audio in samples).
+- Foreign MXL tools do not know the tags. `mxl-gst-sink` reads 40 ms behind (`--read-delay`); a flow whose advertised
+  bound is above that (deep chains) needs a larger `--read-delay`.
+
+### Interop with MXL's own tools (measured 2026-11-13)
+
+Details: `docs/rezultatai/2026-11-13-saveika-su-mxl-irankiais.md`; tests `tests/functional/interop.py` (need Xvfb and `xwd`,
+otherwise SKIP).
+
+- `mxl-info` reads every VRAMFlow flow (host and cuda-linear, all formats, audio, v210a); the extra tags are accepted.
+- `mxl-gst-sink` (host, progressive only) and `mxl-gst-cuda-sink` (cuda-linear `video/v210` only) play `gen` and `logo`
+  outputs. During an upstream outage they skip INVALID grains and keep the last good picture (`--on-loss invalid`), show
+  black with `--on-loss black`, freeze then black with `freeze`, and resume at once. Without committed gaps
+  (`--on-loss leave` or a dead writer read directly) `mxl-gst-sink` spins on `TOO EARLY` (about a million log lines in
+  3 s) and `mxl-gst-cuda-sink` exits when the flow is recreated — so commit every index.
+- `mxl-gst-testsrc` (a foreign writer, progressive only, no VRAMFlow tags) → `logo --input-expect-ms X` works.
 
 ### Domain ownership
 
