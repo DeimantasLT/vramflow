@@ -259,8 +259,12 @@ def check_split(r, func):
         if not vv.get("samples", 0):
             bad.append(f"#{n} verify samples == 0")
         vl = vv.get("missing", 0) + vv.get("invalid", 0)
-        if vl > fn_loss(f) + (0 if n not in r["special"] else 0):
-            bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai {fn_loss(f)}")
+        # Kiekvienas verify matomas trūkumas turi būti funkcijos apskaitytas: savo praradimai ARBA aukštupio spraga
+        # (gap_upstream — įėjimas pateikė INVALID, pvz. gen praleistas indeksas; peržiūra 2026-11-13 p. 3: tai ne praradimas,
+        # anksčiau skaičiuota in_invalid)
+        acc = fn_loss(f) + f.get("gap_upstream", 0)
+        if vl > acc:
+            bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai + gap_upstream {acc}")
         if n not in r["special"] and unexplained_losses(f, up) > 0:
             bad.append(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
                        f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})")

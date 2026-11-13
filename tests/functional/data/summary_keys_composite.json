@@ -42,10 +42,12 @@
   ],
   "flows": [
    "fields_ok",
+   "gap_align",
    "gap_black",
    "gap_frozen",
    "gap_invalid",
    "gap_startup",
+   "gap_upstream",
    "lapped",
    "late_skips",
    "lateness_max_us",

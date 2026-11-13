@@ -318,3 +318,98 @@ def fgen_audio_gap(out):
 
 TESTS["flogo_invalid_payload"] = flogo_invalid_payload
 TESTS["fgen_audio_gap"] = fgen_audio_gap
+
+
+# --- Punktas 3: aukštupio spraga — ne šios funkcijos praradimas -----------------------------------------------------------
+
+LOSS3 = ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips", "missing_fields", "flow_invalid",
+         "output_errors")
+
+
+def chain3(out, sub, impl, storage, kill_source=False):
+    """gen → logo → composite (bazė — logo išėjimas, --in-role 2; 1 sluoksnis gfxgen). Paleidžiama ATVIRKŠTINE tvarka:
+    composite, logo, gfxgen, gen (logo --start immediate: iki gen — INVALID gap_startup; composite juos skaito). Griežtas
+    exit (--duration > 0). kill_source — gen nužudomas viduryje (2 s) ir paleidžiamas iš naujo."""
+    d = F.fresh_domain(sub)
+    v = F.vcommon(impl, storage)
+    DUR = 22
+    c = F.FProc(out, sub, "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "1488,64", "--base", "gen", "--in-role", 2,
+                "--out-format", "v210", "--duration", DUR, "--warmup", 1, *v)
+    time.sleep(1)
+    lg = F.FProc(out, sub, "logo", d, "--flows", 1, "--duration", DUR + 3, "--warmup", 1, *v)
+    time.sleep(2)
+    x = F.FProc(out, sub, "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace", "--duration", 60, *v)
+    time.sleep(1)
+    g = F.FProc(out, f"{sub}/a", "gen", d, "--flows", 1, "--duration", 60, *v)
+    g2 = None
+    rc = rl = None
+    try:
+        if kill_source:
+            time.sleep(8)
+            g.kill9()
+            time.sleep(2)
+            g2 = F.FProc(out, f"{sub}/b", "gen", d, "--flows", 1, "--duration", 60, *v)
+        rc = c.wait(timeout=DUR + 60)
+        rl = lg.wait(timeout=DUR + 60)
+    finally:
+        for pr in (c, lg, x, g2, g):
+            if pr is not None and pr.p.poll() is None:
+                pr.term()
+    return {"rc": rc, "rl": rl, "c": F.flow_ctr(F.vsummary(c, "composite"), 0), "l": F.flow_ctr(F.vsummary(lg, "logo"), 0),
+            "cs": F.vsummary(c, "composite") or {}}
+
+
+def fchain_reverse(out):
+    """3 grandinės stadijos paleistos atvirkštine tvarka, švarus bėgimas, griežtas exit: visos baigiasi exit 0. composite
+    skaito logo paleidimo INVALID grain'us — gap_upstream > 0, ne praradimas (anksčiau — in_invalid ir exit 4); logo —
+    gap_startup (ne praradimas). C / G."""
+    res = []
+    for tag, impl, storage in [v for v in F.comp_variants() if v[0] in ("C", "G")]:
+        tid = f"fchain_reverse[{tag}]"
+        r = chain3(out, f"fchrev-{tag}", impl, storage)
+        c, lo = r["c"], r["l"]
+        bad = []
+        if r["rc"] != 0 or r["rl"] != 0:
+            bad.append(f"exit composite={r['rc']} logo={r['rl']}")
+        lc = {k: c[k] for k in LOSS3 if c.get(k)}
+        ll = {k: lo[k] for k in LOSS3 if lo.get(k)}
+        if lc or ll:
+            bad.append(f"praradimai composite={lc} logo={ll}")
+        if not c.get("gap_upstream", 0):
+            bad.append("composite gap_upstream == 0 (logo paleidimo INVALID grain'ų nematė?)")
+        if not lo.get("gap_startup", 0):
+            bad.append("logo gap_startup == 0")
+        if r["cs"].get("any_loss"):
+            bad.append("composite any_loss")
+        res.append(F.result(tid, "FAIL" if bad else "PASS",
+                            why=("; ".join(bad) or "ok") + f" | composite exit={r['rc']} gap_upstream={c.get('gap_upstream')} "
+                                f"fields_ok={c.get('fields_ok')} | logo exit={r['rl']} gap_startup={lo.get('gap_startup')}",
+                            composite=c, logo=lo))
+    return res
+
+
+def fchain_source_outage(out):
+    """Ta pati grandinė, gen (šaltinis) nužudomas 2 s: praradimą skaičiuoja tik pirma stadija po gedimo (logo:
+    missing_fields > 0, griežtas exit 4); composite — tik gap_upstream (> 0), 0 praradimų, exit 0. C / G."""
+    res = []
+    for tag, impl, storage in [v for v in F.comp_variants() if v[0] in ("C", "G")]:
+        tid = f"fchain_source_outage[{tag}]"
+        r = chain3(out, f"fchout-{tag}", impl, storage, kill_source=True)
+        c, lo = r["c"], r["l"]
+        bad = []
+        lc = {k: c[k] for k in LOSS3 if c.get(k)}
+        if r["rc"] != 0 or lc:
+            bad.append(f"composite exit={r['rc']} praradimai={lc} (laukta 0, exit 0)")
+        if c.get("gap_upstream", 0) < 50:
+            bad.append(f"composite gap_upstream={c.get('gap_upstream', 0)} < 50")
+        if r["rl"] != 4 or lo.get("missing_fields", 0) < 50:
+            bad.append(f"logo exit={r['rl']} missing_fields={lo.get('missing_fields', 0)} (laukta 4 ir ≥ 50)")
+        res.append(F.result(tid, "FAIL" if bad else "PASS",
+                            why=("; ".join(bad) or "ok") + f" | composite exit={r['rc']} gap_upstream={c.get('gap_upstream')} | "
+                                f"logo exit={r['rl']} missing_fields={lo.get('missing_fields')} gap_invalid={lo.get('gap_invalid')}",
+                            composite=c, logo=lo))
+    return res
+
+
+TESTS["fchain_reverse"] = fchain_reverse
+TESTS["fchain_source_outage"] = fchain_source_outage

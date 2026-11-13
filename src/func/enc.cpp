@@ -712,6 +712,8 @@ int run_enc(const Opts& o) {
                 case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti
                 case engine::Outcome::GapNoContent: audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapStartup: audio_of_dropped(n, ut.index); return;  // enc laukia įėjimų prieš variklį
+                case engine::Outcome::GapUpstream:  // video — INVALID (aukštupio spraga): gap_upstream_frames, ne praradimas
+                case engine::Outcome::GapAlign: audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapLate:
                     fs.loss(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames", ti);
                     audio_of_dropped(n, ut.index);

@@ -325,6 +325,8 @@ struct CompositeFn final : engine::TickFunction {
                 break;
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapStartup: break;  // bazių laukiama prieš variklį (wait-all) — neturėtų būti
+            case engine::Outcome::GapUpstream: break;  // bazė — INVALID (aukštupio spraga): gap_upstream, ne praradimas
+            case engine::Outcome::GapAlign: break;     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
             case engine::Outcome::GapLate:
                 if (inv) f.loss("in_invalid", ti);
                 else if (tl) f.loss("too_late", ti);

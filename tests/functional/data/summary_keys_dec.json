@@ -51,10 +51,12 @@
   "hist": [],
   "flows": [
    "fields_ok",
+   "gap_align",
    "gap_black",
    "gap_frozen",
    "gap_invalid",
    "gap_startup",
+   "gap_upstream",
    "input_reconnects",
    "output_errors",
    "startup_discard",

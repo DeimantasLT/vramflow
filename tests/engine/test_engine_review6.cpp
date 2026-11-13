@@ -84,3 +84,91 @@ TEST_CASE("review6: 1 — Required įėjimo trūkumas lieka any_loss", "[engine]
     const RunResult res = r.run();
     CHECK(res.any_loss);
 }
+
+// --- Punktas 3: aukštupio spraga — ne šios funkcijos praradimas ------------------------------------------------------
+// Būtinas įėjimas pateikia INVALID grain'us (aukštupio paleidimas / gedimas): išėjimas — spraga pagal politiką, indeksas
+// skaičiuojamas gap_upstream (vieneto gaps_upstream ⊂ gaps), any_loss == false; end_unit — Outcome::GapUpstream.
+TEST_CASE("review6: 3 — INVALID būtiname įėjime → gap_upstream, ne praradimas", "[engine][review6][upstream]") {
+    constexpr Index kA = 1010, kB = 1030;
+    Rig r(2);
+    r.ins[0]->invalid = [](Index j) { return j >= kA && j < kB; };
+    r.stop_after(1060);
+    r.build();
+    const RunResult res = r.run();
+    REQUIRE(res.reason == EndReason::Stopped);
+    CHECK(r.out(0).gap_upstream == kB - kA);
+    CHECK(r.out(0).gap_invalid == 0);  // spragos veiksmas — invalid, bet priežastis — aukštupys (kaip gap_startup)
+    CHECK(r.hub.unit(r.eng->unit_id(0)).gaps_upstream == kB - kA);
+    CHECK(r.hub.unit(r.eng->unit_id(0)).gaps == kB - kA);
+    for (Index i = kA; i < kB; ++i) {
+        INFO("i = " << i);
+        const auto* e = r.outs[0]->find(i);
+        REQUIRE(e != nullptr);
+        CHECK(e->kind == RecordingOutput::Kind::Gap);
+        CHECK(e->action == GapAction::Invalid);
+    }
+    std::uint64_t up = 0;
+    for (const auto& e : r.fn.ends)
+        if (e.unit == 0 && e.outcome == Outcome::GapUpstream) ++up;
+    CHECK(up == kB - kA);
+    CHECK(r.in(0).invalid == kB - kA);
+    CHECK_FALSE(res.any_loss);
+}
+
+// Kontrolė: tas pats su dingusiu (ne INVALID) įėjimu — praradimas (missing / GapBlocked), kaip anksčiau.
+TEST_CASE("review6: 3 — dingęs būtinas įėjimas lieka praradimas", "[engine][review6][upstream]") {
+    constexpr Index kA = 1010;
+    Rig r(2);
+    r.ins[0]->arrival = [](Index j) { return j >= kA ? kNever : std::int64_t{1'200'000}; };
+    r.ins[0]->alive = [](std::uint64_t now) { return static_cast<std::int64_t>(now) < T(kA); };
+    r.ins[0]->attachable = r.ins[0]->alive;
+    r.stop_after(1040);
+    r.build();
+    const RunResult res = r.run();
+    CHECK(r.out(0).gap_upstream == 0);
+    CHECK(res.any_loss);
+}
+
+// freeze / black interlaced: turinys, grįžtantis nelyginiame indekse, laikomas iki kadro ribos — gap_align (ne praradimas,
+// ne GapBlocked / missing_fields).
+TEST_CASE("review6: 3 — interlaced freeze: turinys nelyginiame indekse laikomas iki kadro ribos → gap_align", "[engine][review6][align]") {
+    constexpr Index kA = 1010, kB = 1021;  // kB nelyginis: pirmas grįžęs grain'as — apatinis laukas
+    EngineConfig c = Rig::test_config();
+    c.on_loss = GapPolicy::Freeze;
+    VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
+    RecordingFunction fn(clk);
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    ScriptedInput in(clk);
+    in.invalid = [](Index j) { return j >= kA && j < kB; };
+    RecordingOutput out(clk, /*interlaced=*/true);
+    TickEngine eng(c, clk, hub, stop);
+    UnitSpec s;
+    s.name = "u";
+    s.in.push_back(InputSpec{&in, {}, 1, Need::Required, InMode::Exact});
+    s.out.push_back(&out);
+    std::uint32_t id = 0;
+    std::string why;
+    REQUIRE(eng.add_unit(s, id, why));
+    fn.on_end_tick = [&](Index i, TickContext&) {
+        if (i >= 1040) stop = true;
+    };
+    const RunResult res = eng.run(fn);
+    check_run(fn, res, 0, &out);
+    std::uint64_t align = 0, blocked = 0;
+    for (const auto& e : fn.ends) {
+        if (e.outcome == Outcome::GapAlign) {
+            ++align;
+            CHECK(e.index == kB);
+        }
+        if (e.outcome == Outcome::GapBlocked) ++blocked;
+    }
+    CHECK(align == 1);
+    CHECK(blocked == 0);
+    CHECK(hub.out(eng.out_id(id, 0)).gap_align == 1);
+    CHECK(hub.unit(eng.unit_id(id)).gaps_align == 1);
+    const auto* e = out.find(kB + 1);
+    REQUIRE(e != nullptr);
+    CHECK(e->kind == RecordingOutput::Kind::Commit);  // turinys — nuo lyginio (kadro ribos)
+    CHECK_FALSE(res.any_loss);
+}

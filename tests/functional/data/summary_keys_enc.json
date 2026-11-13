@@ -53,6 +53,7 @@
   "flows": [
    "encoder_flush_dropped_frames",
    "frames_queued",
+   "gap_upstream_frames",
    "lateness_s",
    "loss_s",
    "p99_s",

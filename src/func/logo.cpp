@@ -248,6 +248,8 @@ struct LogoFn final : engine::TickFunction {
                 break;
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapStartup: break;  // įėjimas dar neprisijungė (--start immediate): ne praradimas (gap_startup)
+            case engine::Outcome::GapUpstream: break;  // įėjimas — INVALID (aukštupio spraga): gap_upstream, ne praradimas
+            case engine::Outcome::GapAlign: break;     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
             case engine::Outcome::GapLate: {
                 // Spragos commit'o vėlavimas nuo T(i) (end_unit — iškart po commit'o; V20: riba B = T + D, D = 3·P/4)
                 const std::uint64_t us = (now_tai() - ti) / 1000;

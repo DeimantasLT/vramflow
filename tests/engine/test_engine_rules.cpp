@@ -692,7 +692,11 @@ TEST_CASE("engine: interlaced freeze per variklį — kartojimas ir grįžimas k
     const auto* c2 = out.find(1012);
     REQUIRE(c2 != nullptr);
     CHECK(c2->kind == Kind::Commit);
-    CHECK(hub.out(eng.out_id(u, 0)).gap_frozen == 2);
+    // Peržiūra 2026-11-13 p. 3 (pakeistas lūkestis): 1011 — turinys yra, bet laikomas iki kadro ribos: skaičiuojamas gap_align
+    // (ne praradimas), ne gap_frozen; veiksmas tas pats (Repeat). Anksčiau gap_frozen == 2.
+    CHECK(hub.out(eng.out_id(u, 0)).gap_frozen == 1);
+    CHECK(hub.out(eng.out_id(u, 0)).gap_align == 1);
+    CHECK(hub.unit(eng.unit_id(u)).gaps_align == 1);
     CHECK(out.flushes >= 2);
     check_run(fn, res, u, &out);
 }

@@ -74,6 +74,8 @@ const char* to_string(Outcome o) {
         case Outcome::GapLate: return "GapLate";
         case Outcome::GapNoContent: return "GapNoContent";
         case Outcome::GapStartup: return "GapStartup";
+        case Outcome::GapUpstream: return "GapUpstream";
+        case Outcome::GapAlign: return "GapAlign";
         case Outcome::GapClock: return "GapClock";
         case Outcome::Lapped: return "Lapped";
         case Outcome::Skipped: return "Skipped";
@@ -275,7 +277,9 @@ struct TickEngine::Impl {
         in.done = true;
         in.ok = false;
         ++changes;
-        if (in.spec.need == Need::Required && u.stage != Stage::None) gap_unit(u, Outcome::GapLate, 0);
+        // Būtinas įėjimas: INVALID — aukštupio spraga (gap_upstream, ne praradimas); kita (TOO_LATE, Gone, klaida) — GapLate
+        if (in.spec.need == Need::Required && u.stage != Stage::None)
+            gap_unit(u, p == Probe::Invalid ? Outcome::GapUpstream : Outcome::GapLate, 0);
     }
 
     // Neblokuojantis bandymas: head() (be sisteminio kvietimo) ir, jei pasiekė j, probe kiekvienam grain'ui.
@@ -354,8 +358,9 @@ struct TickEngine::Impl {
         maybe_end(r);
     }
 
-    // Išėjimų spraga indeksui c pagal politiką. lapped — atšaukto (lap) grain'o vieta.
-    void gap_outputs(Unit& u, Index c, bool startup, bool lapped) {
+    // Išėjimų spraga indeksui c pagal politiką. lapped — atšaukto (lap) grain'o vieta. why — priežastis skaitikliui: paleidimo,
+    // aukštupio (INVALID) ir kadro ribos spragos skaičiuojamos atskirai (ne veiksmo skaitikliuose).
+    void gap_outputs(Unit& u, Index c, bool startup, bool lapped, Outcome why = Outcome::GapLate) {
         for (std::uint32_t m = 0; m < u.nout; ++m) {
             Out& o = outs[u.out0 + m];
             OutCounters& oc = hub.out(o.hub);
@@ -363,7 +368,7 @@ struct TickEngine::Impl {
             Index from = kNoIndex;
             const GapAction a = o.gs.decide(c, T(c), o.port->interlaced(), o.port->slot_count(), from);
             if (a == GapAction::None) {
-                ++(startup ? oc.gap_startup : oc.gap_left);
+                ++(startup ? oc.gap_startup : why == Outcome::GapUpstream ? oc.gap_upstream : why == Outcome::GapAlign ? oc.gap_align : oc.gap_left);
                 o.gs.on_gap(c, a);
                 continue;
             }
@@ -375,6 +380,8 @@ struct TickEngine::Impl {
             o.flush = true;
             if (lapped) continue;
             if (startup) ++oc.gap_startup;
+            else if (why == Outcome::GapUpstream) ++oc.gap_upstream;
+            else if (why == Outcome::GapAlign) ++oc.gap_align;
             else if (a == GapAction::Invalid) ++oc.gap_invalid;
             else if (a == GapAction::Repeat) ++oc.gap_frozen;
             else ++oc.gap_black;
@@ -388,11 +395,13 @@ struct TickEngine::Impl {
             const In& in = ins[u.in0 + k];
             if (in.spec.need == Need::Required && !in.ever) startup = true;
         }
-        gap_outputs(u, c, startup, false);
+        gap_outputs(u, c, startup, false, why);
         UnitCounters& uc = hub.unit(u.hub);
         ++(startup ? uc.startup : uc.gaps);  // paleidimo spragos — ne praradimas
         if (!startup && why == Outcome::GapClock) ++uc.gaps_clock;
         if (!startup && why == Outcome::GapNoContent) ++uc.gaps_no_content;
+        if (!startup && why == Outcome::GapUpstream) ++uc.gaps_upstream;  // aukštupio INVALID — ne praradimas
+        if (!startup && why == Outcome::GapAlign) ++uc.gaps_align;        // kadro riba — ne praradimas
         if (why == Outcome::GapBlocked)  // gyvi broliai — stebimi kitame tick'e (skaitikliai ir būsena, ne turinys)
             for (std::uint32_t k = 0; k < u.nin; ++k)
                 if (ins[u.in0 + k].st.live() && ins[u.in0 + k].spec.need != Need::Optional) ins[u.in0 + k].observe = jidx(u, ins[u.in0 + k]);
@@ -466,9 +475,9 @@ struct TickEngine::Impl {
             bool hold = false;  // K-T5: interlaced freeze / black — turinys grįžta tik kadro riba
             for (std::uint32_t m = 0; m < u.nout; ++m)
                 if (!outs[u.out0 + m].gs.may_resume(idx, outs[u.out0 + m].port->interlaced())) hold = true;
-            if (hold) {
+            if (hold) {  // turinys yra, bet laikomas iki kadro ribos — ne praradimas (gap_align)
                 count_inputs(u, r);
-                gap_unit(u, Outcome::GapBlocked, phase);
+                gap_unit(u, Outcome::GapAlign, phase);
                 continue;
             }
             OpenResult opened = OpenResult::Ok;
@@ -1335,7 +1344,8 @@ struct TickEngine::Impl {
             if (hub.out(static_cast<std::uint32_t>(k)).commit_errors != 0) res.any_loss = true;
         for (std::size_t k = 0; k < hub.units(); ++k) {
             const UnitCounters& c = hub.unit(static_cast<std::uint32_t>(k));
-            if (c.gaps - c.gaps_clock - c.gaps_no_content + c.lapped + c.late_skips != 0) res.any_loss = true;
+            if (c.gaps - c.gaps_clock - c.gaps_no_content - c.gaps_upstream - c.gaps_align + c.lapped + c.late_skips != 0)
+                res.any_loss = true;
         }
         return res;
     }
@@ -1435,6 +1445,7 @@ InState TickEngine::in_state(std::uint32_t unit, std::uint32_t input) const {
     return d_->ins[d_->units[unit].in0 + input].st.state();
 }
 bool TickEngine::unit_failed(std::uint32_t unit) const { return d_->units[unit].failed; }
+std::uint32_t TickEngine::unit_outputs(std::uint32_t unit) const { return d_->units[unit].nout; }
 bool TickEngine::unit_ever_failed(std::uint32_t unit) const { return d_->units[unit].ever_failed; }
 Index TickEngine::unit_fail_index(std::uint32_t unit) const { return d_->units[unit].fail_index; }
 bool TickEngine::in_late(std::uint32_t unit, std::uint32_t input) const {

@@ -258,6 +258,18 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
         put(st.proc, "late_skips", u.late_skips);
         put(st.proc, "warmup_skips", u.warmup_skips);
         put(st.proc, "clock_skips", u.clock_skips);
+        // Peržiūra 2026-11-13 p. 3: šaltinis (gen) taip pat praneša savo išėjimų spragas pagal veiksmą (anksčiau — grąžinta
+        // iš karto, gen santraukoje gap_* nebuvo). Vienetas be video išėjimo (tik garsas) — be jų.
+        for (std::uint32_t n = 0; n < units && n < st.flows.size(); ++n) {
+            if (!eng.unit_outputs(n)) continue;
+            const engine::OutCounters& oc = hub.out(eng.out_id(n, 0));
+            put(st.flows[n].c, "gap_invalid", oc.gap_invalid);
+            put(st.flows[n].c, "gap_frozen", oc.gap_frozen);
+            put(st.flows[n].c, "gap_black", oc.gap_black);
+            put(st.flows[n].c, "gap_startup", oc.gap_startup);
+            put(st.flows[n].c, "gap_upstream", oc.gap_upstream);
+            put(st.flows[n].c, "gap_align", oc.gap_align);
+        }
         return;
     }
     const bool fr = scope == SkipScope::PerFlowFrames;
@@ -266,7 +278,11 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
         put(st.flows[n].c, fr ? "late_skips_frames" : "late_skips", u.late_skips);
         put(st.flows[n].c, fr ? "warmup_skips_frames" : "warmup_skips", u.warmup_skips);
         put(st.flows[n].c, fr ? "clock_skips_frames" : "clock_skips", u.clock_skips);
-        if (fr) continue;  // enc — be MXL išėjimų (spragų politika taikoma tik MXL rašytojams)
+        // Aukštupio (INVALID įėjimas) ir kadro ribos spragos — ne praradimas; enc — kadrais (vieneto skaitikliai)
+        if (fr) {
+            put(st.flows[n].c, "gap_upstream_frames", u.gaps_upstream);
+            continue;  // enc — be MXL išėjimų (spragų politika taikoma tik MXL rašytojams)
+        }
         // K3: kiek spragų commit'inta kokiu veiksmu (išėjimo skaitikliai; vienas išėjimas vienetui). gap_startup — paleidimo
         // spragos (įėjimas dar niekada neprisijungė, --start immediate) — ne praradimas.
         const engine::OutCounters& oc = hub.out(eng.out_id(n, 0));
@@ -274,6 +290,8 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
         put(st.flows[n].c, "gap_frozen", oc.gap_frozen);
         put(st.flows[n].c, "gap_black", oc.gap_black);
         put(st.flows[n].c, "gap_startup", oc.gap_startup);
+        put(st.flows[n].c, "gap_upstream", oc.gap_upstream);
+        put(st.flows[n].c, "gap_align", oc.gap_align);
     }
 }
 

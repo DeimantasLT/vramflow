@@ -50,7 +50,7 @@ Health input_health(InState s, const InCounters& d) {
 Health output_health(const OutCounters& d, bool enabled) {
     if (!enabled) return Health::Inactive;
     if (d.ok + d.late == 0) return Health::Unhealthy;
-    const std::uint64_t gaps = d.gap_invalid + d.gap_frozen + d.gap_black + d.gap_left + d.gap_startup + d.lapped +
+    const std::uint64_t gaps = d.gap_invalid + d.gap_frozen + d.gap_black + d.gap_left + d.gap_startup + d.gap_upstream + d.gap_align + d.lapped +
                                d.late_skips + d.clock_skips + d.warmup_skips + d.commit_errors;
     return gaps != 0 ? Health::PartiallyHealthy : Health::Healthy;
 }
@@ -79,7 +79,7 @@ Health process_health(std::span<const Health> in, std::span<const Health> out) {
 
 Health unit_health(const UnitCounters& d, bool failed) {
     if (failed) return Health::Unhealthy;
-    const std::uint64_t lost = d.gaps - d.gaps_clock - d.gaps_no_content + d.lapped + d.late_skips;
+    const std::uint64_t lost = d.gaps - d.gaps_clock - d.gaps_no_content - d.gaps_upstream - d.gaps_align + d.lapped + d.late_skips;
     const std::uint64_t any = d.ok + d.late + d.gaps + d.startup + d.lapped + d.late_skips + d.clock_skips + d.warmup_skips;
     if (any == 0) return Health::Inactive;
     if (d.ok + d.late == 0) return Health::Unhealthy;
@@ -213,6 +213,8 @@ OutCounters minus(const OutCounters& a, const OutCounters& b) {
     r.gap_black = a.gap_black - b.gap_black;
     r.gap_left = a.gap_left - b.gap_left;
     r.gap_startup = a.gap_startup - b.gap_startup;
+    r.gap_upstream = a.gap_upstream - b.gap_upstream;
+    r.gap_align = a.gap_align - b.gap_align;
     r.lapped = a.lapped - b.lapped;
     r.late_skips = a.late_skips - b.late_skips;
     r.clock_skips = a.clock_skips - b.clock_skips;
@@ -233,6 +235,8 @@ UnitCounters minus(const UnitCounters& a, const UnitCounters& b) {
     r.warmup_skips = a.warmup_skips - b.warmup_skips;
     r.gaps_clock = a.gaps_clock - b.gaps_clock;
     r.gaps_no_content = a.gaps_no_content - b.gaps_no_content;
+    r.gaps_upstream = a.gaps_upstream - b.gaps_upstream;
+    r.gaps_align = a.gaps_align - b.gaps_align;
     r.failures = a.failures - b.failures;
     r.retries = a.retries - b.retries;
     r.recoveries = a.recoveries - b.recoveries;

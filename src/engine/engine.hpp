@@ -47,7 +47,13 @@ struct UnitSpec {
 // atkūrimo gijoje, sėkmė — vienetas vėl dalyvauja nuo kito tick'o.
 // GapStartup — paleidimo spraga (--start immediate, V18): būtinas įėjimas dar niekada neprisijungė; išėjimas commit'inamas pagal
 // politiką (OutCounters::gap_startup), bet tai ne praradimas (funkcijos jo neskaičiuoja missing_fields).
-enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError, GapStartup };
+// GapUpstream — būtinas įėjimas tame indekse pateikė INVALID grain'ą (aukštupio spraga: jo paleidimas ar gedimas): išėjimas
+// pagal politiką, gap_upstream, ne šios funkcijos praradimas (peržiūra 2026-11-13 p. 3).
+// GapAlign — interlaced freeze / black: turinys grįžo nelyginiame indekse ir laikomas iki kadro ribos (K-T5): gap_align, ne
+// praradimas (anksčiau — GapBlocked / missing_fields).
+enum class Outcome : std::uint8_t {
+    Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError, GapStartup, GapUpstream, GapAlign
+};
 const char* to_string(Outcome);
 
 struct UnitTick {
@@ -143,7 +149,8 @@ struct RunResult {
     int exit_code = 0;
     std::string fatal;
     Index first_index = kNoIndex, last_index = kNoIndex;
-    // Bent vienas tikras praradimas: vieneto spraga (be laikrodžio ir šaltinio „nėra turinio“ spragų), lap'as, late_skips,
+    // Bent vienas tikras praradimas: vieneto spraga (be laikrodžio, šaltinio „nėra turinio“, aukštupio INVALID ir kadro ribos
+    // spragų), lap'as, late_skips,
     // įėjimo lost, išėjimo commit_errors. Laikrodžio įvykiai (clock_skips, GapClock, AlreadyCommitted) — ne praradimas.
     // Funkcijos jį naudoja exit kodui 4 griežtame režime (--strict-exit).
     bool any_loss = false;
@@ -171,6 +178,7 @@ public:
     std::uint32_t unit_id(std::uint32_t unit) const;
     InState in_state(std::uint32_t unit, std::uint32_t input) const;
     bool unit_failed(std::uint32_t unit) const;  // sugedęs dabar (po atsigavimo — false)
+    std::uint32_t unit_outputs(std::uint32_t unit) const;  // vieneto išėjimų skaičius
     bool unit_ever_failed(std::uint32_t unit) const;
     Index unit_fail_index(std::uint32_t unit) const;  // pirmo gedimo indeksas (kNoIndex — nesugedo); testų apskaitai
     bool in_late(std::uint32_t unit, std::uint32_t input) const;

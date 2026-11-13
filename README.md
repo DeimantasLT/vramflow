@@ -237,7 +237,8 @@ Rules worth knowing:
   the index you got is the one you asked for).
 - **An INVALID grain means "no content for this index", not an error of the flow.** A reader that is itself a writer
   applies its own gap policy to its output for that index (VRAMFlow functions: `--on-loss`, see section 6) and goes on;
-  it never copies the stale payload of an INVALID grain. A reader blocked on an index wakes up as soon as the INVALID
+  it never copies the stale payload of an INVALID grain. It is the upstream's gap, not the reader's loss: VRAMFlow
+  functions count it as `gap_upstream`, and it does not change their exit code. A reader blocked on an index wakes up as soon as the INVALID
   grain is committed — it does not wait for the next grain.
 
 ### 5.2 Graphics from any program: `libvramflow-gfx`
@@ -361,8 +362,13 @@ explicitly, because GPU scheduling hiccups of 17–30 ms are common there; the t
 gates, `ffmt_logo`) pass `--deadline-ms 0` and attribute an index the upstream itself delivered late to the upstream. `gen --deadline-ms` sets only the threshold of its own "late commit" counter and stderr line
 (default: the same `3·P/4`, i.e. what a reader with the default deadline would miss).
 
-Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` (and `gap_startup`
-for start-up gaps, which are not losses). Indices the engine itself skipped because it woke up late (`late_skips`) are
+Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` — the gaps this
+function caused because an input it needed was missing or late. Gaps that are not this function's loss are counted by
+cause instead, whatever the action: `gap_startup` (a required input never attached yet), `gap_upstream` (a required input
+delivered an INVALID grain — the upstream had nothing for that index; `enc`: `gap_upstream_frames`) and `gap_align`
+(interlaced `freeze` / `black`: content came back on an odd index and is held to the next frame boundary). A loss is only
+what a function failed to deliver although its inputs were valid; the strict exit code `4` and `any_loss` follow losses
+only. Indices the engine itself skipped because it woke up late (`late_skips`) are
 not filled: MXL marks them invalid when the next index is opened (their audio blocks, which have no flag, are committed as
 silence and counted as `gap_silence`). Cost per gap (1080i50 grain, 2.76 MB): `invalid` — on the first lap of an outage
 one black copy into the slot (host `memcpy` ≈ 110 µs p50, 210 µs p99; GPU D2D ≈ 26 µs p50, 110 µs p99), on later laps of the same

@@ -217,9 +217,11 @@ void StatsLines::publish(const engine::Snapshot& s) {
         j += std::string(",\"failed\":") + (x.failed ? "true" : "false");
         num(j, "ok", d.ok + d.late);  // pateikta turinio (A + B / C fazės) — Σ eilutėse == santraukos fields_ok
         num(j, "late_commit", d.late);
-        num(j, "lost", d.gaps - d.gaps_clock - d.gaps_no_content + d.lapped + d.late_skips);
+        num(j, "lost", d.gaps - d.gaps_clock - d.gaps_no_content - d.gaps_upstream - d.gaps_align + d.lapped + d.late_skips);
         num(j, "gaps", d.gaps);
         num(j, "startup", d.startup);
+        num(j, "upstream", d.gaps_upstream);
+        num(j, "align", d.gaps_align);
         num(j, "lapped", d.lapped);
         num(j, "late_skips", d.late_skips);
         num(j, "clock_skips", d.clock_skips + d.gaps_clock);
@@ -267,6 +269,8 @@ void StatsLines::publish(const engine::Snapshot& s) {
             num(j, "late", o.d.late);
             num(j, "gaps", o.d.gap_invalid + o.d.gap_frozen + o.d.gap_black + o.d.gap_left);
             num(j, "gap_startup", o.d.gap_startup);
+            num(j, "gap_upstream", o.d.gap_upstream);
+            num(j, "gap_align", o.d.gap_align);
             num(j, "lapped", o.d.lapped);
             num(j, "late_skips", o.d.late_skips);
             num(j, "commit_errors", o.d.commit_errors);
