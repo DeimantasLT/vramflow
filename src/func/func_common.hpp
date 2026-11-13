@@ -65,6 +65,15 @@ struct Opts {
     std::string run_id;
     std::int64_t input_wait_ms = 0;
     std::string on_format_change = "exit";
+    // Briaunos laiko sutartis (V24, planas §6 D7): įėjimo laukimas po T(j) — aukštupio žyma commit-bound-ns; flow'ui be žymų
+    // (svetimas rašytojas) — --input-expect-ms (< 0 — nenurodyta: video 0, garsas P — realaus laiko rašytojas kadro garsą
+    // baigia ties T + P). --input-offset K (≤ 0): skaitomas j = i + K. --in-flow-base: įėjimų flow bazė (−1 — = --flow-base;
+    // grandinėms viename domene, pvz. logo → logo). --allow-bad-clock: praleisti TAI poslinkio (37 s) patikrą paleidžiant.
+    double input_expect_ms = -1;
+    std::int32_t input_offset = 0;
+    std::int64_t in_flow_base = -1;
+    bool allow_bad_clock = false;
+    std::uint32_t in_base() const { return in_flow_base < 0 ? flow_base : static_cast<std::uint32_t>(in_flow_base); }
     // Spragų politika (production-grade §6 K3, planas §6 D4): rašytojas commit'ina KIEKVIENĄ indeksą; be turinio —
     // invalid (MXL_GRAIN_FLAG_INVALID, turinys neišgalvojamas; numatyta) | freeze (paskutinis geras to paties pariteto grain'as
     // ne ilgiau kaip hold_ms, tada juoda) | black (juodas grain'as iškart). leave — tik testams (nieko necommit'inti).

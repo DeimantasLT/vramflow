@@ -5,6 +5,9 @@
 #include <cuda_runtime_api.h>
 #include <mxl/time.h>
 
+#include <sys/timex.h>
+
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -16,12 +19,95 @@ std::int64_t deadline_ns(const Opts& o) {
     return engine::default_cuts(o.fmt.grain_rate()).deadline_ns;  // 3·P/4 (K-T2)
 }
 
-std::int64_t enc_deadline_ns(const Opts& o) {
-    if (o.deadline_ms > 0) return static_cast<std::int64_t>(o.deadline_ms) * 1'000'000;
-    return 3 * engine::period_ns(o.fmt.grain_rate()) / 2;
+InEdge in_edge(mxlInstance inst, const std::string& flow_id, const Opts& o, std::int64_t untagged_ns) {
+    InEdge e;
+    e.t.index_offset = o.input_offset;
+    e.t.expect_ns = o.input_expect_ms >= 0 ? static_cast<std::int64_t>(o.input_expect_ms * 1e6 + 0.5) : untagged_ns;
+    std::string err;
+    const std::string def = inst ? read_flow_def(inst, flow_id, err) : std::string{};
+    e.exists = !def.empty();
+    engine::OutputTiming t;
+    if (e.exists && engine::parse_timing_tags(def, t)) {
+        e.tagged = true;
+        e.t.expect_ns = t.commit_bound_ns;
+        e.t.content_delay_ns = t.content_delay_ns;
+    }
+    return e;
 }
 
-std::int64_t enc_audio_expect_ns(const Opts& o) { return engine::period_ns(o.fmt.grain_rate()); }
+std::int64_t domain_history_ns(const std::string& domain) {
+    constexpr std::int64_t kDefault = 200'000'000;  // MXL Instance::_historyDuration
+    std::FILE* f = std::fopen((domain + "/options.json").c_str(), "r");
+    if (!f) return kDefault;
+    std::string s;
+    char b[1024];
+    for (std::size_t n; (n = std::fread(b, 1, sizeof b, f)) > 0;) s.append(b, n);
+    std::fclose(f);
+    const std::string key = "\"urn:x-mxl:option:history_duration/v1.0\"";
+    std::size_t p = s.find(key);
+    if (p == std::string::npos) return kDefault;
+    p = s.find(':', p + key.size());
+    if (p == std::string::npos) return kDefault;
+    const double v = std::strtod(s.c_str() + p + 1, nullptr);
+    return v > 0 ? static_cast<std::int64_t>(v) : kDefault;
+}
+
+bool plan_edges(const Opts& o, engine::EngineConfig& cfg, const std::vector<InEdge>& in, bool source, const char* who, Stats& st,
+                EdgePlan& plan, std::string& err) {
+    std::vector<engine::EdgeTiming> t;
+    t.reserve(in.size());
+    std::uint64_t tagged = 0;
+    for (const InEdge& e : in) {
+        cfg.cuts.expect_ns = std::max(cfg.cuts.expect_ns, e.t.expect_ns);
+        t.push_back(e.t);
+        tagged += e.tagged ? 1 : 0;
+    }
+    plan.out.commit_bound_ns = engine::commit_bound_ns(cfg.cuts, source);
+    plan.out.content_delay_ns = engine::content_delay_ns(t, cfg.cuts.rate);
+    plan.tags = engine::timing_tags_json(plan.out);
+    auto us = [](std::int64_t ns) { return static_cast<std::uint64_t>(std::max<std::int64_t>(0, ns) / 1000); };
+    st.proc["expect_us"] = us(cfg.cuts.expect_ns);
+    st.proc["phase_us"] = us(engine::phase_ns(cfg.cuts));
+    st.proc["commit_bound_us"] = us(plan.out.commit_bound_ns);
+    st.proc["content_delay_us"] = us(plan.out.content_delay_ns);
+    if (!in.empty()) {
+        st.proc["inputs_tagged"] = tagged;
+        st.proc["inputs_untagged"] = in.size() - tagged;
+    }
+    std::fprintf(stderr,
+                 "[%s] briaunos sutartis: įėjimai laukiami iki T + %.3f ms (%llu su žyma, %llu be), tick'as T + %.3f ms, "
+                 "skelbiama commit'o riba T + %.3f ms, turinio vėlinimas %.3f ms\n",
+                 who, cfg.cuts.expect_ns / 1e6, static_cast<unsigned long long>(tagged),
+                 static_cast<unsigned long long>(in.size() - tagged), engine::phase_ns(cfg.cuts) / 1e6, plan.out.commit_bound_ns / 1e6,
+                 plan.out.content_delay_ns / 1e6);
+    if (in.empty()) return true;
+    const engine::RingCheck r = engine::ring_check(cfg.cuts, o.input_offset, domain_history_ns(o.domain));
+    st.proc["ring_lag_us"] = us(r.lag_ns);
+    st.proc["ring_safe_us"] = us(r.safe_ns);
+    if (r.fit == engine::RingFit::Refuse) {
+        err = r.text;
+        return false;
+    }
+    if (r.fit == engine::RingFit::Warn) std::fprintf(stderr, "[%s] įspėjimas: %s\n", who, r.text.c_str());
+    return true;
+}
+
+std::string check_advertised(const engine::TickEngine& eng, std::uint32_t unit, const EdgePlan& plan) {
+    const engine::OutputTiming t = eng.output_timing(unit);
+    // turinio vėlinimas skelbiamas visiems išėjimams vienodas — didžiausias (vieneto gali būti mažesnis)
+    if (t.commit_bound_ns == plan.out.commit_bound_ns && t.content_delay_ns <= plan.out.content_delay_ns) return {};
+    return "briaunos sutartis: variklio riba " + std::to_string(t.commit_bound_ns) + " / " + std::to_string(t.content_delay_ns) +
+           " ns != paskelbtos " + std::to_string(plan.out.commit_bound_ns) + " / " + std::to_string(plan.out.content_delay_ns) + " ns";
+}
+
+std::string tai_offset_error() {
+    timex tx{};
+    if (adjtimex(&tx) < 0) return "adjtimex nepavyko — TAI poslinkio patikrinti negalima";
+    if (tx.tai == 37) return {};
+    return "branduolio TAI poslinkis " + std::to_string(tx.tai) +
+           " s, ne 37 s (MXL indeksai nesutaps su kitais procesais / mašinomis; chrony: leapsectz right/UTC arba "
+           "adjtimex --tai 37)";
+}
 
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns) {
     const vramflow::Rational rate = o.fmt.grain_rate();

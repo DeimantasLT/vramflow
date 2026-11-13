@@ -20,23 +20,24 @@ std::string flow_id(int role, std::uint32_t n) {
     return b;
 }
 
-std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed, const vramflow::VideoFormat& f) {
+std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed, const vramflow::VideoFormat& f, const std::string& extra_tags) {
     char label[128], hint[160];
     std::snprintf(label, sizeof label, "vramflow-func %d/%u", role, n);
     std::snprintf(hint, sizeof hint, "vramflow-func-%016llx-%d:Video %u", static_cast<unsigned long long>(run_seed), role, n);
     vramflow::VideoFormat v = f;
     v.raster.alpha = false;
-    return vramflow::video_flow_def(flow_id(role, n), label, v, hint);
+    return vramflow::video_flow_def(flow_id(role, n), label, v, hint, extra_tags);
 }
 
 namespace {
 // Bendras v210 / v210a flow aprašas (grafikos šaltinis ir kompozitoriaus išėjimas): id, tekstai ir rastras.
 std::string raster_flow_def(const std::string& id, const char* what, std::uint32_t n, std::uint32_t k, int role,
-                            const vramflow::gfx::Raster& r, vramflow::Rational rate, std::uint64_t run_seed) {
+                            const vramflow::gfx::Raster& r, vramflow::Rational rate, std::uint64_t run_seed,
+                            const std::string& extra_tags = {}) {
     char b[2048];
     std::snprintf(b, sizeof b,
                   R"({"id":"%s","description":"vramflow-func %s %u/%u","label":"vramflow-func %s %u/%u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:%s %u/%u"]},)"
+                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:%s %u/%u"]%s},)"
                   R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
                   R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
                   R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
@@ -44,7 +45,7 @@ std::string raster_flow_def(const std::string& id, const char* what, std::uint32
                   R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
                   R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
                   id.c_str(), what, n, k, what, n, k, static_cast<unsigned long long>(run_seed), role,
-                  what[0] == 'g' ? "Gfx" : "Comp", n, k, r.alpha ? "video/v210a" : "video/v210", static_cast<long long>(rate.num), static_cast<long long>(rate.den), r.w, r.h,
+                  what[0] == 'g' ? "Gfx" : "Comp", n, k, extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210", static_cast<long long>(rate.num), static_cast<long long>(rate.den), r.w, r.h,
                   r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
     return b;
 }
@@ -60,22 +61,22 @@ std::string comp_def(std::uint32_t n, const vramflow::gfx::Raster& r, std::uint6
     return raster_flow_def(flow_id(kRoleComp, n), "comp", n, 0, kRoleComp, r, legacy_rate(r), run_seed);
 }
 
-std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::VideoFormat& f, std::uint64_t run_seed) {
-    return raster_flow_def(flow_id(kRoleGfx, n * 8 + k), "gfx", n, k, kRoleGfx, f.raster, f.frame_rate, run_seed);
+std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::VideoFormat& f, std::uint64_t run_seed, const std::string& extra_tags) {
+    return raster_flow_def(flow_id(kRoleGfx, n * 8 + k), "gfx", n, k, kRoleGfx, f.raster, f.frame_rate, run_seed, extra_tags);
 }
 
-std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint64_t run_seed) {
-    return raster_flow_def(flow_id(kRoleComp, n), "comp", n, 0, kRoleComp, f.raster, f.frame_rate, run_seed);
+std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint64_t run_seed, const std::string& extra_tags) {
+    return raster_flow_def(flow_id(kRoleComp, n), "comp", n, 0, kRoleComp, f.raster, f.frame_rate, run_seed, extra_tags);
 }
 
-std::string audio_def(std::uint32_t n, std::uint64_t run_seed) {
+std::string audio_def(std::uint32_t n, std::uint64_t run_seed, const std::string& extra_tags) {
     char b[1024];
     std::snprintf(b, sizeof b,
                   R"({"id":"%s","description":"vramflow-func audio %u","label":"vramflow-func audio %u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-1:Audio %u"]},)"
+                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-1:Audio %u"]%s},)"
                   R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
                   R"("channel_count":2,"bit_depth":32,"parents":[]})",
-                  flow_id(kRoleAudio, n).c_str(), n, n, static_cast<unsigned long long>(run_seed), n);
+                  flow_id(kRoleAudio, n).c_str(), n, n, static_cast<unsigned long long>(run_seed), n, extra_tags.c_str());
     return b;
 }
 
@@ -251,7 +252,6 @@ std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r) {
 }
 
 // --- VideoIn ----------------------------------------------------------------------------------------------------------
-namespace {
 std::string read_flow_def(mxlInstance inst, const std::string& flow, std::string& err) {
     size_t n = 0;
     mxlGetFlowDef(inst, flow.c_str(), nullptr, &n);  // grąžina INVALID_ARG ir reikiamą dydį
@@ -261,6 +261,8 @@ std::string read_flow_def(mxlInstance inst, const std::string& flow, std::string
     def.resize(std::strlen(def.c_str()));
     return def;
 }
+
+namespace {
 
 // Laukimo laikrodis pagal OpenPolicy (planas §P6). keep_waiting: true — pamiegota ir galima bandyti dar kartą; false — riba
 // arba sustabdymas (err užpildytas). Miegama ne ilgiau kaip 50 ms — sustabdymas nutraukia per ≤ 100 ms.

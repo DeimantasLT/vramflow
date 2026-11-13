@@ -225,12 +225,22 @@ int run_gen(const Opts& o) {
     const bool inter = o.fmt.raster.interlaced;
     const std::size_t gbytes = media::grain_bytes(dim, inter);
     int rc = 0;
+    // Briaunos laiko sutartis (V24): gen — šaltinis; skelbiama riba t_open + P/4 + G (50 Hz, ro 0: 8 ms). Garsas su
+    // --audio-late-ms rašomas pirmo tick'o po T(i) + late metu — jo riba didesnė ceil(late / P) periodų.
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Legacy, 0);
+    EdgePlan plan;
+    if (!plan_edges(o, ecfg, {}, true, "gen", st, plan, err)) rc = 2;
+    const std::int64_t period = engine::period_ns(grain);
+    const std::int64_t late_ns = static_cast<std::int64_t>(o.audio_late_ms) * 1'000'000;
+    const engine::OutputTiming audio_t{plan.out.commit_bound_ns + (late_ns + period - 1) / period * period, 0};
+    const std::string audio_tags = engine::timing_tags_json(audio_t);
+    if (!aout.empty()) st.proc["audio_commit_bound_us"] = static_cast<std::uint64_t>(audio_t.commit_bound_ns / 1000);
     // Išėjimai registruojami domeno nuomoje; jau egzistuojantis (gyvas writer'is po GC) — klaida su savininko run_id (§P6).
     for (std::uint32_t n = 0; n < vout.size() && !rc; ++n)
-        if (!create_output(inst, vout[n], flow_id(kRoleGen, o.flow_base + n), video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt), opts,
-                           o.fmt, o, err)) { st.fatal = "video " + std::to_string(n) + ": " + err; rc = 2; }
+        if (!create_output(inst, vout[n], flow_id(kRoleGen, o.flow_base + n), video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt, plan.tags),
+                           opts, o.fmt, o, err)) { st.fatal = "video " + std::to_string(n) + ": " + err; rc = 2; }
     for (std::uint32_t n = 0; n < aout.size() && !rc; ++n)
-        if (!create_output(inst, aout[n], flow_id(kRoleAudio, o.flow_base + n), audio_def(o.flow_base + n, o.run_seed), grain, o, err)) {
+        if (!create_output(inst, aout[n], flow_id(kRoleAudio, o.flow_base + n), audio_def(o.flow_base + n, o.run_seed, audio_tags), grain, o, err)) {
             st.fatal = "audio " + std::to_string(n) + ": " + err;
             rc = 2;
         }
@@ -259,8 +269,8 @@ int run_gen(const Opts& o) {
     set_release(ports, vout, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);
         std::string e;
-        const bool ok = create_output(inst, vout[n], flow_id(kRoleGen, o.flow_base + n), video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt),
-                                      opts, o.fmt, o, e);
+        const bool ok = create_output(inst, vout[n], flow_id(kRoleGen, o.flow_base + n),
+                                      video_def(kRoleGen, o.flow_base + n, o.run_seed, o.fmt, plan.tags), opts, o.fmt, o, e);
         if (!ok) log_line("gen", "video " + std::to_string(n) + " atkurti nepavyko: " + e);
         return ok;
     });
@@ -271,7 +281,7 @@ int run_gen(const Opts& o) {
     engine::SystemClock clk;
     EngineStats es(o, "gen");
     engine::StatsHub& hub = es.hub;
-    engine::TickEngine eng(engine_config(o, EngineTiming::Legacy, 0), clk, hub, stop);
+    engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(kRoleGen, o.flow_base + n);

@@ -154,19 +154,42 @@ TEST_CASE("timing: --deadline-ms numatyta = 3·P/4 (50 Hz — 15 ms, 25 Hz — 3
     CHECK(func::engine_config(o, func::EngineTiming::Isolation, 500'000).cuts.deadline_ns == 30'000'000);
 }
 
-// Peržiūra 2026-11-13 p. 4: enc numatytoji riba — 3·P/2 (kadro garsas baigiamas ties T + P), garsas laukiamas ties T + P;
-// aiški --deadline-ms nepakitusi.
-TEST_CASE("timing: enc --deadline-ms numatyta = 3·P/2 (50 Hz — 30 ms, 25p — 60 ms), garsas laukiamas ties T + P", "[func][timing]") {
+// V24 (briaunos sutartis): enc garso „ypatingas atvejis“ — sutarties reikšmė. Garsas be žymų laukiamas ties T + P (realaus
+// laiko rašytojas), video be žymų — T + 0; --input-expect-ms — svetimam flow'ui; riba D — bendra 3·P/4 nuo T + E.
+// Pakeistas lūkestis: anksčiau enc_deadline_ns = 3·P/2 ir enc_audio_expect_ns = P (atskira taisyklė, pašalinta).
+TEST_CASE("timing: enc garsas be žymų laukiamas ties T + P, riba 3·P/4 nuo T + E", "[func][timing]") {
     func::Opts o;
     o.fmt = vramflow::kFmt1080i50;
-    CHECK(func::enc_deadline_ns(o) == 30'000'000);
-    CHECK(func::enc_audio_expect_ns(o) == 20'000'000);
+    const std::int64_t p = engine::period_ns(o.fmt.grain_rate());
+    CHECK(func::in_edge(nullptr, "nėra", o, p).t.expect_ns == 20'000'000);
+    CHECK(func::in_edge(nullptr, "nėra", o, 0).t.expect_ns == 0);
+    CHECK_FALSE(func::in_edge(nullptr, "nėra", o, p).tagged);
+    CHECK(func::deadline_ns(o) == 15'000'000);
+    o.input_expect_ms = 9.5;  // svetimas flow be žymų
+    CHECK(func::in_edge(nullptr, "nėra", o, p).t.expect_ns == 9'500'000);
+    o.input_offset = -2;
+    CHECK(func::in_edge(nullptr, "nėra", o, 0).t.index_offset == -2);
     std::string why;
     REQUIRE(vramflow::parse_format("1080p25", o.fmt, why));
-    CHECK(func::enc_deadline_ns(o) == 60'000'000);
-    CHECK(func::enc_audio_expect_ns(o) == 40'000'000);
-    o.deadline_ms = 25;
-    CHECK(func::enc_deadline_ns(o) == 25'000'000);
+    CHECK(func::deadline_ns(o) == 30'000'000);
+    func::Opts q;
+    q.fmt = o.fmt;
+    CHECK(func::in_edge(nullptr, "nėra", q, engine::period_ns(q.fmt.grain_rate())).t.expect_ns == 40'000'000);
+    // fazė ir skelbiama riba: E = max(video 33,5 ms, garsas 20 ms) — viena fazė
+    func::Stats st;
+    engine::EngineConfig cfg = func::engine_config(func::Opts{}, func::EngineTiming::Isolation, 500'000);
+    std::vector<func::InEdge> e(2);
+    e[0].t.expect_ns = 33'500'000;
+    e[1].t.expect_ns = 20'000'000;
+    func::EdgePlan plan;
+    std::string err;
+    func::Opts r;
+    r.domain = "/nėra-tokio-domeno";
+    REQUIRE(func::plan_edges(r, cfg, e, false, "test", st, plan, err));
+    CHECK(cfg.cuts.expect_ns == 33'500'000);
+    CHECK(plan.out.commit_bound_ns == 33'500'000 + 500'000 + 5'000'000 + 3'000'000);
+    CHECK(plan.tags.find("urn:x-vramflow:tag:commit-bound-ns\":[\"42000000\"]") != std::string::npos);
+    CHECK(st.proc["ring_lag_us"] == 48'500);
 }
 
 TEST_CASE("gap_policy: GapFill — Repeat == to paties pariteto šaltinis, Black == Y 64 / C 512, Invalid — žymė (host, cuda-linear)",

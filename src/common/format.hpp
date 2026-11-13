@@ -186,20 +186,22 @@ inline bool format_from_flow_def(const std::string& json, VideoFormat& out, std:
 }
 
 // MXL video flow aprašas (v210, arba v210a, jei f.raster.alpha). label — description ir label; group_hint —
-// urn:x-nmos:tag:grouphint/v1.0 reikšmė (pvz. "vramflow-func-<seed>-1:Video 0").
-inline std::string video_flow_def(const std::string& id, const std::string& label, const VideoFormat& f, const std::string& group_hint) {
+// urn:x-nmos:tag:grouphint/v1.0 reikšmė (pvz. "vramflow-func-<seed>-1:Video 0"). extra_tags — papildomos žymos tame pačiame "tags"
+// objekte, prasideda kableliu (briaunos sutartis V24: engine::timing_tags_json); tuščia — tik grouphint.
+inline std::string video_flow_def(const std::string& id, const std::string& label, const VideoFormat& f, const std::string& group_hint,
+                                  const std::string& extra_tags = {}) {
     const gfx::Raster& r = f.raster;
     char b[2048];
     std::snprintf(b, sizeof b,
                   R"({"id":"%s","description":"%s","label":"%s",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["%s"]},)"
+                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["%s"]%s},)"
                   R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
                   R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
                   R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
                   R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
                   R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
                   R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
-                  id.c_str(), label.c_str(), label.c_str(), group_hint.c_str(), r.alpha ? "video/v210a" : "video/v210",
+                  id.c_str(), label.c_str(), label.c_str(), group_hint.c_str(), extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210",
                   static_cast<long long>(f.frame_rate.num), static_cast<long long>(f.frame_rate.den), r.w, r.h,
                   r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
     return b;

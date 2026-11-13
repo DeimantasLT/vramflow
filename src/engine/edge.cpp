@@ -13,7 +13,10 @@ std::int64_t phase_ns(const CutConfig& k) { return k.expect_ns + k.read_offset_n
 
 std::int64_t commit_bound_ns(const CutConfig& k, bool source) {
     const Cuts c = cuts_for(0, k);  // T(0) = 0: ribos — santykiniai laikai
-    return (source ? c.open : c.a) + k.guard_ns;
+    // šaltinis įėjimų nelaukia, bet skelbia tą pačią formulę su numatytuoju Wr = P/4 (planas D7: Φ + Wr + G) — atsarga
+    // pabudimo drebėjimui (WSL2), legacy ribų Wr = D į ją neįeina
+    if (source) return c.open + period_ns(k.rate) / 4 + k.guard_ns;
+    return c.a + k.guard_ns;
 }
 
 std::int64_t content_delay_ns(std::span<const EdgeTiming> in, timing::Rational rate) {

@@ -410,7 +410,7 @@ int run_composite(const Opts& o) {
     auto idx_base = [&](std::uint32_t n) { return n * per; };
     auto in_flow_id = [&](std::uint32_t n, std::uint32_t slot) {  // slot 0 = bazė (jei yra), toliau sluoksniai
         const std::uint32_t k = slot - (has_base ? 1 : 0);
-        if (has_base && slot == 0) return flow_id(o.in_role, o.flow_base + n);
+        if (has_base && slot == 0) return flow_id(o.in_role, o.in_base() + n);
         return layer_ids[k].empty() ? flow_id(kRoleGfx, (o.flow_base + n) * 8 + k) : layer_ids[k];
     };
     int rc = 0;
@@ -453,10 +453,25 @@ int run_composite(const Opts& o) {
         for (int parity = 0; parity < 2 && !rc; ++parity)
             if (!gfx::composite_job_valid(j, parity, &why)) { st.fatal = "išėjimas " + std::to_string(n) + ": " + why; rc = 1; }
     }
+    // Briaunos laiko sutartis (V24): fazė iš bazių ir sluoksnių žymų (sluoksniai be žymų / dar neatsiradę — --input-expect-ms
+    // arba 0); skelbiama riba — išėjimų flow aprašuose
+    // Startas — wait-all (V18): išėjimo rastras = bazės, todėl bazių laukta prieš kuriant išėjimus; sluoksniai (Wanted) varikliui
+    // nebūtini — wait_all jų nelaukia
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
+    ecfg.start = engine::StartMode::WaitAll;
+    std::vector<InEdge> edges;
+    for (std::uint32_t n = 0; n < N; ++n)
+        for (std::uint32_t s = 0; s < per; ++s) edges.push_back(in_edge(inst, in_flow_id(n, s), o, 0));
+    EdgePlan plan;
+    if (!rc && !plan_edges(o, ecfg, edges, false, "composite", st, plan, err)) {
+        st.fatal = err;
+        rc = 2;
+    }
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
         const vramflow::VideoFormat of{out_r[n], o.fmt.frame_rate};
-        if (!create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed), opts, of, o, err)) {
+        if (!create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed, plan.tags), opts, of,
+                           o, err)) {
             st.fatal = "out " + std::to_string(n) + ": " + err;
             rc = 2;
         }
@@ -493,18 +508,14 @@ int run_composite(const Opts& o) {
         if (!cpu) cudaSetDevice(dev);
         const vramflow::VideoFormat of{out_r[n], o.fmt.frame_rate};
         std::string e;
-        const bool ok = create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed), opts, of,
-                                      o, e);
+        const bool ok = create_output(inst, out[n], flow_id(kRoleComp, o.flow_base + n), comp_def(o.flow_base + n, of, o.run_seed, plan.tags),
+                                      opts, of, o, e);
         if (!ok) log_line("composite", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
         return ok;
     });
     engine::SystemClock clk;
     EngineStats es(o, "composite");
     engine::StatsHub& hub = es.hub;
-    // Startas — wait-all (V18): išėjimo rastras = bazės, todėl bazių laukta prieš kuriant išėjimus; sluoksniai (Wanted) varikliui
-    // nebūtini — wait_all jų nelaukia
-    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
-    ecfg.start = engine::StartMode::WaitAll;
     st.proc["deadline_us"] = static_cast<std::uint64_t>(ecfg.cuts.deadline_ns / 1000);  // efektyvi riba D (V20)
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
@@ -512,11 +523,12 @@ int run_composite(const Opts& o) {
         u.name = flow_id(kRoleComp, o.flow_base + n);
         // bazė — Required (jos nėra → spraga pagal --on-loss); sluoksniai — Wanted: laukiami iki vieneto ribos, tada be jų (skaidrūs)
         for (std::uint32_t s = 0; s < per; ++s)
-            u.in.push_back(engine::InputSpec{&ports_in[n * per + s], {}, 1,
+            u.in.push_back(engine::InputSpec{&ports_in[n * per + s], edges[n * per + s].t, 1,
                                              has_base && s == 0 ? engine::Need::Required : engine::Need::Wanted, engine::InMode::Exact});
         u.out.push_back(&ports_out[n]);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+        else if (const std::string bad = check_advertised(eng, id, plan); !bad.empty()) { st.fatal = bad; rc = 2; }
     }
     CompositeFn fn(o, st, hub, eng, in, cpu, host_gpu, has_base, K, per, lx, ly, lop, lay, out_r, s_in, s_out, pool, stream,
                    warm_tai_after(o.warmup_s));

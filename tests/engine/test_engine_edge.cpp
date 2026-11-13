@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/audio_frames.hpp"
 #include "engine/edge.hpp"
 #include "fakes.hpp"
 
@@ -136,20 +137,36 @@ TEST_CASE("engine: rinkinio lygiavimas", "[engine][edge]") {
     CHECK(a3.shift[1] == 0);
 }
 
+TEST_CASE("engine: rinkinio lygiavimas — garso mėginių poslinkis", "[engine][edge][audio]") {
+    // 1080i50 (kadras — 2 laukai, 1920 mėginių): poslinkis −1920 — kadro F garsas skaitomas iš kadro F − 1 mėginių
+    AudioFrames a{{25, 1}, 2};
+    const AudioFrames plain = a;
+    a.sample_shift = -1920;
+    for (const Index j : {Index{2001}, Index{2003}, Index{40001}}) {
+        CHECK(a.end(j) == plain.end(j) - 1920);
+        CHECK(a.count(j) == plain.count(j));
+    }
+    // head — paskutinio įrašyto mėginių intervalo galas: su poslinkiu tas pats kadras paruoštas 1920 mėginių anksčiau
+    const std::uint64_t head = plain.end(2001);
+    CHECK(plain.last_ready(head) == 2001);
+    CHECK(a.last_ready(head) == 2003);
+    CHECK(a.last_ready(head - 1920) == 2001);
+}
+
 TEST_CASE("edge: commit bound ir fazė pagal dažnį", "[engine][edge]") {
     CutConfig c = default_cuts({50, 1});
     CHECK(phase_ns(c) == 500'000);
     CHECK(commit_bound_ns(c, false) == 8'500'000);  // 0,5 + 5 + 3
     c.read_offset_ns = 0;
-    CHECK(commit_bound_ns(c, true) == 3'000'000);  // šaltinis (gen, ro 0): t_open + G
+    CHECK(commit_bound_ns(c, true) == 8'000'000);  // šaltinis (gen, ro 0): t_open + P/4 + G
     c.expect_ns = 11'500'000;
     c.read_offset_ns = 500'000;
     CHECK(phase_ns(c) == 12'000'000);
     CHECK(commit_bound_ns(c, false) == 20'000'000);
     const CutConfig p25 = default_cuts({25, 1});  // 25p: 0,5 + 10 + 6
     CHECK(commit_bound_ns(p25, false) == 16'500'000);
-    const CutConfig legacy = legacy_cuts({50, 1}, 0, 15'000'000);  // šaltinis legacy ribose — tik t_open + G
-    CHECK(commit_bound_ns(legacy, true) == 3'000'000);
+    const CutConfig legacy = legacy_cuts({50, 1}, 0, 15'000'000);  // šaltinis legacy ribose (Wr = D) — t_open + P/4 + G
+    CHECK(commit_bound_ns(legacy, true) == 8'000'000);
     // content_delay: max(cd − index_offset · P)
     const std::vector<EdgeTiming> e{{0, 0, 0}, {-2, 0, 0}, {0, 0, 60'000'000}};
     CHECK(content_delay_ns(e, {50, 1}) == 60'000'000);

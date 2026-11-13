@@ -22,7 +22,15 @@
    "versions"
   ],
   "proc": [
-   "deadline_us"
+   "commit_bound_us",
+   "content_delay_us",
+   "deadline_us",
+   "expect_us",
+   "inputs_tagged",
+   "inputs_untagged",
+   "phase_us",
+   "ring_lag_us",
+   "ring_safe_us"
   ],
   "hist": [
    "encode_ms",

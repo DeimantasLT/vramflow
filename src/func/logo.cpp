@@ -343,7 +343,7 @@ int run_logo(const Opts& o_in) {
     std::vector<runtime::InputSlot> in;
     in.reserve(o.flows);
     for (std::uint32_t n = 0; n < o.flows; ++n) {
-        in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
+        in.push_back(make_input(o, flow_id(o.in_role, o.in_base() + n), &o.fmt));
         if (immediate) in.back().expect_storage(!(cpu || host_gpu));  // kita saugykla — Mismatch (exit 6), ne painiava
     }
     const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
@@ -355,12 +355,24 @@ int run_logo(const Opts& o_in) {
         }
     // Nužudyto ankstesnio logo pasenę išėjimai (be writer'io) pašalinami — kitaip perkrautas logo jų nesukurtų.
     mxlGarbageCollectFlows(inst);
+    // Briaunos laiko sutartis (V24): fazė iš įėjimų žymų (flow'ų, kurių dar nėra, — --input-expect-ms / 0), skelbiama riba —
+    // išėjimų flow aprašuose (urn:x-vramflow:tag:commit-bound-ns, content-delay-ns)
+    engine::EngineConfig ecfg = engine_config(o, kLogoTiming, o.read_offset_us * 1000);
+    std::vector<InEdge> edges;
+    for (std::uint32_t n = 0; n < o.flows; ++n) edges.push_back(in_edge(inst, flow_id(o.in_role, o.in_base() + n), o, 0));
+    EdgePlan plan;
+    if (!plan_edges(o, ecfg, edges, false, "logo", st, plan, err)) {
+        st.fatal = err;
+        for (auto& s : in) s.release();
+        mxlDestroyInstance(inst);
+        return finish(2);
+    }
     std::vector<VideoOut> out(o.flows);
     int rc = 0;
     const std::string opts = cpu ? std::string{} : storage_options(o, dev);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts,
-                           o.fmt, o, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
+        if (!create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt, plan.tags),
+                           opts, o.fmt, o, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
     for (std::uint32_t n = 0; n < o.flows && !rc && !immediate; ++n)  // immediate — tikrina pats slot'as (expect_storage)
         if (in[n].in().cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
@@ -399,8 +411,8 @@ int run_logo(const Opts& o_in) {
     set_release(ports_out, out, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);
         std::string e;
-        const bool ok = create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt),
-                                      opts, o.fmt, o, e);
+        const bool ok = create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n),
+                                      video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt, plan.tags), opts, o.fmt, o, e);
         if (!ok) log_line("logo", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
         return ok;
     });
@@ -408,7 +420,7 @@ int run_logo(const Opts& o_in) {
     EngineStats es(o, "logo");
     engine::StatsHub& hub = es.hub;
     st.proc["deadline_us"] = static_cast<std::uint64_t>(deadline_ns(o) / 1000);  // efektyvi riba D (V20: auto 3·P/4)
-    engine::TickEngine eng(engine_config(o, kLogoTiming, o.read_offset_us * 1000), clk, hub, stop);
+    engine::TickEngine eng(ecfg, clk, hub, stop);
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
     for (auto& p : ports_out) optr.push_back(&p);
@@ -416,10 +428,11 @@ int run_logo(const Opts& o_in) {
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(kRoleLogo, o.flow_base + n);
-        u.in.push_back(engine::InputSpec{&ports_in[n], {}, 1, engine::Need::Required, engine::InMode::Exact});
+        u.in.push_back(engine::InputSpec{&ports_in[n], edges[n].t, 1, engine::Need::Required, engine::InMode::Exact});
         u.out.push_back(optr[n]);
         std::uint32_t id = 0;
         if (!eng.add_unit(u, id, err)) { st.fatal = "add_unit: " + err; rc = 2; }
+        else if (const std::string bad = check_advertised(eng, id, plan); !bad.empty()) { st.fatal = bad; rc = 2; }
     }
     LogoFn fn(o, st, hub, eng, cpu, host_gpu, inter, dim, gbytes, inject_word, pool, dlogo, hlogo, stream, s_in, s_out,
               warm_tai_after(o.warmup_s));

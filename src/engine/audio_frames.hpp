@@ -16,16 +16,24 @@ namespace mxlv::engine {
 struct AudioFrames {
     vramflow::Rational frame_rate{25, 1};
     std::uint32_t gpf = 2;  // grain'ų (laukų) kadre
+    // Rinkinio lygiavimas (V24, engine::bundle_align): ≤ 0 — kadro garsas skaitomas tiek mėginių anksčiau (video turinys
+    // vėluoja labiau nei garsas). Mėginių skaičius kadre nekinta.
+    std::int64_t sample_shift = 0;
 
     std::uint64_t frame_of(Index j) const { return j / gpf; }
-    std::uint64_t end(Index j) const { return vramflow::sample_begin(frame_rate, frame_of(j) + 1); }
+    std::uint64_t end(Index j) const {
+        return static_cast<std::uint64_t>(static_cast<std::int64_t>(vramflow::sample_begin(frame_rate, frame_of(j) + 1)) + sample_shift);
+    }
     std::uint32_t count(Index j) const {
-        return static_cast<std::uint32_t>(end(j) - vramflow::sample_begin(frame_rate, frame_of(j)));
+        return static_cast<std::uint32_t>(vramflow::sample_begin(frame_rate, frame_of(j) + 1) -
+                                          vramflow::sample_begin(frame_rate, frame_of(j)));
     }
     // Didžiausias vieneto indeksas j (≡ gpf − 1 mod gpf), kurio garsas jau yra, kai paskutinis įrašytas mėginio intervalo
     // galas — head; kNoIndex — nė vieno kadro.
-    Index last_ready(std::uint64_t head) const {
-        if (head == kNoIndex || head < vramflow::sample_begin(frame_rate, 1)) return kNoIndex;
+    Index last_ready(std::uint64_t head_in) const {
+        if (head_in == kNoIndex) return kNoIndex;
+        const auto head = static_cast<std::uint64_t>(static_cast<std::int64_t>(head_in) - sample_shift);  // poslinkio kadre
+        if (head < vramflow::sample_begin(frame_rate, 1)) return kNoIndex;
         // apytikslis F, tada tikslinama sveikaisiais skaičiais (sample_begin monotoniškas)
         std::uint64_t f = static_cast<std::uint64_t>(static_cast<double>(head) * static_cast<double>(frame_rate.num) /
                                                      (48000.0 * static_cast<double>(frame_rate.den)));

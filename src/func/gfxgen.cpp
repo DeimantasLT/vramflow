@@ -218,13 +218,21 @@ int run_gfxgen(const Opts& o) {
     std::vector<Src> src(total);
     const std::string opts = upload ? storage_options(o, dev) : std::string{};
     int rc = 0;
+    // Briaunos laiko sutartis (V24): grafikos šaltinis — riba t_open + P/4 + G (tiek pace — bibliotekos ritmas, ro 0 —, tiek
+    // manual — variklis, ro 0); žymos flow aprašuose, kuriuos perduodame bibliotekai (ABI nekinta)
+    engine::EngineConfig gcfg = engine_config(o, EngineTiming::Legacy, 0);
+    EdgePlan plan;
+    {
+        std::string perr;
+        if (!plan_edges(o, gcfg, {}, true, "gfxgen", st, plan, perr)) rc = 2;
+    }
     for (std::uint32_t n = 0; n < N && !rc; ++n)
         for (std::uint32_t k = 0; k < K && !rc; ++k) {
             Src& s = src[n * K + k];
             s.n = o.flow_base + n;  // flow ID ir turinys priklauso nuo flow_base + n (kaip gen)
             s.k = k;
             s.r = geom[k];
-            const int c = vfgfx_writer_create(inst, gfx_def(s.n, k, vramflow::VideoFormat{s.r, o.fmt.frame_rate}, o.run_seed).c_str(),
+            const int c = vfgfx_writer_create(inst, gfx_def(s.n, k, vramflow::VideoFormat{s.r, o.fmt.frame_rate}, o.run_seed, plan.tags).c_str(),
                                               opts.empty() ? nullptr : opts.c_str(), &s.w);
             // Domeno nuoma (§P6): sukurtas flow užregistruojamas; jei jį jau laiko kitas gyvas paleidimas — klaidoje jo run_id.
             const std::string id = flow_id(kRoleGfx, s.n * 8 + k);

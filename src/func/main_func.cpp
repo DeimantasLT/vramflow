@@ -62,6 +62,7 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--threads", o.threads, "CPU varianto gijos (0 = automatiškai)");
     c->add_option("--format", o.format, "flow formatas: 1080i50 (numatytasis), 1080p25, 1080p50, 720p50, 1080i59.94, 2160p50 …");
     c->add_option("--run-id", o.run_id, "paleidimo ID domeno nuomoje <domain>.vramflow/ (numatyta <subkomanda>-<pid>-<8 hex>)");
+    c->add_flag("--allow-bad-clock", o.allow_bad_clock, "paleisti ir tada, kai TAI poslinkis ≠ 37 s (indeksai nesutaps su kitais procesais)");
     // testinės parinktys (paslėptos --help): išėjimo klaidų injekcija (logo, gen; tests/functional startstop fout_error)
     c->add_option("--test-out-error", o.test_out_error)->check(CLI::IsMember({"open", "commit"}))->group("");
     c->add_option("--test-out-error-after", o.test_out_error_after_s)->group("");
@@ -74,9 +75,19 @@ void inputs(CLI::App* c, Opts& o) {
         ->check(CLI::NonNegativeNumber);
     c->add_option("--on-format-change", o.on_format_change, "įėjimas grįžo kitu formatu: exit (exit 6, numatyta) | wait")
         ->check(CLI::IsMember({"exit", "wait"}));
+    // Briaunos laiko sutartis (V24): fazė E = max(įėjimų commit'o ribų); riba — iš aukštupio žymos commit-bound-ns
+    c->add_option("--input-expect-ms", o.input_expect_ms,
+                  "įėjimo be VRAMFlow žymų (svetimas rašytojas) commit'o riba po T(j), ms; žyma urn:x-vramflow:tag:commit-bound-ns "
+                  "viršesnė (numatyta: video 0, garsas P)")
+        ->check(CLI::Range(0.0, 1000.0));
+    c->add_option("--input-offset", o.input_offset, "skaityti įėjimo grain'ą j = i + K (K ≤ 0; vėlinimas, kai netelpa į ring'ą)")
+        ->check(CLI::Range(-1000, 0));
+    c->add_option("--in-flow-base", o.in_flow_base, "įėjimų flow bazė (numatyta = --flow-base; grandinei viename domene, pvz. logo → logo)")
+        ->check(CLI::NonNegativeNumber);
 }
 constexpr const char* kDeadlineHelp =
-    "paskutinė įėjimų laukimo riba nuo T(i), ms; 0 — auto 3·P/4 (numatyta: 50 Hz — 15, 25 Hz — 30; WSL2 kampanijos — 30)";
+    "paskutinė įėjimų laukimo riba nuo T(i) + E (E — įėjimų laukimas pagal briaunos sutartį), ms; 0 — auto 3·P/4 (numatyta: "
+    "50 Hz — 15, 25 Hz — 30)";
 
 // MXL video rašytojai (gen, logo, composite, dec): spragų politika K3 (production-grade §6 K3, planas §6 D4).
 void writers(CLI::App* c, Opts& o) {
@@ -230,6 +241,15 @@ int main(int argc, char** argv) {
     // Domeno nuoma (planas §P6, K8): laikoma iki proceso pabaigos; harness'as domeno netrina, kol ji gyva.
     {
         const std::string sub = app.get_subcommands().front()->get_name();
+        // TAI preflight (planas §6 D5, V24): MXL indeksas = round(TAI · dažnis); kitas branduolio TAI poslinkis — kiti indeksai
+        // nei kitų procesų / mašinų (riba ir briaunos sutartis netenka prasmės). exit 2, nebent --allow-bad-clock.
+        if (const std::string bad = tai_offset_error(); !bad.empty()) {
+            if (!o.allow_bad_clock) {
+                std::fprintf(stderr, "[%s] %s (--allow-bad-clock — paleisti vis tiek)\n", sub.c_str(), bad.c_str());
+                return 2;
+            }
+            std::fprintf(stderr, "[%s] įspėjimas: %s (--allow-bad-clock)\n", sub.c_str(), bad.c_str());
+        }
         // cuda-linear: per ilgas domeno kelias → reader'iai neprisijungtų prie payload.sock ir lauktų be galo — klaida iškart
         if (o.storage == "cuda-linear")
             if (const std::string bad = mxlv::runtime::cuda_domain_path_error(o.domain); !bad.empty()) {

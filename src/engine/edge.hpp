@@ -31,8 +31,9 @@ struct OutputTiming {
 
 // Φ = E + ro (tick'o atidarymas po T(i)).
 std::int64_t phase_ns(const CutConfig&);
-// Išėjimo commit'o riba po T(i): šaltinis (vienetas be įėjimų) — t_open + G; kitaip — a(i) + G (a(i) = t_open + Wr, ne vėliau
-// kaip B; single_phase — vienintelė riba T + E + D_eff). Spragos commit'inamos ties t_open arba A — taip pat ribose.
+// Išėjimo commit'o riba po T(i): a(i) + G (a(i) = t_open + Wr, ne vėliau kaip B); šaltinis (vienetas be įėjimų; dažnai legacy
+// ribose, kur Wr = D) — t_open + P/4 + G (ta pati formulė su numatytuoju Wr). Spragos commit'inamos ties t_open arba A —
+// taip pat ribose.
 std::int64_t commit_bound_ns(const CutConfig&, bool source);
 // max(content_delay_in − index_offset · P) per įėjimus; be įėjimų — 0.
 std::int64_t content_delay_ns(std::span<const EdgeTiming>, timing::Rational rate);

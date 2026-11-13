@@ -424,7 +424,7 @@ int run_enc(const Opts& o) {
     // kai jo video slot'as prisijungia iš naujo (tas pats gamintojas) arba skaitymas grąžina FLOW_INVALID.
     std::vector<runtime::InputSlot> in;
     in.reserve(o.flows);
-    for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
+    for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.in_base() + n), &o.fmt));
     const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
     std::vector<AudioIn> ain(o.audio ? o.flows : 0);
     std::vector<std::uint64_t> seen_reattach(o.flows, 0);
@@ -440,11 +440,29 @@ int run_enc(const Opts& o) {
     // kiti — A fazėje. Variklio gijos niekada nemigdo (anksčiau read_audio(wait) laukdavo iki T + --deadline-ms — vienas
     // srautas be garso vėlindavo visus; po migracijos — tik iki a(i), todėl realaus laiko garsas ~T + P buvo visada tyla).
     // Pradinis laukimas — kaip anksčiau (AudioIn::open pagal --input-wait-ms); reader'is perduodamas prievadui.
-    const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};
+    // Briaunos laiko sutartis (V24): video — aukštupio žyma (svetimam — --input-expect-ms / 0), garsas — žyma arba P (realaus
+    // laiko rašytojas kadro garsą baigia ties T + P; anksčiau — atskira enc taisyklė D = 3P/2 ir expect P). Viena fazė varikliui:
+    // E = max. Rinkinio lygiavimas (D7): video ir garsas skaitomi su (align − content_delay) poslinkiu.
+    const std::int64_t period = engine::period_ns(o.fmt.grain_rate());
+    std::vector<InEdge> vedge, aedge;
+    for (std::uint32_t n = 0; n < o.flows; ++n) vedge.push_back(in_edge(inst, flow_id(o.in_role, o.in_base() + n), o, 0));
+    for (std::uint32_t n = 0; n < ain.size(); ++n) aedge.push_back(in_edge(inst, flow_id(kRoleAudio, o.flow_base + n), o, period));
+    const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};  // mėginių skaičius kadrui (be poslinkio)
     std::vector<engine::MxlAudioInput> ports_audio;
     ports_audio.reserve(ain.size());
     for (std::uint32_t n = 0; n < ain.size(); ++n) {
-        ports_audio.emplace_back(inst, flow_id(kRoleAudio, o.flow_base + n), afr, ain[n].r);
+        const std::vector<engine::BundleMember> mem{{vedge[n].t.content_delay_ns, false}, {aedge[n].t.content_delay_ns, true}};
+        const engine::BundleAlign al = engine::bundle_align(mem, o.fmt.grain_rate());
+        vedge[n].t.index_offset += static_cast<std::int32_t>(al.shift[0]);
+        vedge[n].t.content_delay_ns = al.align_ns;  // abu nariai po lygiavimo — align
+        aedge[n].t.content_delay_ns = al.align_ns;
+        engine::AudioFrames afn = afr;
+        // --input-offset K garsui — mėginiais (K grain'ų · P · 48 kHz), kad kadro garsas liktų to paties kadro
+        afn.sample_shift = al.shift[1] + (static_cast<std::int64_t>(o.input_offset) * period * 48'000) / 1'000'000'000;
+        if (al.shift[1] != 0 || al.shift[0] != 0)
+            log_line("enc", "rinkinio lygiavimas " + std::to_string(n) + ": video " + std::to_string(al.shift[0]) + " grain'ų, garsas " +
+                                std::to_string(al.shift[1]) + " mėginių (content_delay " + std::to_string(al.align_ns / 1000) + " µs)");
+        ports_audio.emplace_back(inst, flow_id(kRoleAudio, o.flow_base + n), afn, ain[n].r);
         ain[n].r = nullptr;
     }
 
@@ -785,21 +803,27 @@ int run_enc(const Opts& o) {
     // Startas — wait-all (V18): enc MXL išėjimų neturi, įėjimų laukta prieš variklį (attach_inputs)
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
     ecfg.start = engine::StartMode::WaitAll;
-    // Peržiūra 2026-11-13 p. 4: kadro garsas baigiamas ties T + P — numatytoji enc riba 3P/2 (aiški --deadline-ms nepakitusi)
-    ecfg.cuts.deadline_ns = enc_deadline_ns(o);
     {
-        std::string warn;
-        if (engine::clamp_deadline(ecfg.cuts, warn)) std::fprintf(stderr, "[enc] %s\n", warn.c_str());
+        std::vector<InEdge> all = vedge;
+        all.insert(all.end(), aedge.begin(), aedge.end());
+        EdgePlan plan;  // enc — sink: skelbti nėra kur; riba = kada kadras perduodamas koderiui (galinis vėlinimas)
+        if (!rc && !plan_edges(o, ecfg, all, false, "enc", st, plan, err)) {
+            st.fatal = err;
+            rc = 2;
+        }
     }
     st.proc["deadline_us"] = static_cast<std::uint64_t>(ecfg.cuts.deadline_ns / 1000);  // efektyvi riba D (V20)
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
-        u.name = flow_id(o.in_role, o.flow_base + n);
-        u.in.push_back(engine::InputSpec{&ports_in[n], {}, static_cast<std::uint8_t>(gpf), engine::Need::Required, engine::InMode::Exact});
-        if (n < ports_audio.size())  // garsas: Wanted — laukiamas kaip Required iki paskutinės ribos, tada be jo (tyla)
-            u.in.push_back(engine::InputSpec{&ports_audio[n], engine::EdgeTiming{0, enc_audio_expect_ns(o)}, 1, engine::Need::Wanted,
-                                             engine::InMode::Exact});
+        u.name = flow_id(o.in_role, o.in_base() + n);
+        u.in.push_back(engine::InputSpec{&ports_in[n], vedge[n].t, static_cast<std::uint8_t>(gpf), engine::Need::Required,
+                                         engine::InMode::Exact});
+        if (n < ports_audio.size()) {  // garsas: Wanted — laukiamas kaip Required iki paskutinės ribos, tada be jo (tyla)
+            engine::EdgeTiming at = aedge[n].t;
+            at.index_offset = 0;  // garso poslinkis — mėginiais (AudioFrames::sample_shift)
+            u.in.push_back(engine::InputSpec{&ports_audio[n], at, 1, engine::Need::Wanted, engine::InMode::Exact});
+        }
         u.stride = static_cast<std::uint32_t>(gpf);
         u.residue = static_cast<std::uint32_t>(gpf - 1);
         std::uint32_t id = 0;

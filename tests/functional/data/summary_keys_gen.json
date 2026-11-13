@@ -19,7 +19,11 @@
    "versions"
   ],
   "proc": [
-   "clock_steps"
+   "clock_steps",
+   "commit_bound_us",
+   "content_delay_us",
+   "expect_us",
+   "phase_us"
   ],
   "hist": [
    "commit_lateness",
@@ -32,6 +36,7 @@
    "commit_lateness_s"
   ],
   "proc": [
+   "audio_commit_bound_us",
    "failed_units",
    "late_commits",
    "late_skips",

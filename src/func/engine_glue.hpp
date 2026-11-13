@@ -28,12 +28,36 @@ enum class EngineTiming { Legacy, Isolation };
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns);
 
 // Efektyvi --deadline-ms riba ns (V20, K-T2): 0 — auto 3·P/4 pagal flow grain'ų dažnį (--format); kitaip — nurodyta.
+// Riba skaičiuojama nuo T(i) + E (E — briaunos sutarties fazė).
 std::int64_t deadline_ns(const Opts& o);
-// enc (peržiūra 2026-11-13 p. 4, iki briaunų laiko sutarties): kadro garsas baigiamas ties T(j) + P, todėl numatytoji enc riba
-// — 3·P/2 (50 Hz — 30 ms, 25p — 60 ms; > 2P − G apkarpoma), aiški --deadline-ms — nepakitusi; garso (Wanted) įėjimas laukiamas
-// ties T + P (enc_audio_expect_ns).
-std::int64_t enc_deadline_ns(const Opts& o);
-std::int64_t enc_audio_expect_ns(const Opts& o);
+
+// --- Briaunos laiko sutartis (planas §6 D7, V24; K-T10, K-T14) -------------------------------------------------------
+// Įėjimo briauna iš flow aprašo (flow jau yra — žymos; nėra — vėliau prisijungs): žyma commit-bound-ns → expect_ns,
+// content-delay-ns → content_delay_ns; be žymų (svetimas rašytojas arba flow'o dar nėra) — --input-expect-ms, o jei ji
+// nenurodyta — untagged_ns (video 0; garsas — P: realaus laiko rašytojas kadro garsą baigia ties T(j) + P, todėl enc garso
+// „ypatingas atvejis“ — tiesiog šios sutarties reikšmė). index_offset — --input-offset.
+struct InEdge {
+    engine::EdgeTiming t;
+    bool exists = false;  // flow aprašas rastas paleidžiant
+    bool tagged = false;  // aprašas su commit-bound-ns
+};
+InEdge in_edge(mxlInstance inst, const std::string& flow_id, const Opts& o, std::int64_t untagged_ns);
+// Domeno ring'o istorija: <domain>/options.json "urn:x-mxl:option:history_duration/v1.0" (ns); nėra — 200 ms (MXL numatyta).
+std::int64_t domain_history_ns(const std::string& domain);
+// Funkcijos briaunų planas (prieš kuriant išėjimus): cfg.cuts.expect_ns = max(įėjimų expect_ns) (viena fazė, K-T10); išėjimų
+// skelbiama riba ir turinio vėlinimas (tags — flow aprašo žymos); ring'o gylio patikra (Refuse → false ir err — funkcija baigia
+// exit 2; Warn — eilutė į stderr). Santraukoje (proc): expect_us, phase_us, commit_bound_us, content_delay_us, ring_lag_us,
+// ring_safe_us, inputs_tagged, inputs_untagged; eilutė „[who] briaunos sutartis: …“ į stderr.
+struct EdgePlan {
+    engine::OutputTiming out;
+    std::string tags;  // engine::timing_tags_json(out)
+};
+bool plan_edges(const Opts& o, engine::EngineConfig& cfg, const std::vector<InEdge>& in, bool source, const char* who, Stats& st,
+                EdgePlan& plan, std::string& err);
+// Po add_unit: variklio apskaičiuota vieneto riba turi sutapti su paskelbta (kitaip — klaida programoje; tekstas, tuščia — gerai).
+std::string check_advertised(const engine::TickEngine& eng, std::uint32_t unit, const EdgePlan& plan);
+// TAI preflight (D5): branduolio TAI poslinkis (adjtimex) turi būti 37 s; tuščia — gerai, kitaip — klaidos tekstas.
+std::string tai_offset_error();
 
 // --on-loss reikšmė → politika (invalid | freeze | black | leave; nežinoma — invalid, CLI ją jau atmeta).
 engine::GapPolicy gap_policy(const std::string& s);

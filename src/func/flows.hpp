@@ -24,16 +24,21 @@ namespace mxlv::func {
 enum Role : int { kRoleGen = 1, kRoleLogo = 2, kRoleAudio = 3, kRoleDec = 4, kRoleGfx = 5, kRoleComp = 6 };
 
 std::string flow_id(int role, std::uint32_t n);
-std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed, const vramflow::VideoFormat& f = vramflow::kFmt1080i50);
+// extra_tags — papildomos flow aprašo žymos (briaunos sutartis V24: engine::timing_tags_json; prasideda kableliu).
+std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed, const vramflow::VideoFormat& f = vramflow::kFmt1080i50,
+                      const std::string& extra_tags = {});
 // Standartinis v210a (arba v210, jei !r.alpha) flow aprašas grafikos šaltiniui: flow_id(kRoleGfx, n * 8 + k), k < 8.
 // Interlaced: grain = laukas, grain_rate 25/1 (MXL kadrų ritmas; grain'ų ritmas 50/1, kaip video_def); progresyvus: 50/1.
 std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::gfx::Raster& r, std::uint64_t run_seed = 0);
 // Kompozitoriaus išėjimo flow (v210 arba v210a pagal r.alpha): flow_id(kRoleComp, n); grain_rate kaip gfx_def.
 std::string comp_def(std::uint32_t n, const vramflow::gfx::Raster& r, std::uint64_t run_seed = 0);
 // Tas pats su aiškiu kadrų dažniu (f.raster — sluoksnio / išėjimo rastras, f.frame_rate — flow'o kadrų dažnis).
-std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::VideoFormat& f, std::uint64_t run_seed);
-std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint64_t run_seed);
-std::string audio_def(std::uint32_t n, std::uint64_t run_seed);
+std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::VideoFormat& f, std::uint64_t run_seed,
+                    const std::string& extra_tags = {});
+std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint64_t run_seed, const std::string& extra_tags = {});
+std::string audio_def(std::uint32_t n, std::uint64_t run_seed, const std::string& extra_tags = {});
+// Flow aprašas (mxlGetFlowDef); klaida (flow'o nėra) — tuščia eilutė ir err.
+std::string read_flow_def(mxlInstance inst, const std::string& flow, std::string& err);
 
 // 1080i50 grain'o (lauko) ritmas ir garso mėginiai laukui — numatytojo formato konstantos (seni kvietėjai ir testai).
 // Formatui neutralus kodas naudoja VideoFormat::grain_rate() ir vramflow::sample_begin.

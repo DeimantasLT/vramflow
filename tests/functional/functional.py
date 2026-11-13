@@ -1152,6 +1152,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in service.TESTS.items()})
     import review6  # šeštos peržiūros testai (composite sluoksniai, INVALID turinys, aukštupio spragos, enc garsas, re-attach)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in review6.TESTS.items()})
+    import chain  # briaunos laiko sutartis (V24): fchain5, fchain5_kill, fforeign_expect
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in chain.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():

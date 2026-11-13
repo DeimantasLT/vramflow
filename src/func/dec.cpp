@@ -299,9 +299,13 @@ int run_dec(const Opts& o) {
     const std::string& siting = o.chroma_siting;  // tik interlaced flow'ui; progresyviam visada kadro chroma
     if (!inter && siting == "field") { st.fatal = "--chroma-siting field galimas tik interlaced formatui"; rc = 1; }
     const int fps_i = static_cast<int>((o.fmt.frame_rate.num + o.fmt.frame_rate.den / 2) / o.fmt.frame_rate.den);  // ~kadrų per 1 s
+    // Briaunos laiko sutartis (V24): dec — šaltinis (kadrai iš eilės ties tick'u); riba t_open + P/4 + G
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Legacy, o.read_offset_us * 1000);
+    EdgePlan plan;
+    if (!rc && !plan_edges(o, ecfg, {}, true, "dec", st, plan, err)) rc = 2;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
-        if (!create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt), opts,
-                           o.fmt, o, err)) { st.fatal = err; rc = 2; }  // nuoma + savininko run_id klaidoje (§P6)
+        if (!create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt, plan.tags),
+                           opts, o.fmt, o, err)) { st.fatal = err; rc = 2; }  // nuoma + savininko run_id klaidoje (§P6)
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         auto s = std::make_unique<DecStream>();
         s->idx = static_cast<int>(n);
@@ -517,7 +521,6 @@ int run_dec(const Opts& o) {
             for (auto& b : cq) b.on_step(d);
         }
     };
-    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Legacy, o.read_offset_us * 1000);
     if (inter) ecfg.skip_align = 2;  // pradėti ir po praleidimo tęsti nuo viršutinio lauko
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(o.flows);
@@ -530,8 +533,8 @@ int run_dec(const Opts& o) {
     set_release(ports, out, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);
         std::string e;
-        const bool ok = create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt),
-                                      opts, o.fmt, o, e);
+        const bool ok = create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n),
+                                      video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt, plan.tags), opts, o.fmt, o, e);
         if (!ok) log_line("dec", "išėjimo " + std::to_string(n) + " atkurti nepavyko: " + e);
         return ok;
     });
