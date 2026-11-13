@@ -124,6 +124,7 @@ struct CompositeFn final : engine::TickFunction {
     std::vector<Check> check;             // sluoksnio patikra; indeksas — įėjimo a
     std::vector<std::uint8_t> present;    // sluoksnis naudojamas (1) / skaidrus (0); pradžioje 1 — pirmas trūkumas praneša
     std::vector<std::string> absent_key;  // "layer_absent_<k>"
+    std::vector<std::string> seen_reason;  // sluoksnio slot'o paskutinė atmetimo priežastis (formato pokyčio įvykiui)
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
 
     CompositeFn(const Opts& o_, Stats& st_, engine::StatsHub& hub_, const engine::TickEngine& eng_, std::vector<runtime::InputSlot>& in_,
@@ -132,7 +133,8 @@ struct CompositeFn final : engine::TickFunction {
                 std::vector<std::uint8_t*>& s_in_, std::vector<std::uint8_t*>& s_out_, ThreadPool& pool_, cudaStream_t stream_, double warm_)
         : o(o_), st(st_), hub(hub_), eng(eng_), in(in_), cpu(cpu_), host_gpu(host_gpu_), has_base(has_base_), K(K_), per(per_), lx(lx_),
           ly(ly_), lop(lop_), lay(lay_), out_r(out_r_), s_in(s_in_), s_out(s_out_), pool(pool_), stream(stream_), warm(warm_),
-          seen(in_.size()), seen_reatt(in_.size(), 0), check(in_.size(), Check::Unknown), present(in_.size(), 1) {
+          seen(in_.size()), seen_reatt(in_.size(), 0), check(in_.size(), Check::Unknown), present(in_.size(), 1),
+          seen_reason(in_.size()) {
         jobs.reserve(o.flows);
         job_out.reserve(o.flows);
         host_dst.reserve(o.flows);
@@ -189,9 +191,19 @@ struct CompositeFn final : engine::TickFunction {
             }
         }
         for (std::uint32_t n = 0; n < o.flows; ++n)
-            for (std::uint32_t k = 0; k < K; ++k)
-                if (check[layer_in(n, k)] == Check::Unknown && in[layer_in(n, k)].state() == runtime::InputSlot::State::Attached)
-                    validate_layer(n, k);
+            for (std::uint32_t k = 0; k < K; ++k) {
+                const std::size_t a = layer_in(n, k);
+                if (check[a] == Check::Unknown && in[a].state() == runtime::InputSlot::State::Attached) validate_layer(n, k);
+                // Sluoksnis grįžo kitu formatu (C1): slot'as jo neprijungia (politika wait — ne exit 6, kaip bazei), sluoksnis lieka
+                // skaidrus (layer_absent); vienas operatoriaus įvykis kiekvienam naujam atmetimui (alokacija — tik pokyčio metu)
+                if (in[a].state() != runtime::InputSlot::State::Attached && !in[a].reason().empty() && in[a].reason() != seen_reason[a]) {
+                    seen_reason[a] = in[a].reason();
+                    st.flows[n].inc("layer_format_mismatch");
+                    const std::string t = "sluoksnis " + std::to_string(k) + ": " + seen_reason[a] + " — skaidrus, laukiama tinkamo formato";
+                    log_line("composite", "išėjimas " + std::to_string(n) + ": " + t);
+                    hub.event(engine::EventKind::Warning, eng.in_id(n, layer_slot(k)), now_tai(), i, static_cast<std::int64_t>(k), t.c_str());
+                }
+            }
     }
 
     // Ar sluoksnis k naudojamas išėjimo n indekse i (ref — variklio grain'as). Trūkstamas — skaidrus: skaitiklis ir įvykis
@@ -415,7 +427,10 @@ int run_composite(const Opts& o) {
     };
     int rc = 0;
     for (std::uint32_t n = 0; n < N; ++n)
-        for (std::uint32_t s = 0; s < per; ++s) in.push_back(make_input(o, in_flow_id(n, s), nullptr));
+        for (std::uint32_t s = 0; s < per; ++s)
+            // bazė — --on-format-change (exit 6 numatyta); sluoksnis grįžęs kitu formatu — tik nebenaudojamas (laukiama, skaidrus)
+            in.push_back(has_base && s == 0 ? make_input(o, in_flow_id(n, s), nullptr)
+                                            : runtime::InputSlot(in_flow_id(n, s), nullptr, runtime::FormatChange::Wait));
     std::vector<runtime::InputSlot*> base_ptr;
     if (has_base)
         for (std::uint32_t n = 0; n < N; ++n) base_ptr.push_back(&in[idx_base(n)]);

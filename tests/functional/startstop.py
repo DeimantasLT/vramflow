@@ -404,35 +404,55 @@ TESTS["fout_error"] = fout_error
 
 
 def fformat_change(out):
-    """composite: sluoksnio gamintojas grįžta kitu rastru (logo → full) → exit 6 (--on-format-change exit), fatal su abiem
-    formatais, to išėjimo reopen_mismatch == 1 (raktas atkurtas po migracijos: variklis baigia prieš begin_tick). C variantas."""
+    """composite, --on-format-change exit (numatyta). C variantas.
+    [layer] sluoksnio gamintojas grįžta kitu rastru (logo → full): sluoksnis tampa skaidrus (layer_absent > 0), operatoriaus
+            įvykis (layer_format_mismatch ≥ 1, eilutė stderr), composite dirba toliau ir baigiasi exit 0, 0 bazės praradimų.
+            Pakeistas lūkestis (C1, peržiūra 2026-11-13 D1): anksčiau — exit 6 ir reopen_mismatch == 1 (sluoksnio formato pokytis
+            nuimdavo programą).
+    [base]  bazės gamintojas (gen) grįžta kitu formatu (1080i50 → 1080p50): kaip anksčiau — exit 6, reopen_mismatch == 1, fatal."""
     v = F.vcommon("cpu", "host")
-    d = F.fresh_domain("ffmtchg")
-    g = F.FProc(out, "ffmtchg/gen", "gen", d, "--flows", 1, "--duration", 60, *v)
-    x = F.FProc(out, "ffmtchg/gfx1", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace",
-                "--duration", 60, *v)
-    c = x2 = None
-    rc = None
-    try:
-        if not F.wait_flows(d, [F.role_flow_id(1, 0), F.role_flow_id(5, 0)]):
-            return [F.result("fformat_change", "FAIL", why="gen / gfxgen flow'ai neatsirado")]
-        c = F.FProc(out, "ffmtchg", "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "0,0", "--base", "gen",
-                    "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", 40, "--warmup", 1, *v)
-        time.sleep(4)
-        x.kill9()
-        x2 = F.FProc(out, "ffmtchg/gfx2", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "full", "--mode", "pace",
-                     "--duration", 60, *v)
-        rc = c.wait(timeout=30)
-    finally:
-        for pr in (c, x2, g):
-            if pr is not None and pr.p.poll() is None:
-                pr.term()
-    s = (c.summary() if c is not None else None) or {}
-    f0 = (s.get("flows") or [{}])[0]
-    fat = s.get("fatal") or ""
-    ok = rc == 6 and f0.get("reopen_mismatch") == 1 and fat != ""
-    return [F.result("fformat_change", "PASS" if ok else "FAIL",
-                     why=f"exit={rc} reopen_mismatch={f0.get('reopen_mismatch')} fatal={fat[:160]!r}")]
+    res = []
+    for case in ("layer", "base"):
+        d = F.fresh_domain(f"ffmtchg-{case}")
+        sub = f"ffmtchg-{case}"
+        g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", 1, "--duration", 60, *v)
+        x = F.FProc(out, f"{sub}/gfx1", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "logo", "--mode", "pace",
+                    "--duration", 60, *v)
+        c = x2 = g2 = None
+        rc = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, 0), F.role_flow_id(5, 0)]):
+                res.append(F.result(f"fformat_change[{case}]", "FAIL", why="gen / gfxgen flow'ai neatsirado"))
+                continue
+            c = F.FProc(out, sub, "composite", d, "--flows", 1, "--layers", 1, "--layer-xy", "0,0", "--base", "gen",
+                        "--out-format", "v210", "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", 14, "--warmup", 1, *v)
+            time.sleep(4)
+            if case == "layer":
+                x.kill9()
+                x2 = F.FProc(out, f"{sub}/gfx2", "gfxgen", d, "--flows", 1, "--layers", 1, "--layer-geom", "full", "--mode", "pace",
+                             "--duration", 60, *v)
+            else:
+                g.kill9()
+                g2 = F.FProc(out, f"{sub}/gen2", "gen", d, "--flows", 1, "--duration", 60, "--format", "1080p50", *v)
+            rc = c.wait(timeout=40)
+        finally:
+            for pr in (c, x2, x, g2, g):
+                if pr is not None and pr.p.poll() is None:
+                    pr.term()
+        s = (c.summary() if c is not None else None) or {}
+        f0 = (s.get("flows") or [{}])[0]
+        fat = s.get("fatal") or ""
+        err = c.err_path.read_text(errors="replace") if c is not None and c.err_path.exists() else ""
+        if case == "layer":
+            ok = (rc == 0 and f0.get("layer_format_mismatch", 0) >= 1 and f0.get("layer_absent", 0) > 0 and not fat
+                  and not f0.get("missing_fields") and not f0.get("reopen_mismatch") and "laukiama tinkamo formato" in err)
+            why = (f"exit={rc} layer_format_mismatch={f0.get('layer_format_mismatch')} layer_absent={f0.get('layer_absent')} "
+                   f"missing_fields={f0.get('missing_fields')} fields_ok={f0.get('fields_ok')} fatal={fat[:120]!r}")
+        else:
+            ok = rc == 6 and f0.get("reopen_mismatch") == 1 and fat != ""
+            why = f"exit={rc} reopen_mismatch={f0.get('reopen_mismatch')} fatal={fat[:160]!r}"
+        res.append(F.result(f"fformat_change[{case}]", "PASS" if ok else "FAIL", why=why))
+    return res
 
 
 TESTS["fformat_change"] = fformat_change
