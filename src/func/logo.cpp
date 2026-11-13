@@ -103,6 +103,7 @@ struct LogoFn final : engine::TickFunction {
     std::vector<media::LogoJob> jobs, host_jobs;
     std::vector<std::uint32_t> job_flow;
     std::vector<engine::InCounters> seen;  // įėjimų skaitikliai po paskutinio vieneto sprendimo (spragos priežasčiai)
+    std::vector<std::uint64_t> loss_lines;  // kiek praradimo eilučių išspausdinta kiekvienam flow'ui (riba kMaxLossLines)
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
     std::uint64_t injected_at = ~0ull;
     std::uint64_t missing_at = ~0ull;  // paskutinis indeksas su GapBlocked vienetu (--test-fault-proc-delay-ms)
@@ -117,7 +118,7 @@ struct LogoFn final : engine::TickFunction {
            std::vector<std::uint32_t*>& s_out_, double warm_)
         : o(o_), st(st_), hub(hub_), eng(eng_), cpu(cpu_), host_gpu(host_gpu_), inter(inter_), dim(dim_), gbytes(gbytes_),
           inject_word(inject_word_), pool(pool_), dlogo(dlogo_), hlogo(hlogo_), stream(stream_), s_in(s_in_), s_out(s_out_),
-          warm(warm_), seen(o_.flows) {
+          warm(warm_), seen(o_.flows), loss_lines(o_.flows, 0) {
         jobs.reserve(o.flows);
         host_jobs.reserve(o.flows);
         job_flow.reserve(o.flows);
@@ -210,11 +211,26 @@ struct LogoFn final : engine::TickFunction {
         return true;
     }
 
+    // Praradimo eilutė stderr (peržiūra 2026-11-13 p. 7c): flow, indeksas, priežastis — testai priskiria aukštupiui per flow'ą ir
+    // indeksą, ne skaičiais. Ne daugiau kaip kMaxLossLines vienam flow'ui (ilgas gedimas eilučių nepripildo); missing_fields
+    // (įėjimo nėra) — be eilučių.
+    static constexpr std::uint64_t kMaxLossLines = 2000;
+    void loss(std::uint32_t n, const char* key, engine::Index i, std::uint64_t t_index) {
+        st.flows[n].loss(key, t_index);
+        if (loss_lines[n]++ < kMaxLossLines)
+            std::fprintf(stderr, "[logo] praradimas: flow %u, indeksas %llu (%s)\n", n, static_cast<unsigned long long>(i), key);
+    }
+
     // Variklio praleisti indeksai (T11): praradimai (late_skips; skaitiklį rašo to_summary) — į loss_s sekundėms.
     void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext& ctx) override {
         if (!ctx.skip_is_loss()) return;
         const mxlRational r = mxl_rate(o.fmt.grain_rate());
-        for (engine::Index i = from; i < to; ++i) st.flows[unit].loss_s.add(mxlIndexToTimestamp(&r, i) / 1'000'000'000);
+        FlowStats& f = st.flows[unit];
+        for (engine::Index i = from; i < to; ++i) {
+            f.loss_s.add(mxlIndexToTimestamp(&r, i) / 1'000'000'000);
+            if (loss_lines[unit]++ < kMaxLossLines)
+                std::fprintf(stderr, "[logo] praradimas: flow %u, indeksas %llu (late_skips)\n", unit, static_cast<unsigned long long>(i));
+        }
     }
 
     void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
@@ -233,7 +249,7 @@ struct LogoFn final : engine::TickFunction {
                 break;
             }
             case engine::Outcome::Lapped:
-                f.loss("lapped", ti);
+                loss(n, "lapped", ut.index, ti);
                 times.unit_done(ut.index, now_tai(), false);
                 break;
             case engine::Outcome::GapBlocked:  // gamintojo nėra / užstrigęs
@@ -258,13 +274,13 @@ struct LogoFn final : engine::TickFunction {
                 if (us > f.c["gap_late_commit_max_us"]) f.c["gap_late_commit_max_us"] = us;
             }
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
-                if (c.invalid > s.invalid) f.loss("in_invalid", ti);
-                else if (c.too_late > s.too_late) f.loss("too_late", ti);
-                else if (c.read_errors > s.read_errors) f.loss("read_errors", ti);
+                if (c.invalid > s.invalid) loss(n, "in_invalid", ut.index, ti);
+                else if (c.too_late > s.too_late) loss(n, "too_late", ut.index, ti);
+                else if (c.read_errors > s.read_errors) loss(n, "read_errors", ut.index, ti);
                 else if (c.detaches > s.detaches) {
                     f.inc("detached");
                     f.loss("missing_fields", ti);
-                } else f.loss("late_fields", ti);  // nesulaukta iki ribos → išėjimas necommit'inamas
+                } else loss(n, "late_fields", ut.index, ti);  // nesulaukta iki ribos → išėjimas necommit'inamas
                 break;
         }
         s = c;

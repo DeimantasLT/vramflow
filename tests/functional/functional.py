@@ -805,6 +805,37 @@ def vsummary(pr, role):
     return json.loads(f.read_text()) if f is not None and f.exists() else None
 
 
+LOGO_LOSS_KEYS = ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips")
+
+
+def logo_loss_indices(pr):
+    """logo stderr eilutės „praradimas: flow n, indeksas i (raktas)“ → {n: [i, …]} (raktai — LOGO_LOSS_KEYS)."""
+    import re
+    rx = re.compile(r"\[logo\] praradimas: flow (\d+), indeksas (\d+) \((\w+)\)")
+    res = {}
+    try:
+        text = pr.err_path.read_text(errors="replace") if pr is not None else ""
+    except OSError:
+        text = ""
+    for m in rx.finditer(text):
+        if m.group(3) in LOGO_LOSS_KEYS:
+            res.setdefault(int(m.group(1)), []).append(int(m.group(2)))
+    return res
+
+
+def gen_upstream_indices(pr):
+    """gen stderr: vėlūs commit'ai ir praleisti indeksai → aibė indeksų, kurių žemupys su ta pačia riba nesulaukė."""
+    import re
+    try:
+        text = pr.err_path.read_text(errors="replace") if pr is not None else ""
+    except OSError:
+        text = ""
+    up = {int(m.group(1)) for m in re.finditer(r"\[gen\] vėlus commit: indeksas (\d+)", text)}
+    for m in re.finditer(r"\[gen\] praleista: indeksai (\d+)…(\d+)", text):
+        up.update(range(int(m.group(1)), int(m.group(2)) + 1))
+    return up
+
+
 def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
     """gen | logo | verify --mode logo kiekvienam formatui ir variantui C/H/G, FFMT_DURATION s: logo be praradimų
     (late/lapped/too_late == 0, fields_ok >= 90 % laukų), verify 0 teisingumo klaidų ir > 0 imčių."""
@@ -837,24 +868,29 @@ def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
                         pr.term()
             sl, sv = vsummary(lg, "logo"), vsummary(vf, "verify-logo")
             fl = (sl or {}).get("flows") or []
-            lost_f = [sum(f.get(k, 0) for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips")) for f in fl]
+            lost_f = [sum(f.get(k, 0) for k in LOGO_LOSS_KEYS) for f in fl]
             lost = sum(lost_f)
-            # Priskyrimas (kaip izoliacijos vartai): indeksas, kurį pats gen commit'ino vėliau nei riba (late_commits, eilutė su
-            # TAI) ar praleido, logo nepasiekia — tai ne funkcijos praradimas. Be aukštupio sutrikimų biudžetas 0 (kaip anksčiau).
-            gp = ((g.summary() or {}).get("proc") or {}) if g is not None else {}
-            budget = gp.get("late_commits", 0) + gp.get("late_skips", 0)
+            # Priskyrimas (peržiūra 2026-11-13 p. 7c — per flow'ą ir indeksą, ne skaičiais): kiekvienas logo prarastas indeksas
+            # (stderr eilutė „praradimas: flow n, indeksas i“) turi būti tas, kurį pats gen commit'ino vėliau nei riba („vėlus
+            # commit: indeksas i“) ar praleido („praleista: indeksai a…b“). Visos logo praradimų eilutės turi sutapti su jo
+            # skaitikliais (kitaip — nepriskirta). Be aukštupio sutrikimų — 0 praradimų.
+            up_idx = gen_upstream_indices(g)
+            mine = logo_loss_indices(lg)
+            unattr = {n: sorted(set(ix) - up_idx)[:5] for n, ix in mine.items() if set(ix) - up_idx}
+            lines_match = all(len(mine.get(n, [])) == lost_f[n] for n in range(len(lost_f)))
+            budget = len(up_idx)
             okf = [f.get("fields_ok", 0) for f in fl]
             pv = (sv or {}).get("proc") or {}
             # V20: numatytoji riba D = 3·P/4 (P — grain'o periodas): 25p — 30 ms (nepakitusi), 50 Hz — 15 ms
             dl, want_dl = ((sl or {}).get("proc") or {}).get("deadline_us"), 0.75 * 1e6 / hz
-            attributed = max(lost_f, default=0) <= budget
-            exit_ok = rl == 0 or (rl == 4 and lost > 0 and attributed)  # griežtas exit 4 — tik dėl aukštupio priskirtų
+            attributed = lines_match and not unattr
+            exit_ok = rl == 0 or (rl == 4 and lost > 0 and attributed)  # griežtas exit 4 — tik kai KIEKVIENAS praradimas — aukštupio
             ok = (sl is not None and sv is not None and exit_ok and attributed and len(okf) == N and min(okf) >= 0.9 * D * hz - budget
                   and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0 and sl.get("format") == fmt
                   and dl is not None and abs(dl - want_dl) <= 1)
             res.append(result(tid, "PASS" if ok else "FAIL",
-                              why=f"deadline_us={dl} (laukta {want_dl:.0f}) logo exit={rl} praradimai={lost_f} (aukštupio biudžetas "
-                                  f"{budget}) fields_ok={okf} "
+                              why=f"deadline_us={dl} (laukta {want_dl:.0f}) logo exit={rl} praradimai={lost_f} (aukštupio indeksų "
+                                  f"{budget}; nepriskirti {unattr or '-'}; eilutės == skaitikliai {lines_match}) fields_ok={okf} "
                                   f"(>= {0.9 * D * hz:.0f}) verify exit={rv} "
                                   f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
                                   f"capacity_errors={pv.get('capacity_errors')} proc_ms={((sl or {}).get('hist') or {}).get('proc_ms')}",
