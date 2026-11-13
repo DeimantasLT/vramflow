@@ -143,12 +143,54 @@ inline bool json_int(const std::string& j, const char* key, int& out) {
     out = static_cast<int>(n);
     return true;
 }
+// JSON eilutės reikšmė su pabėgimais (\" \\ \/ \b \f \n \r \t \uXXXX): MXL įrankiai (picojson serialize) aprašą perrašo
+// "video\/v210" — tai tas pats tekstas. \uXXXX — UTF-8 (BMP; pakaitų porų aprašuose nėra).
 inline bool json_str(const std::string& j, const char* key, std::string& out) {
     const char* v = json_value(j, key);
     if (!v || *v != '"') return false;
-    const char* e = std::strchr(v + 1, '"');
-    if (!e) return false;
-    out.assign(v + 1, e);
+    std::string s;
+    for (const char* p = v + 1;; ++p) {
+        if (*p == '\0') return false;
+        if (*p == '"') break;
+        if (*p != '\\') {
+            s += *p;
+            continue;
+        }
+        ++p;
+        switch (*p) {
+            case '"': s += '"'; break;
+            case '\\': s += '\\'; break;
+            case '/': s += '/'; break;
+            case 'b': s += '\b'; break;
+            case 'f': s += '\f'; break;
+            case 'n': s += '\n'; break;
+            case 'r': s += '\r'; break;
+            case 't': s += '\t'; break;
+            case 'u': {
+                unsigned cp = 0;
+                for (int k = 1; k <= 4; ++k) {
+                    const char c = p[k];
+                    const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+                    if (d < 0) return false;
+                    cp = cp * 16 + static_cast<unsigned>(d);
+                }
+                p += 4;
+                if (cp < 0x80) {
+                    s += static_cast<char>(cp);
+                } else if (cp < 0x800) {
+                    s += static_cast<char>(0xC0 | (cp >> 6));
+                    s += static_cast<char>(0x80 | (cp & 0x3F));
+                } else {
+                    s += static_cast<char>(0xE0 | (cp >> 12));
+                    s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+                    s += static_cast<char>(0x80 | (cp & 0x3F));
+                }
+                break;
+            }
+            default: return false;
+        }
+    }
+    out = std::move(s);
     return true;
 }
 }  // namespace detail

@@ -93,6 +93,17 @@ TEST_CASE("gfx: raster_from_flow_def", "[gfx]") {
     CHECK_FALSE(raster_from_flow_def(im(""), r, err));
     CHECK(raster_from_flow_def(R"({"media_type":"video/v210a","frame_width":8,"frame_height":4})", r, err));  // nenurodyta = progresyvus
     CHECK_FALSE(r.interlaced);
+    // MXL įrankiai (mxl-gst-testsrc, picojson serialize) aprašą perrašo su JSON pabėgimu "video\/v210" — tai tas pats tekstas
+    // (sąveika su MXL įrankiais, P5b; anksčiau — „nepalaikomas media_type video\/v210“)
+    REQUIRE(raster_from_flow_def(R"({"media_type":"video\/v210","frame_width":1920,"frame_height":1080,"interlace_mode":"progressive"})", r,
+                                 err));
+    CHECK((r.w == 1920 && r.h == 1080 && !r.interlaced && !r.alpha));
+    CHECK(raster_from_flow_def(R"({"media_type":"video\/v210a","frame_width":8,"frame_height":4,"interlace_mode":"interlaced_tff"})", r,
+                               err));
+    CHECK((r.alpha && r.interlaced));
+    CHECK(raster_from_flow_def(R"({"media_type":"video\/v210","frame_width":8,"frame_height":4})", r, err));  // \uXXXX
+    CHECK_FALSE(r.alpha);
+    CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video\q","frame_width":8,"frame_height":4})", r, err));  // netinkamas pabėgimas
 
     CHECK_FALSE(raster_from_flow_def(R"({"media_type":"video/h264","frame_width":1,"frame_height":2})", r, err));
     CHECK_FALSE(err.empty());
