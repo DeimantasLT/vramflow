@@ -58,6 +58,9 @@
    "gap_repeat",
    "gap_repeat_first",
    "gap_repeat_last",
+   "invalid_black",
+   "invalid_not_black",
+   "invalid_not_black_first",
    "last_good_index"
   ]
  }

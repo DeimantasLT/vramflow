@@ -8,7 +8,10 @@
 //      mode=composite — išėjimo laukas i == ref::composite(gen_field bazė, gfx_content → rgba_to_v210a sluoksniai), CRC32C;
 //                       prielaida: sluoksniai iš gfxgen (--layer-geom, --gfx-mode, --layer-xy, --opacity, --base, --out-format
 //                       kaip composite / gfxgen); grandinės (--layer-flow) nepalaikomos;
-//    abiem — barkodas (indeksas, paritetas, flow) == laukiamas.
+//    abiem — barkodas (indeksas, paritetas, flow) == laukiamas;
+//  * INVALID grain'as (peržiūra 2026-11-13 p. 2): turinys tikrinamas kaip žymės nepaisančio skaitytojo — jis turi būti juodas
+//    (v210: Y 64 / C 512; v210a: ir key 0): invalid_black / invalid_not_black (pastarasis — verifikacijos klaida);
+//  * mode=audio — gen garso flow'ai: kiekvienas blokas == gen garsas arba tyla (audio_ok / silence), kita — audio_bad.
 // Lap patikra po D2H: jei writer'is galėjo perrašyti slot'ą kopijavimo metu, imtis atmetama (sample_lapped).
 #include <cuda_runtime_api.h>
 
@@ -61,11 +64,35 @@ bool copy_field(const VideoIn& v, const std::uint32_t* p, std::vector<std::uint3
 }  // namespace
 
 namespace {
+// INVALID grain'o turinys — juodas? Tikrinamas kas o.every-tas (kaip imtys); D2H tik tada. Neatitikimas — verifikacijos klaida
+// (žymės nepaisantis skaitytojas rodytų pasenusį ring'o kadrą).
+void check_invalid_payload(const VideoIn& v, const std::uint32_t* p, const std::vector<std::uint8_t>& black, std::uint64_t i,
+                           FlowStats& f, std::vector<std::uint8_t>& buf) {
+    buf.resize(black.size());
+    if (v.cuda) {
+        if (cudaMemcpy(buf.data(), p, buf.size(), cudaMemcpyDeviceToHost) != cudaSuccess) {
+            f.inc("cuda_errors");
+            return;
+        }
+    } else {
+        std::memcpy(buf.data(), p, buf.size());
+    }
+    if (buf == black) {
+        f.inc("invalid_black");
+        return;
+    }
+    f.inc("invalid_not_black");
+    if (!f.c.count("invalid_not_black_first")) f.c["invalid_not_black_first"] = i;
+}
+
 // Skaitikliai -> exit kodas ir proc santrauka (bendra visiems režimams).
 int summarize(Stats& st) {
     std::uint64_t verify_err = 0, capacity = 0, samples = 0;
     for (auto& f : st.flows) {
-        verify_err += f.c["mismatch_fields"] + f.c["outside_diff_fields"] + f.c["marker_bad"] + f.c["cuda_errors"] +
+        // naujesni raktai — be įterpimo (santraukos raktų aibė be jų nekinta)
+        auto opt = [&](const char* k) { const auto it = f.c.find(std::string_view(k)); return it == f.c.end() ? std::uint64_t{0} : it->second; };
+        verify_err += f.c["mismatch_fields"] + f.c["outside_diff_fields"] + f.c["marker_bad"] + f.c["cuda_errors"] + opt("invalid_not_black") +
+                      opt("audio_bad") +
                       f.c["parity_mismatch"] + f.c["dec_mismatch"] + f.c["dec_mismatch_near_loop"] + f.c["ref_marker_unknown"] + f.c["chroma_low"] +
                       f.c["expect_failed"];
         capacity += f.c["missing"] + f.c["too_late"] + f.c["invalid"] + f.c["read_errors"] + f.c["verify_skipped"];
@@ -272,7 +299,8 @@ int verify_composite(const Opts& o, Stats& st) {
     const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
-    std::vector<std::uint8_t> act(out_bytes);
+    std::vector<std::uint8_t> act(out_bytes), ibuf;
+    const std::vector<std::uint8_t> black = black_grain(out_r);
     while (!stop.load() && now_tai() < end_tai) {
         wait_until(rate, i + lag, 0, stop);  // verify sąmoningai atsilieka lag_fields grain'ų
         if (stop.load()) break;
@@ -284,7 +312,11 @@ int verify_composite(const Opts& o, Stats& st) {
             if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) { f.inc("missing"); continue; }
             if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
-            if (info.flags & MXL_GRAIN_FLAG_INVALID) { f.inc("invalid"); continue; }
+            if (info.flags & MXL_GRAIN_FLAG_INVALID) {
+                f.inc("invalid");
+                if ((i + n) % o.every == 0) check_invalid_payload(out[n], p, black, i, f, ibuf);
+                continue;
+            }
             f.inc("present");
             if ((i + n) % o.every != 0) continue;
             Worker& w = *wk[n % W];
@@ -334,6 +366,69 @@ int verify_composite(const Opts& o, Stats& st) {
     mxlDestroyInstance(inst);
     return 0;
 }
+
+// --mode audio (peržiūra 2026-11-13 p. 2): gen garso flow'ai (flow_id(kRoleAudio, flow_base + n)) — skaitytojas, kuris žymių
+// neturi (tęstinis flow'as): kiekvienas grain'o i blokas [sample_begin(i), sample_begin(i + 1)) abiem kanalais klasifikuojamas:
+// lygiai gen_audio_sample (audio_ok), visi 0,0 (silence — spragos tyla) arba kita (audio_bad — pasenęs / išgalvotas garsas;
+// verifikacijos klaida). Tylos indeksų rėžis — silence_first / silence_last.
+int verify_audio(const Opts& o, Stats& st) {
+    const std::uint32_t N = o.flows;
+    const vramflow::Rational g = o.fmt.grain_rate();
+    const mxlRational rate = mxl_rate(g);
+    auto& stop = stop_flag();
+    mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
+    if (!inst) { st.fatal = "mxlCreateInstance"; return 2; }
+    std::vector<AudioIn> ain(N);
+    std::string err;
+    for (std::uint32_t n = 0; n < N; ++n)
+        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), open_policy(o), stop, err)) {
+            st.fatal = err;
+            for (auto& a : ain) a.release(inst);
+            mxlDestroyInstance(inst);
+            return 4;
+        }
+    const std::uint32_t cap = vramflow::max_samples_per_grain(g) + 1;
+    std::vector<float> l(cap), r(cap);
+    const std::uint64_t lag = o.lag_fields;
+    const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
+    while (!stop.load() && now_tai() < end_tai) {
+        wait_until(rate, i + lag, 0, stop);
+        if (stop.load()) break;
+        const std::uint64_t s0 = vramflow::sample_begin(g, i), s1 = vramflow::sample_begin(g, i + 1);
+        const auto count = static_cast<std::uint32_t>(s1 - s0);
+        for (std::uint32_t n = 0; n < N; ++n) {
+            FlowStats& f = st.flows[n];
+            const mxlStatus s = ain[n].read(s1, count, l.data(), r.data());
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY) { f.inc("missing"); continue; }
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
+            if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
+            f.inc("samples");
+            bool zero = true, ok = true;
+            for (std::uint32_t k = 0; k < count; ++k) {
+                const float want = gen_audio_sample(s0 + k);
+                zero = zero && l[k] == 0.0f && r[k] == 0.0f;
+                ok = ok && l[k] == want && r[k] == want;
+            }
+            if (ok) {
+                f.inc("audio_ok");
+            } else if (zero) {
+                f.inc("silence");
+                if (!f.c.count("silence_first")) f.c["silence_first"] = i;
+                f.c["silence_last"] = i;
+            } else {
+                f.inc("audio_bad");
+                if (!f.c.count("audio_bad_first")) f.c["audio_bad_first"] = i;
+            }
+        }
+        if (st.first_index == ~0ull) st.first_index = i;
+        st.last_index = i;
+        ++i;
+    }
+    for (auto& a : ain) a.release(inst);
+    mxlDestroyInstance(inst);
+    return 0;
+}
 }  // namespace
 
 int run_verify(const Opts& o_in) {
@@ -357,6 +452,10 @@ int run_verify(const Opts& o_in) {
     const bool dec_mode = o.mode == "dec";
     if (o.mode == "composite") {
         const int rc = verify_composite(o, st);
+        return finish(rc ? rc : summarize(st));
+    }
+    if (o.mode == "audio") {
+        const int rc = verify_audio(o, st);
         return finish(rc ? rc : summarize(st));
     }
     if (!logo_mode && !dec_mode && o.mode != "gen") { st.fatal = "nežinomas --mode " + o.mode; return finish(1); }
@@ -414,6 +513,8 @@ int run_verify(const Opts& o_in) {
     // ring'as trumpas (MXL numatytasis 200 ms: 1080p25 — tik 5 grain'ai).
     const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
     std::vector<std::uint32_t> ho, hi, ref(gwords);
+    const std::vector<std::uint8_t> black_v210 = black_grain(o.fmt.raster);  // INVALID grain'o laukiamas turinys
+    std::vector<std::uint8_t> ibuf;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const std::uint64_t warm_idx =
         mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
@@ -466,7 +567,11 @@ int run_verify(const Opts& o_in) {
             if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || s == MXL_ERR_FLOW_INVALID) { f.inc("missing"); continue; }
             if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
-            if (info.flags & MXL_GRAIN_FLAG_INVALID) { f.inc("invalid"); continue; }
+            if (info.flags & MXL_GRAIN_FLAG_INVALID) {
+                f.inc("invalid");
+                if ((i + n) % o.every == 0) check_invalid_payload(out[n].in(), p, black_v210, i, f, ibuf);
+                continue;
+            }
             f.inc("present");
             if ((i + n) % o.every != 0) continue;
             // imtis

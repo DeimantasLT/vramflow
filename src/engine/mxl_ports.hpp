@@ -96,16 +96,21 @@ private:
 using GrainCopy = std::function<bool(void* dst, const void* src, std::size_t bytes)>;
 GrainCopy host_copy();
 
-// Juodas grain'as (host atmintyje): v210 Y = 64, Cb = Cr = 512 visose eilutėse (ir eilutės užpildo dalyje);
-// v210a key plokštuma — 0 (skaidru). Dydis — gfx::grain_bytes(r).
+// Juodas grain'as (host atmintyje) — func::black_grain (flows.hpp; ta pati ir bibliotekai).
 std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r);
 
 class MxlVideoOutput final : public OutputPort {
 public:
     // flush — kviečiamas po kiekvienos Repeat / Black kopijos prieš commit (nullptr — sinchroninė kopija);
-    // black — black_grain() buferis (nullptr — Black nepalaikomas, fill_gap grąžina false).
+    // black — black_grain() buferis (nullptr — Black nepalaikomas, fill_gap grąžina false). Jis taip pat INVALID grain'ų
+    // turinys (VideoOut::paint_black: kartą slot'ui per gedimą); nullptr — INVALID turinys neliečiamas.
     MxlVideoOutput(func::VideoOut& out, GrainCopy copy, std::function<bool()> flush, const void* black)
-        : out_(out), copy_(std::move(copy)), flush_(std::move(flush)), black_(black) {}
+        : out_(out), copy_(std::move(copy)), flush_(std::move(flush)), black_(black) {
+        if (black_ != nullptr)
+            out_.paint_black = [c = copy_, f = flush_, b = black_, n = vramflow::gfx::grain_bytes(out_.raster)](void* dst) {
+                return c(dst, b, n) && (!f || f());
+            };
+    }
 
     OpenResult open(Index i, void*& slot) override;
     bool commit() override;

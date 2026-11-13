@@ -35,7 +35,9 @@ engine::GapPolicy gap_policy(const std::string& s);
 
 // K3 spragų užpildymas išėjimams (planas §6 D4): Repeat / Black kopija pagal išėjimo saugyklą — host: memcpy; cuda-linear:
 // D2D į savo stream'ą ir vienas sync prieš commit (MxlVideoOutput flush). Juodi grain'ai paruošiami iš anksto (prepare —
-// prieš variklio run(), tick'e nealokuojama) ir tik freeze / black politikai: invalid papildomos atminties nekainuoja.
+// prieš variklio run(), tick'e nealokuojama) visoms politikoms, išskyrus leave: invalid politikai juodas grain'as — INVALID
+// grain'o turinys (kartą slot'ui per gedimą, VideoOut::paint_black), kad žymės nepaisantis skaitytojas nematytų pasenusio
+// kadro; kaina — vienas grain'as kiekvienam rastrui (black_bytes).
 // Naudojimas: prepare(v.raster) → ports.emplace_back(v, gf.copy(), gf.flush(), gf.black(v.raster)).
 // cuda — išėjimai cuda-linear; tada konstruktorius kviečiamas po cudaSetDevice (stream'as ir buferiai — tame įrenginyje).
 class GapFill {

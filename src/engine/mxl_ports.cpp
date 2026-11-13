@@ -171,20 +171,7 @@ GrainCopy host_copy() {
     };
 }
 
-std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r) {
-    namespace gfx = vramflow::gfx;
-    std::vector<std::uint8_t> g(gfx::grain_bytes(r), 0);  // key plokštuma (v210a) — 0
-    // v210: 4 žodžiai = 6 pikseliai: (Cb Y Cr) (Y Cb Y) (Cr Y Cb) (Y Cr Y); eilutės ilgis — 128 B kartotinis.
-    constexpr std::uint32_t kC = 512, kY = 64;
-    constexpr std::uint32_t kCyc = kC | (kY << 10) | (kC << 20);
-    constexpr std::uint32_t kYcy = kY | (kC << 10) | (kY << 20);
-    const std::size_t words = gfx::fill_bytes(r) / 4;
-    for (std::size_t w = 0; w < words; ++w) {
-        const std::uint32_t v = (w % 2 == 0) ? kCyc : kYcy;
-        std::memcpy(g.data() + 4 * w, &v, 4);
-    }
-    return g;
-}
+std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r) { return func::black_grain(r); }
 
 // INVALID_ARG — AlreadyCommitted (laikrodis atgal, M11) TIK indeksui ≤ paskutinio šio prievado įrašyto; kitaip tai išėjimo
 // klaida (skaičiuojama; ilgalaikė — vienetas sugenda), ne amžinas tylus „jau commit'intas“.

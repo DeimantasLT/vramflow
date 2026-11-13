@@ -247,6 +247,7 @@ struct Stats {
 
 // Sluoksnių argumentai, bendri gfxgen / composite / verify --mode composite (apibrėžta gfxgen.cpp / composite.cpp).
 bool parse_layer_geoms(const Opts& o, std::vector<vramflow::gfx::Raster>& out, std::string& err);  // --layer-geom -> K rastrų
+float gen_audio_sample(std::uint64_t s);  // gen garso mėginys s (48 kHz); bendra su verify --mode audio
 bool parse_xy(const std::string& s, int& x, int& y);                                                // "X,Y"
 
 std::string storage_options(const Opts& o, int dev);  // writer'io opcijos pagal --storage

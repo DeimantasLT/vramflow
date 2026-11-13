@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -57,6 +58,10 @@ struct ClockWatch {
     bool stepped();
 };
 
+// Juodas grain'as (host atmintyje): v210 Y = 64, Cb = Cr = 512 visose eilutėse (ir eilutės užpildo dalyje); v210a key
+// plokštuma — 0 (skaidru). Dydis — gfx::grain_bytes(r). Bendras variklio spragoms, INVALID turiniui ir bibliotekai.
+std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r);
+
 // Plokštumų išdėstymas prieš rastrą: planeCount, fill poslinkis 0, key iškart po fill (poslinkis = fill_bytes), dydžiai ir
 // pitch = eilučių ilgiai. Tuščias tekstas — tinka; kitaip klaidos aprašas. Naudoja VideoOut::create ir VideoIn::open.
 std::string check_layout(const mxlGrainStorageLayout& l, const vramflow::gfx::Raster& r);
@@ -85,9 +90,17 @@ struct VideoOut {
     // Atidaro grain'ą; grąžina device rodyklę arba nullptr (st — MXL statusas).
     std::uint32_t* open(std::uint64_t index, mxlStatus& st);
     mxlStatus commit();
-    // K3 spraga: atidaro `index`, nustato MXL_GRAIN_FLAG_INVALID ir validSlices = totalSlices, commit'ina (turinys
-    // neliečiamas). Skaitytojas iškart gauna OK + INVALID (M4, M10). Kitas atidarytas grain'as — klaida.
+    // K3 spraga: atidaro `index`, nustato MXL_GRAIN_FLAG_INVALID ir validSlices = totalSlices, commit'ina. Skaitytojas iškart
+    // gauna OK + INVALID (M4, M10). Kitas atidarytas grain'as — klaida.
+    // Turinys (peržiūra 2026-11-13 p. 2): INVALID grain'as neša ir JUODĄ turinį (v210: Y 64 / C 512; v210a: ir key 0), kad
+    // žymės nepaisantis skaitytojas nerodytų pasenusio ring'o kadro (~200 ms senumo ciklo). Juoda rašoma tik kartą slot'ui per
+    // gedimą: slot'as, jau laikantis juodą (black_slot), neperrašomas; tikras turinys (commit) žymę nuima. paint_black —
+    // savininko nustatytas sinchroninis juodo grain'o rašymas į slot'ą (host memcpy / cuda D2D + sync); tuščias — turinys
+    // neliečiamas (tik testams ir legacy).
     mxlStatus commit_invalid(std::uint64_t index);
+    std::function<bool(void* dst)> paint_black;
+    std::vector<std::uint8_t> black_slot;  // slot'as laiko juodą (nuo paskutinio INVALID be tikro turinio po jo)
+    std::uint64_t black_writes = 0;        // kiek kartų juoda iš tikrųjų rašyta (kainos matavimui ir testams)
     void cancel();
     void release(mxlInstance inst);
 };

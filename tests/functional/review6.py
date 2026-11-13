@@ -16,6 +16,7 @@ fcomp_base_kill    — bazės (gen) rašytojas nužudomas: išėjimas — spraga
                      missing_fields > 0), composite gyvas. C / H / G.
 """
 import json
+import signal
 import time
 
 import functional as F  # noqa: E402
@@ -209,3 +210,111 @@ TESTS["fcomp_layer_kill"] = fcomp_layer_kill
 TESTS["fcomp_layer_idle"] = fcomp_layer_idle
 TESTS["fcomp_layer_none"] = fcomp_layer_none
 TESTS["fcomp_base_kill"] = fcomp_base_kill
+
+
+# --- Punktas 2: INVALID grain'ai neneša pasenusio vaizdo; garso spragos — tyla ------------------------------------------
+
+def flogo_invalid_payload(out):
+    """gen | logo (--on-loss invalid) | verify --mode logo --every 1: gen nužudomas 3 s ir paleidžiamas iš naujo. Skaitytojas,
+    kuris INVALID žymės nepaiso (verify tikrina ir INVALID grain'o turinį): visi INVALID grain'ai — juodi (invalid_not_black ==
+    0, invalid_black > 0), anksčiau — pasenęs ring'o kadras (logo vaizdas prieš ~200 ms). C / H / G."""
+    res = []
+    for tag, impl, storage in F.comp_variants():
+        tid, sub = f"flogo_invalid_payload[{tag}]", f"flip-{tag}"
+        d = F.fresh_domain(sub)
+        v = F.vcommon(impl, storage)
+        g = F.FProc(out, f"{sub}/a", "gen", d, "--flows", 1, "--duration", 60, *v)
+        g2 = lg = vf = None
+        rv = rl = None
+        try:
+            if not F.wait_flows(d, [F.role_flow_id(1, 0)]):
+                res.append(F.result(tid, "FAIL", why="gen flow'as neatsirado"))
+                continue
+            lg = F.FProc(out, sub, "logo", d, "--flows", 1, "--duration", 18, "--warmup", 1, *v)
+            if not F.wait_flows(d, [F.role_flow_id(2, 0)], 20):
+                res.append(F.result(tid, "FAIL", why="logo išėjimas neatsirado"))
+                continue
+            vf = F.FProc(out, f"{sub}/verify", "verify", d, "--mode", "logo", "--flows", 1, "--every", 1, "--duration", 12,
+                         "--warmup", 1, *F.vimpl(impl, storage))
+            time.sleep(4)
+            g.kill9()
+            time.sleep(3)
+            g2 = F.FProc(out, f"{sub}/b", "gen", d, "--flows", 1, "--duration", 60, *v)
+            rv = vf.wait(timeout=60)
+            rl = lg.wait(timeout=60)
+        finally:
+            for pr in (vf, lg, g2, g):
+                if pr is not None and pr.p.poll() is None:
+                    pr.term()
+        sv = F.vsummary(vf, "verify-logo") if vf else None
+        f0 = ((sv or {}).get("flows") or [{}])[0]
+        fl = F.flow_ctr(F.vsummary(lg, "logo") if lg else None, 0)
+        bad = []
+        if f0.get("invalid", 0) < 2 * RATE:
+            bad.append(f"verify invalid={f0.get('invalid', 0)} < {2 * RATE} (gedimo nebuvo?)")
+        if f0.get("invalid_not_black", 0):
+            bad.append(f"INVALID grain'ų ne juodu turiniu: {f0.get('invalid_not_black')} (pirmas indeksas {f0.get('invalid_not_black_first')})")
+        if f0.get("invalid_black", 0) < 2 * RATE:
+            bad.append(f"invalid_black={f0.get('invalid_black', 0)} < {2 * RATE}")
+        if f0.get("mismatch_fields", 0):
+            bad.append(f"mismatch={f0.get('mismatch_fields')}")
+        res.append(F.result(tid, "FAIL" if bad else "PASS",
+                            why=("; ".join(bad) or "ok") + f" | verify exit={rv} invalid={f0.get('invalid')} black={f0.get('invalid_black')} "
+                                f"not_black={f0.get('invalid_not_black', 0)} samples={f0.get('samples')} | logo exit={rl} "
+                                f"gap_invalid={fl.get('gap_invalid')} missing_fields={fl.get('missing_fields')}", verify=f0, logo=fl))
+    return res
+
+
+def fgen_audio_gap(out):
+    """gen --audio 1 sustabdomas (SIGSTOP 100 ms) 4 kartus: variklio praleisti indeksai — garso blokai commit'inami tyla
+    (gap_silence == praleistų indeksų, nes kiekvienam praleistam — tylos blokas), skaitytojas (verify --mode audio, žymių nėra)
+    gedimo metu skaito tik tylą: silence > 0, audio_bad == 0 (anksčiau — pasenęs ring'o garsas, silence == 0). C."""
+    tid, sub = "fgen_audio_gap[C]", "fgag-C"
+    d = F.fresh_domain(sub)
+    v = F.vcommon("cpu", "host")
+    g = F.FProc(out, sub, "gen", d, "--flows", 1, "--audio", 1, "--duration", 16, *v)
+    va = None
+    rv = rg = None
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(3, 0)]):
+            return [F.result(tid, "FAIL", why="gen garso flow'as neatsirado")]
+        va = F.FProc(out, f"{sub}/verify", "verify", d, "--mode", "audio", "--flows", 1, "--lag-fields", 8, "--duration", 11,
+                     "--warmup", 1)
+        time.sleep(3)
+        for _ in range(4):
+            g.p.send_signal(signal.SIGSTOP)
+            time.sleep(0.1)
+            g.p.send_signal(signal.SIGCONT)
+            time.sleep(2)
+        rv = va.wait(timeout=60)
+        rg = g.wait(timeout=60)
+    finally:
+        for pr in (va, g):
+            if pr is not None and pr.p.poll() is None:
+                pr.term()
+    sv = F.vsummary(va, "verify-audio") if va else None
+    f0 = ((sv or {}).get("flows") or [{}])[0]
+    sg = F.vsummary(g, "gen") or {}
+    fg = F.flow_ctr(sg, 0)
+    pg = sg.get("proc") or {}
+    # Visi variklio praleisti indeksai (ir įšilimo / laikrodžio — garso blokas be turinio vis tiek tyla)
+    skips = pg.get("late_skips", 0) + pg.get("warmup_skips", 0) + pg.get("clock_skips", 0)
+    bad = []
+    if skips < 4:
+        bad.append(f"gen praleistų indeksų {skips} < 4 (SIGSTOP nesukėlė praleidimų?)")
+    if fg.get("gap_silence", 0) != skips:
+        bad.append(f"gen gap_silence={fg.get('gap_silence', 0)} ≠ praleistų indeksų {skips}")
+    if f0.get("audio_bad", 0):
+        bad.append(f"verify audio_bad={f0.get('audio_bad')} (pirmas indeksas {f0.get('audio_bad_first')})")
+    if f0.get("silence", 0) < 1 or f0.get("silence", 0) > fg.get("gap_silence", 0):
+        bad.append(f"verify silence={f0.get('silence', 0)} (laukta 1…{fg.get('gap_silence', 0)})")
+    if f0.get("audio_ok", 0) < 400:
+        bad.append(f"verify audio_ok={f0.get('audio_ok', 0)} < 400")
+    return [F.result(tid, "FAIL" if bad else "PASS",
+                     why=("; ".join(bad) or "ok") + f" | gen exit={rg} late_skips={skips} gap_silence={fg.get('gap_silence')} | verify "
+                         f"exit={rv} ok={f0.get('audio_ok')} silence={f0.get('silence')} bad={f0.get('audio_bad', 0)} "
+                         f"missing={f0.get('missing', 0)}", verify=f0, gen=fg)]
+
+
+TESTS["flogo_invalid_payload"] = flogo_invalid_payload
+TESTS["fgen_audio_gap"] = fgen_audio_gap

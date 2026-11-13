@@ -45,6 +45,7 @@
    "gap_black",
    "gap_frozen",
    "gap_invalid",
+   "gap_silence",
    "gap_startup",
    "unit_failed",
    "unit_failures",

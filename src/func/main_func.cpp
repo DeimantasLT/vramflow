@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
     inputs(v, o);
-    v->add_option("--mode", o.mode, "logo | gen | dec | composite");
+    v->add_option("--mode", o.mode, "logo | gen | dec | composite | audio (gen garso flow'ai: garsas arba tyla)");
     // --mode composite: tie patys parametrai kaip gfxgen / composite (verify atkuria laukiamą išėjimą CPU etalonu)
     v->add_option("--layers", o.layers, "composite: sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
     v->add_option("--layer-geom", o.layer_geom, "composite: kaip gfxgen (logo,full,… arba WxH); turi sutapti su gfxgen");

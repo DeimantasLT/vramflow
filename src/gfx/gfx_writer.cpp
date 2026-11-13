@@ -246,6 +246,10 @@ struct vfgfx_writer_s {
     std::size_t d_stage_bytes = 0;
     std::vector<std::uint8_t> h_stage;  // host RGBA (CUDA kadras -> host saugykla)
     std::uint8_t* prep[kSets][2] = {};  // [aibė][paritetas]; device arba host
+    // „Be kadro“ (INVALID) grain'o turinys — skaidri juoda (v210a: Y 64 / C 512, key 0), rašoma kartą slot'ui (VideoOut::
+    // paint_black): žymės nepaisantis skaitytojas nemato pasenusio / atsitiktinio slot'o turinio. cuda_store — device kopija.
+    std::vector<std::uint8_t> h_black;
+    void* d_black = nullptr;
     int nsets = 0;                      // išskirtų aibių (2 nuo create; kSets po pirmo submit_at); keičia tik sub_m / create
 
     std::atomic<std::uint64_t> committed{0};
@@ -631,6 +635,8 @@ void vfgfx_writer_s::free_all() {
     nsets = 0;
     if (d_stage) cudaFree(d_stage);
     d_stage = nullptr;
+    if (d_black) cudaFree(d_black);
+    d_black = nullptr;
     if (s_conv || ev_caller) {
         DeviceScope cd(cuda_store ? -1 : conv_dev);  // cuda_store: jau esame `dev` įrenginyje
         if (s_conv) cudaStreamDestroy(s_conv);
@@ -1047,6 +1053,34 @@ static int create_impl(mxlInstance inst, const char* flow_def_json, const char* 
         w->free_all();
         w->out.release(inst);
         return fail(c, m);
+    }
+    // INVALID („be kadro“) grain'o turinys — skaidri juoda, rašoma kartą slot'ui ritmo gijoje (VideoOut::commit_invalid)
+    w->h_black = func::black_grain(r);
+    if (w->cuda_store) {
+        DeviceScope ds(w->device);
+        cudaError_t e = cudaMalloc(&w->d_black, w->h_black.size());
+        if (e == cudaSuccess) e = cudaMemcpy(w->d_black, w->h_black.data(), w->h_black.size(), cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) {
+            cudaGetLastError();
+            w->free_all();
+            w->out.release(inst);
+            return fail(VFGFX_ERR_CUDA, std::string("cudaMalloc / cudaMemcpy (black grain): ") + cudaGetErrorString(e));
+        }
+        std::vector<std::uint8_t>().swap(w->h_black);
+        vfgfx_writer_s* self = w.get();
+        const std::size_t n = gfx::grain_bytes(r);
+        w->out.paint_black = [self, n](void* dst) {
+            DeviceScope dd(self->device);
+            if (cudaMemcpy(dst, self->d_black, n, cudaMemcpyDeviceToDevice) == cudaSuccess) return true;
+            cudaGetLastError();
+            return false;
+        };
+    } else {
+        vfgfx_writer_s* self = w.get();
+        w->out.paint_black = [self](void* dst) {
+            std::memcpy(dst, self->h_black.data(), self->h_black.size());
+            return true;
+        };
     }
     *out = w.release();
     return 0;

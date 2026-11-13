@@ -182,18 +182,75 @@ TEST_CASE("gap_policy: GapFill — Repeat == to paties pariteto šaltinis, Black
     const std::vector<std::uint8_t> blk = read_grain(r.in, 104, &fl);
     CHECK(blk == black_grain(o.raster));
     CHECK((fl & MXL_GRAIN_FLAG_INVALID) == 0);
-    read_grain(r.in, 105, &fl);
+    // Peržiūra 2026-11-13 p. 2: INVALID grain'as neša juodą turinį (anksčiau — slot'o turinys neliečiamas)
+    CHECK(read_grain(r.in, 105, &fl) == black_grain(o.raster));
     CHECK((fl & MXL_GRAIN_FLAG_INVALID) != 0);
     o.release(d.inst);
 }
 
-TEST_CASE("gap_policy: invalid politikai juodas grain'as neruošiamas (0 papildomos atminties)", "[func][gap]") {
+// Peržiūra 2026-11-13 p. 2 (pakeistas lūkestis): invalid politikai juodas grain'as RUOŠIAMAS — tai INVALID grain'o turinys
+// (anksčiau: neruošiamas, 0 papildomos atminties). Tik leave — be jo.
+TEST_CASE("gap_policy: invalid politikai juodas grain'as paruošiamas (INVALID turinys), leave — ne", "[func][gap]") {
     GapFill gf(GapPolicy::Invalid, false);
     std::string err;
     REQUIRE(gf.prepare(gfx::kHd1080i, err));
-    CHECK(gf.black(gfx::kHd1080i) == nullptr);
-    CHECK(gf.black_bytes() == 0);
+    CHECK(gf.black(gfx::kHd1080i) != nullptr);
+    CHECK(gf.black_bytes() == gfx::grain_bytes(gfx::kHd1080i));
+    GapFill gl(GapPolicy::Leave, false);
+    REQUIRE(gl.prepare(gfx::kHd1080i, err));
+    CHECK(gl.black(gfx::kHd1080i) == nullptr);
+    CHECK(gl.black_bytes() == 0);
 }
+
+// Peržiūra 2026-11-13 p. 2: INVALID grain'as neša juodą turinį — žymės nepaisantis skaitytojas nemato pasenusio ring'o kadro.
+// Slot'ai užpildomi turiniu (pilnas ratas), tada visas ratas INVALID: kiekvieno grain'o turinys == juodas, juoda rašyta lygiai
+// slotCount kartų (pirmas ratas); antras INVALID ratas juodos nebeperrašo (0 rašymų), turinys vis tiek juodas; tikras turinys
+// slot'ui žymę nuima — kitas INVALID tame slot'e vėl rašo juodą.
+TEST_CASE("gap_policy: INVALID grain'as — žymė IR juodas turinys, juoda kartą slot'ui per gedimą (host, cuda-linear)",
+          "[func][gap][mxl]") {
+    const bool cuda = GENERATE(false, true);
+    if (cuda && !have_gpu()) SKIP("nėra CUDA įrenginio");
+    if (cuda) REQUIRE(cudaSetDevice(0) == cudaSuccess);
+    Domain d(cuda ? 22 : 21);
+    VideoOut o;
+    std::string err;
+    REQUIRE(o.create(d.inst, func::video_def(func::kRoleLogo, 2, 1, k1080i), opts_for(cuda), err, k1080i));
+    o.id = func::flow_id(func::kRoleLogo, 2);
+    GapFill gf(GapPolicy::Invalid, cuda);
+    REQUIRE(gf.prepare(o.raster, err));
+    REQUIRE(gf.black(o.raster) != nullptr);
+    MxlVideoOutput port(o, gf.copy(), gf.flush(), gf.black(o.raster));
+    const std::uint32_t n = o.layout.slotCount;
+    REQUIRE(n >= 4);
+    Index i = 1000;
+    for (std::uint32_t k = 0; k < n; ++k) REQUIRE(commit_pattern(port, i++, cuda));  // visi slot'ai — turinys
+    const std::vector<std::uint8_t> blk = black_grain(o.raster);
+    Reader r(d.inst, o.id);
+    // 1 ratas INVALID — kiekviename slot'e vietoj seno kadro juoda
+    for (std::uint32_t k = 0; k < n; ++k) REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));
+    CHECK(o.black_writes == n);
+    for (Index j = i - n + 2; j < i; ++j) {  // ≤ slotCount − 2 atgal — dar skaitomas
+        INFO("j = " << j);
+        std::uint32_t fl = 0;
+        CHECK(read_grain(r.in, j, &fl) == blk);
+        CHECK((fl & MXL_GRAIN_FLAG_INVALID) != 0);
+    }
+    // 2 ratas — juoda jau yra, nerašoma
+    for (std::uint32_t k = 0; k < n; ++k) REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));
+    CHECK(o.black_writes == n);
+    std::uint32_t fl = 0;
+    CHECK(read_grain(r.in, i - 1, &fl) == blk);
+    CHECK((fl & MXL_GRAIN_FLAG_INVALID) != 0);
+    // tikras turinys nuima žymę: kitas INVALID tame slot'e (po rato) vėl rašo juodą
+    REQUIRE(commit_pattern(port, i++, cuda));
+    for (std::uint32_t k = 0; k + 1 < n; ++k) REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));
+    CHECK(o.black_writes == n);
+    REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));  // tas pats slot'as, kuriame buvo turinys
+    CHECK(o.black_writes == n + 1);
+    CHECK(read_grain(r.in, i - 1, &fl) == blk);
+    o.release(d.inst);
+}
+
 
 namespace {
 // Šaltinis be turinio (dec underrun / ritmas be submit modelis): kiekvienam indeksui no_content → spraga atidarymo metu;
@@ -296,9 +353,31 @@ TEST_CASE("gap_policy: matavimas — vienos spragos kaina (1080i50 grain'as)", "
         REQUIRE(gf.prepare(o.raster, err));
         MxlVideoOutput port(o, gf.copy(), gf.flush(), gf.black(o.raster));
         Index i = 1000;
+        // Peržiūra 2026-11-13 p. 2: INVALID — pirmas gedimo ratas (kiekviename slot'e — turinys, rašoma juoda) ir vėlesni
+        // ratai (slot'as jau juodas — tik žymė). Prieš kiekvieną pirmo rato matavimą slot'ai vėl užpildomi turiniu.
+        const std::uint32_t nslot = o.layout.slotCount;
+        for (int lap = 0; lap < 2; ++lap) {
+            std::vector<double> us;
+            for (int rep = 0; rep < 40; ++rep) {
+                if (lap == 0)
+                    for (std::uint32_t k = 0; k < nslot; ++k) REQUIRE(commit_pattern(port, i++, cuda));
+                for (std::uint32_t k = 0; k < nslot; ++k) {
+                    const std::uint64_t w0 = o.black_writes;
+                    const auto t0 = std::chrono::steady_clock::now();
+                    REQUIRE(port.fill_gap(i++, GapAction::Invalid, kNoIndex));
+                    const double t = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+                    REQUIRE(o.black_writes == w0 + (lap == 0 ? 1 : 0));
+                    us.push_back(t);
+                }
+            }
+            std::sort(us.begin(), us.end());
+            std::printf("MEASURE gap %s Invalid %s: p50 %.1f us, p99 %.1f us, max %.1f us (n = %zu, grain %zu B)\n",
+                        cuda ? "cuda-linear" : "host", lap == 0 ? "pirmas ratas (juoda rašoma)" : "vėlesni ratai (tik žymė)",
+                        us[us.size() / 2], us[us.size() * 99 / 100], us.back(), us.size(), gfx::grain_bytes(o.raster));
+        }
         REQUIRE(commit_pattern(port, i++, cuda));
         REQUIRE(commit_pattern(port, i++, cuda));
-        for (const GapAction a : {GapAction::Invalid, GapAction::Repeat, GapAction::Black}) {
+        for (const GapAction a : {GapAction::Repeat, GapAction::Black}) {
             std::vector<double> us;
             for (int n = 0; n < 400; ++n) {
                 const auto t0 = std::chrono::steady_clock::now();

@@ -4,6 +4,9 @@
 // progresyvus — kadrai; cuda-linear) vienu batch kernel'iu per grain'ą + pasirinktinai N × 48 kHz stereo audio (1 kHz
 // −20 dBFS, kas sekundę 10 ms −6 dBFS pyptelėjimas; 50 Hz grain'ams sutampa su vaizdo sync blyksniu index mod 50 == 0).
 // Garso mėginiai grain'ui — [sample_begin(i), sample_begin(i + 1)) (sveikaisiais skaičiais, 59,94 — 800 / 801).
+// Garsas rašomas KIEKVIENAM indeksui (peržiūra 2026-11-13 p. 2): tęstinis flow'as žymės neturi, todėl indeksas be turinio
+// (variklio praleistas, laikrodžio spraga) commit'inamas tyla (0,0) ir skaičiuojamas `gap_silence` — skaitytojas nemato
+// pasenusio ring'o garso.
 #include <cuda_runtime_api.h>
 
 #include <cmath>
@@ -22,6 +25,13 @@
 #include <thread>
 
 namespace mxlv::func {
+
+// gen garso mėginys s (48 kHz): 1 kHz −20 dBFS, kas sekundę 10 ms −6 dBFS pyptelėjimas. Bendra su verify --mode audio.
+float gen_audio_sample(std::uint64_t s) {
+    constexpr double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
+    const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
+    return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
+}
 
 namespace {
 // gen kaip TickFunction (planas §6 D1: šaltinio vienetai). process — turinys visiems paruoštiems vienetams vienu batch'u
@@ -50,6 +60,7 @@ struct GenFn final : engine::TickFunction {
     struct PendingAudio {
         std::uint32_t unit;
         std::uint64_t index;
+        bool silence;  // spraga — tyla (rašoma ta pačia tvarka kaip turinys)
     };
     std::vector<PendingAudio> pending;
 
@@ -68,28 +79,33 @@ struct GenFn final : engine::TickFunction {
         const mxlRational r = mxl_rate(grain);
         std::size_t keep = 0;
         for (const PendingAudio& p : pending) {
-            if (mxlIndexToTimestamp(&r, p.index) + std::uint64_t{o.audio_late_ms} * 1'000'000 <= t_wake) write_audio(p.unit, p.index);
+            if (mxlIndexToTimestamp(&r, p.index) + std::uint64_t{o.audio_late_ms} * 1'000'000 <= t_wake) write_audio(p.unit, p.index, p.silence);
             else pending[keep++] = p;
         }
         pending.resize(keep);
     }
 
     // audio: grain'as i apima mėginius [sample_begin(i), sample_begin(i + 1)) (1080i50: [i·960, (i+1)·960))
-    void write_audio(std::uint32_t n, std::uint64_t i) {
+    // silence — indekso turinio nėra (spraga): commit'inama tyla, `gap_silence`.
+    void write_audio(std::uint32_t n, std::uint64_t i, bool silence = false) {
         const std::uint64_t a_end = vramflow::sample_begin(grain, i + 1);
         const auto a_count = static_cast<std::uint32_t>(a_end - vramflow::sample_begin(grain, i));
-        constexpr double two_pi_f = 2.0 * 3.14159265358979323846 * 1000.0 / 48000.0;
-        const mxlStatus as = aout[n].write(a_end, a_count, [&](int, std::uint64_t s) {
-            const double amp = (s % 48000) < 480 ? 0.5011872 : 0.1;  // −6 dBFS pyptelėjimas, kitaip −20 dBFS
-            return static_cast<float>(amp * std::sin(two_pi_f * static_cast<double>(s % 48000)));
-        });
-        if (as == MXL_STATUS_OK) st.flows[n].inc("audio_blocks");
-        else st.flows[n].inc("audio_write_errors");
+        const mxlStatus as = silence ? aout[n].write(a_end, a_count, [](int, std::uint64_t) { return 0.0f; })
+                                     : aout[n].write(a_end, a_count, [](int, std::uint64_t s) { return gen_audio_sample(s); });
+        if (as != MXL_STATUS_OK) st.flows[n].inc("audio_write_errors");
+        else st.flows[n].inc(silence ? "gap_silence" : "audio_blocks");
+    }
+    // Garsas indeksui: iškart arba (--audio-late-ms) eilėje — ta pačia tvarka visiems indeksams (turinys ir tyla).
+    void audio_for(std::uint32_t n, std::uint64_t i, bool silence) {
+        if (n >= aout.size()) return;
+        if (o.audio_late_ms) pending.push_back({n, i, silence});
+        else write_audio(n, i, silence);
     }
 
     // Variklio praleisti indeksai (T11): eilutė su TAI laiku (tik pirmam vienetui — visi praleidžia tuos pačius) —
     // izoliacijos testai aukštupio praradimus priskiria tik gedimo langui (kaip ir vėlius commit'us).
     void on_skip(std::uint32_t unit, engine::Index from, engine::Index to, engine::TickContext&) override {
+        for (engine::Index i = from; i < to; ++i) audio_for(unit, i, true);  // garso blokas be turinio — tyla (gap_silence)
         if (unit != 0) return;
         std::fprintf(stderr, "[gen] praleista: indeksai %llu…%llu (%llu), TAI %llu\n", static_cast<unsigned long long>(from),
                      static_cast<unsigned long long>(to - 1), static_cast<unsigned long long>(to - from),
@@ -141,20 +157,22 @@ struct GenFn final : engine::TickFunction {
     }
 
     void end_unit(const engine::UnitTick& ut, engine::Outcome oc, engine::TickContext&) override {
-        if (oc == engine::Outcome::Skipped) {  // AlreadyCommitted — laikrodis atgal (M11)
+        const std::uint32_t n = ut.unit;
+        if (oc == engine::Outcome::Skipped) {  // AlreadyCommitted — laikrodis atgal (M11): indeksas (ir jo garsas) jau parašytas
             st.proc["clock_backward"]++;
             return;
         }
         if (oc == engine::Outcome::OutputError) {  // open / commit klaida (ilgalaikė — variklis baigia fatalu, exit 2)
-            st.flows[ut.unit].inc("output_errors");
+            st.flows[n].inc("output_errors");
+            audio_for(n, ut.index, false);  // video klaida garso nepaliečia: garso turinys yra
             return;
         }
-        if (oc != engine::Outcome::Ready) return;
-        const std::uint32_t n = ut.unit;
+        if (oc != engine::Outcome::Ready) {  // spraga (laikrodžio žingsnis ir pan.): garso bloko turinio nėra — tyla
+            audio_for(n, ut.index, true);
+            return;
+        }
         if (o.video) st.flows[n].inc("fields_written");
-        if (n >= aout.size()) return;
-        if (o.audio_late_ms) pending.push_back({n, ut.index});
-        else write_audio(n, ut.index);
+        audio_for(n, ut.index, false);
     }
 
     void end_tick(engine::Index i, engine::TickContext&) override {

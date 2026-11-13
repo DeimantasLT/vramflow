@@ -227,6 +227,12 @@ Rules worth knowing:
 - **Commit every index.** A missing index can stall readers that step through the flow one index at a time
   (`mxl-gst-sink` retries the same index). When you have no content for an index, commit the grain with
   `MXL_GRAIN_FLAG_INVALID` instead of skipping it; do not invent a picture.
+- **An INVALID grain carries black, not the slot's old picture.** The ring slot of an INVALID grain still holds the
+  picture of a previous lap (about 200 ms old), and a reader that ignores the flag would replay that loop for the whole
+  outage. VRAMFlow writers therefore write black into the slot as well (`v210`: Y 64 / Cb Cr 512; `v210a`: also key 0,
+  transparent) — once per ring slot per outage: a slot that already holds black from this outage is only flagged again,
+  and a slot overwritten by real content loses the mark. Audio flows have no flag: a missing audio block is committed
+  as silence (`gen`: `gap_silence` per flow).
 - A grain flagged `MXL_GRAIN_FLAG_INVALID` reads as OK; check `info.flags` and `info.index` (MXL does not check that
   the index you got is the one you asked for).
 - **An INVALID grain means "no content for this index", not an error of the flow.** A reader that is itself a writer
@@ -357,9 +363,12 @@ gates, `ffmt_logo`) pass `--deadline-ms 0` and attribute an index the upstream i
 
 Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` (and `gap_startup`
 for start-up gaps, which are not losses). Indices the engine itself skipped because it woke up late (`late_skips`) are
-not filled: MXL marks them invalid when the next index is opened. Cost per gap (1080i50 grain, 2.76 MB): `invalid`
-≈ 0.2 µs; `freeze` / `black` one copy — host `memcpy` ≈ 80–100 µs, GPU D2D ≈ 27 µs (`freeze` and `black` also keep one
-black grain per raster in the flow's memory).
+not filled: MXL marks them invalid when the next index is opened (their audio blocks, which have no flag, are committed as
+silence and counted as `gap_silence`). Cost per gap (1080i50 grain, 2.76 MB): `invalid` — on the first lap of an outage
+one black copy into the slot (host `memcpy` ≈ 110 µs p50, 210 µs p99; GPU D2D ≈ 26 µs p50, 110 µs p99), on later laps of the same
+outage only the flag (≈ 0.2 µs); `freeze` / `black` one copy every gap — host `memcpy` ≈ 80–100 µs, GPU D2D ≈ 27 µs.
+Every policy except `leave` keeps one black grain per raster in the flow's memory (`invalid` too, for the INVALID
+payload).
 
 ### Commands
 

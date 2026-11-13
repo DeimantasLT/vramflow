@@ -50,6 +50,9 @@
   "proc": [],
   "hist": [],
   "flows": [
+   "invalid_black",
+   "invalid_not_black",
+   "invalid_not_black_first",
    "samples_absent",
    "samples_either_absent"
   ]

@@ -65,7 +65,8 @@ GapFill::~GapFill() {
 }
 
 bool GapFill::prepare(const vramflow::gfx::Raster& r, std::string& err) {
-    if (policy_ != engine::GapPolicy::Freeze && policy_ != engine::GapPolicy::Black) return true;  // invalid / leave — nereikia
+    // invalid taip pat: INVALID grain'as neša juodą turinį (peržiūra 2026-11-13 p. 2); leave — nieko nerašo
+    if (policy_ == engine::GapPolicy::Leave) return true;
     if (black(r)) return true;
     Black b;
     b.r = r;

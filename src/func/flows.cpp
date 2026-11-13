@@ -169,6 +169,7 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
     if (const std::string bad = check_rate(cfg.common.grainRate, f); !bad.empty()) { err = bad; return false; }
     if ((st = mxlFlowWriterGetStorageLayout(w, &layout)) != MXL_STATUS_OK) { err = "GetStorageLayout " + std::to_string(st); return false; }
     slots.assign(layout.slotCount, mxlGrainStorage{});
+    black_slot.assign(layout.slotCount, 0);  // naujas flow'as — nė vienas slot'as dar nelaiko juodo
     if ((st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data())) != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
     mxlFlowWriterGetStorageLayout(w, &layout);
     if (const std::string bad = check_layout(layout, r); !bad.empty()) { err = "lauko " + bad; return false; }
@@ -185,6 +186,8 @@ std::uint32_t* VideoOut::open(std::uint64_t index, mxlStatus& st) {
         return nullptr;
     }
     open_grain = true;
+    // Atidarytas turiniui: kvietėjas rašys į slot'ą (net jei vėliau atšauks) — juodo žymė nebegalioja
+    if (cur_slot < black_slot.size()) black_slot[cur_slot] = 0;
     return static_cast<std::uint32_t*>(slot_ptr(layout, slots[cur_slot]));
 }
 
@@ -201,9 +204,18 @@ mxlStatus VideoOut::commit_invalid(std::uint64_t index) {
     info = mxlGrainInfo{};
     mxlStatus st = mxlFlowWriterOpenGrainSlot(w, index, &info, &cur_slot);
     if (st != MXL_STATUS_OK) return st;
-    if (info.index != index) {
+    if (info.index != index || cur_slot >= layout.slotCount) {
         mxlFlowWriterCancelGrain(w);
         return MXL_ERR_INTERNAL;
+    }
+    // Juodas turinys — tik slot'ui, kuris dar nelaiko juodo (kartą slot'ui per gedimą; tolesni ratai — tik žymė)
+    if (paint_black && cur_slot < black_slot.size() && !black_slot[cur_slot]) {
+        if (!paint_black(slot_ptr(layout, slots[cur_slot]))) {
+            mxlFlowWriterCancelGrain(w);
+            return MXL_ERR_INTERNAL;
+        }
+        black_slot[cur_slot] = 1;
+        ++black_writes;
     }
     info.flags |= MXL_GRAIN_FLAG_INVALID;
     info.validSlices = info.totalSlices;
@@ -221,6 +233,21 @@ void VideoOut::release(mxlInstance inst) {
     cancel();
     if (w) mxlReleaseFlowWriter(inst, w);
     w = nullptr;
+}
+
+std::vector<std::uint8_t> black_grain(const vramflow::gfx::Raster& r) {
+    namespace gfx = vramflow::gfx;
+    std::vector<std::uint8_t> g(gfx::grain_bytes(r), 0);  // key plokštuma (v210a) — 0
+    // v210: 4 žodžiai = 6 pikseliai: (Cb Y Cr) (Y Cb Y) (Cr Y Cb) (Y Cr Y); eilutės ilgis — 128 B kartotinis.
+    constexpr std::uint32_t kC = 512, kY = 64;
+    constexpr std::uint32_t kCyc = kC | (kY << 10) | (kC << 20);
+    constexpr std::uint32_t kYcy = kY | (kC << 10) | (kY << 20);
+    const std::size_t words = gfx::fill_bytes(r) / 4;
+    for (std::size_t w = 0; w < words; ++w) {
+        const std::uint32_t v = (w % 2 == 0) ? kCyc : kYcy;
+        std::memcpy(g.data() + 4 * w, &v, 4);
+    }
+    return g;
 }
 
 // --- VideoIn ----------------------------------------------------------------------------------------------------------

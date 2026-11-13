@@ -190,12 +190,22 @@ struct Checker {
         }
         return want.size() == buf.size() && std::memcmp(buf.data(), want.data(), buf.size()) == 0;
     }
-    // true — grain'as commit'intas kaip INVALID (OK + MXL_GRAIN_FLAG_INVALID, validSlices == totalSlices).
+    // true — grain'as commit'intas kaip INVALID (OK + MXL_GRAIN_FLAG_INVALID, validSlices == totalSlices) IR jo turinys —
+    // skaidri juoda (fill Y 64 / C 512, key 0; peržiūra 2026-11-13 p. 2: žymės nepaisantis skaitytojas nemato slot'o šiukšlių).
     bool invalid(std::uint64_t idx) {
         mxlGrainInfo info{};
         const std::uint32_t* ptr = nullptr;
-        return in.get(idx, 0, info, ptr) == MXL_STATUS_OK && (info.flags & MXL_GRAIN_FLAG_INVALID) != 0 &&
-               info.validSlices == info.totalSlices;
+        if (in.get(idx, 0, info, ptr) != MXL_STATUS_OK || (info.flags & MXL_GRAIN_FLAG_INVALID) == 0 ||
+            info.validSlices != info.totalSlices)
+            return false;
+        const std::vector<std::uint8_t> blk = mxlv::func::black_grain(in.raster);
+        std::vector<std::uint8_t> got(blk.size());
+        if (in.cuda) {
+            if (cudaMemcpy(got.data(), ptr, got.size(), cudaMemcpyDeviceToHost) != cudaSuccess) return false;
+        } else {
+            std::memcpy(got.data(), ptr, got.size());
+        }
+        return got == blk;
     }
 };
 
