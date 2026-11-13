@@ -290,7 +290,7 @@ def run_level(a, n):
             gcommon[gcommon.index("--storage") + 1] = "host"
         P.start("gen", [BIN, "gen", *gcommon, "--duration", str(total + 12), "--out", str(d)], "producer")
         time.sleep(3)
-        P.start("logo", [BIN, "logo", *common, "--duration", str(total + 6), "--out", str(d)])
+        P.start("logo", [BIN, "logo", *common, "--deadline-ms", str(a.deadline_ms), "--duration", str(total + 6), "--out", str(d)])
         time.sleep(3)
         # host flow'us tikrina CPU (be CUDA konteksto), kad matavimo įrankis neiškreiptų C/H varianto
         vcommon = list(common)
@@ -344,7 +344,7 @@ def run_level(a, n):
             ea += ["--preset", "p4", "--tune", prof]
         else:
             ea += ["--x264-preset", prof, "--x264-threads", str(a.x264_threads)]
-        P.start("enc", [BIN, "enc", *common, *ea, "--duration", str(total + 2), "--out", str(d)])
+        P.start("enc", [BIN, "enc", *common, *ea, "--deadline-ms", str(a.deadline_ms), "--duration", str(total + 2), "--out", str(d)])
     elif f in ("dec", "chain"):
         if not a.clip:
             raise SystemExit("--clip privalomas dec/chain")
@@ -366,7 +366,8 @@ def run_level(a, n):
                                *(["--ref", a.ref] if a.ref else []), "--out", str(d)], "consumer")
         else:
             P.start("gen_audio", [BIN, "gen", *common, "--video", "0", "--audio", "1", "--duration", str(total + 10), "--out", str(d / "audio")], "producer")
-            P.start("logo", [BIN, "logo", *common, "--in-role", "4", "--duration", str(total + 6), "--out", str(d)])
+            P.start("logo", [BIN, "logo", *common, "--in-role", "4", "--deadline-ms", str(a.deadline_ms), "--duration", str(total + 6),
+                             "--out", str(d)])
             time.sleep(2)
             P.start("sink", [sys.executable, str(REPO / "tests/perf/ts_sink.py"), "--port-base", str(port), "--flows", str(n),
                              "--seconds", str(total + 2), "--warmup", str(W + 2), "--out", str(d / "sink.json")], "sink")
@@ -374,7 +375,8 @@ def run_level(a, n):
             enc_args = (["--encoder", "x264", "--x264-preset", a.chain_x264, "--x264-threads", str(a.x264_threads)]
                         if a.impl == "cpu" else ["--encoder", "nvenc", "--preset", "p4", "--tune", "ll"])
             P.start("enc", [BIN, "enc", *common, "--in-role", "2", *enc_args,
-                            "--audio", "1", "--port-base", str(port), "--duration", str(total), "--out", str(d)])
+                            "--audio", "1", "--port-base", str(port), "--deadline-ms", str(a.deadline_ms), "--duration", str(total),
+                            "--out", str(d)])
     # matavimo langas: CPU tarp warmup pabaigos ir lango pabaigos
     time.sleep(W)
     c0, t0 = P.cpu(), time.monotonic()
@@ -452,7 +454,7 @@ def run_level(a, n):
     hist = fs.get("hist", {})
     res = {
         "func": f, "layers": a.layers if f == "composite" else None, "out_format": a.out_format if f == "composite" else None,
-        "deadline_ms": a.deadline_ms if f == "composite" else None, "every": a.every,
+        "deadline_ms": a.deadline_ms if f in ("logo", "composite", "chain") or func_name == "enc" else None, "every": a.every,
         "variant": variant, "impl": a.impl, "storage": a.storage, "threads": a.threads, "source": a.source,
         "n": n, "seconds": S, "exit_codes": codes, "fatal": fs.get("fatal"),
         "realtime_ratio": rt, "produced": produced, "expected": span,
@@ -542,7 +544,9 @@ def main():
     ap.add_argument("--stop-after-fails", type=int, default=2)
     ap.add_argument("--layers", type=int, default=2, choices=[1, 2, 3, 4], help="composite: grafikos sluoksnių skaičius K")
     ap.add_argument("--out-format", default="v210", choices=["v210", "v210a"], help="composite: išėjimo formatas")
-    ap.add_argument("--deadline-ms", type=int, default=30, help="composite: įėjimų laukimo riba (R18: kaip logo numatytoji)")
+    ap.add_argument("--deadline-ms", type=int, default=30,
+                    help="logo / composite / enc / chain: įėjimų laukimo riba, ms. WSL2 kampanijos — 30 aiškiai (funkcijų numatytoji "
+                         "nuo V20 — auto 3·P/4, 15 ms prie 50 Hz)")
     a = ap.parse_args()
     pathlib.Path(a.out).mkdir(parents=True, exist_ok=True)
     results, fails = [], 0

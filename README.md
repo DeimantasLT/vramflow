@@ -340,6 +340,14 @@ Options of the MXL video writers (`gen`, `logo`, `composite`, `dec`) — every i
 | `--on-loss invalid\|freeze\|black` | An index without content (input gone or late, decoder underrun): `invalid` (default) commits an INVALID grain — nothing is invented, a reader wakes up at once; `freeze` repeats the last good grain of the same field parity for at most `--hold-ms`, then black; `black` commits a black grain at once (`v210a`: transparent). Without any good grain yet, `freeze` is black. Interlaced: with `freeze` / `black` content returns only on a frame boundary (even index) |
 | `--hold-ms N` | `freeze`: how long to repeat, default 1000 |
 
+Timing of the readers (`logo`, `composite`, `enc`): an input that is not there by the deadline `D` after `T(i)` makes
+that index a gap. `--deadline-ms 0` (default) means **`D = 3·P/4`** of the grain period `P`: 15 ms at 50 grains/s
+(1080i50, 1080p50, 720p50), 30 ms at 25p, 12.5 ms at 59.94 Hz; a value above `2P − G` is clamped with a warning. The
+summary states the effective value (`deadline_us`, proc). WSL2 measurement campaigns (`tests/perf/capacity.py`, the
+`composite` and targeted functional tests) pass `--deadline-ms 30` explicitly, because GPU scheduling hiccups of
+17–30 ms are common there. `gen --deadline-ms` sets only the threshold of its own "late commit" counter and stderr line
+(default: the same `3·P/4`, i.e. what a reader with the default deadline would miss).
+
 Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` (and `gap_startup`
 for start-up gaps, which are not losses). Indices the engine itself skipped because it woke up late (`late_skips`) are
 not filled: MXL marks them invalid when the next index is opened. Cost per gap (1080i50 grain, 2.76 MB): `invalid`
@@ -480,6 +488,7 @@ Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`,
 | `output_errors` (per flow) | Opening or committing an output grain failed; the index has no grain. Counted as a loss (exit `4` when strict); 3 in a row on one output fail that unit alone (`unit_failed`, output flow released; exit `2` when strict or when all units failed). An open refused with `MXL_ERR_INVALID_ARG` is "already written" (clock stepped back) only for an index this output already wrote; otherwise it is an output error |
 | `clock_backward` (process) | The output index was already written — the clock went back (MXL refuses to write an index twice). Not an error, not a loss |
 | `late_fields` → `missing_fields` | An input that stopped delivering (alive but stuck, e.g. `SIGSTOP`) costs 3 `late_fields` (the engine waits for it up to the deadline 3 times), after that it is *stalled* and every further index is `missing_fields` (no wait at all) until it delivers again |
+| `logo`: `gap_late_commits`, `gap_late_commit_min_us` / `_max_us` | Gaps committed at the deadline because an input was late (not because it was gone): how many, and how late after `T(i)` the gap grain was committed (≈ `D`) |
 | `read_errors` (per flow) | Replaces the old `read_status_<code>` keys: any unexpected read status of an input. The status code itself is no longer in the summary |
 | `reopen_mismatch` (`composite`) | The input that came back with another format (with `--on-format-change exit`, exit `6`) |
 | `lateness_max_us` (per flow) | Largest commit lateness after `T(i)` of this flow after warm-up, µs (`enc`: frame queued). The `out_lateness` histogram covers the whole tick |

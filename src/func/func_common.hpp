@@ -85,7 +85,9 @@ struct Opts {
     std::string logo = "builtin";
     int logo_x = -1, logo_y = -1;  // < 0 — numatytoji vieta nuo rastro (viršutinis dešinys kampas; 1080: 1488, 64)
     std::uint32_t inject_every = 0;  // logo: vieno bito klaida išėjime kas M laukų (savitikrai)
-    std::uint32_t deadline_ms = 30;  // įėjimų laukimo riba po lauko laiko (WDDM/Windows sutrikimų atsarga; ring 10 laukų)
+    // Paskutinė įėjimų laukimo riba D nuo T(i) (planas §6 D2, K-T2, V20): 0 — auto 3·P/4 (50 Hz — 15 ms, 25 Hz — 30 ms);
+    // > 2P − G apkarpoma su įspėjimu. gen: „vėlaus commit'o“ slenkstis (žemupio riba). WSL2 kampanijos nurodo 30 aiškiai.
+    std::uint32_t deadline_ms = 0;
     std::int64_t read_offset_us = 500;
     int in_role = 1;
     // gfxgen

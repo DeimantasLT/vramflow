@@ -81,7 +81,9 @@ ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
 FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skips", "lapped", "too_late", "in_invalid", "read_errors",
            "missing_fields", "detached", "flow_invalid", "reopened", "reattached", "stalls", "lateness_max_us", "gap_invalid",
-           "gap_frozen", "gap_black", "gap_startup")
+           "gap_frozen", "gap_black", "gap_startup", "gap_late_commits", "gap_late_commit_min_us", "gap_late_commit_max_us")
+DEADLINE_US = 15_000  # V20 (K-T2): numatytoji --deadline-ms = 3·P/4 prie 50 Hz
+DEADLINE_TOL_US = 1_000
 ENC_KEYS = ("frames_encoded", "late_frames", "late_skips_frames", "warmup_skips_frames", "clock_skips_frames", "missing_frames",
             "lapped", "too_late", "in_invalid", "frames_dropped_queue", "encode_errors", "mux_errors", "reattached",
             "audio_underrun_frames", "audio_silence_samples", "packets_audio", "lateness_max_us")
@@ -354,6 +356,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
         sp = F.vsummary(vp, "verify-logo")
         rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
     rec["policy"] = policy or "invalid"
+    rec["deadline_us"] = (sl.get("proc") or {}).get("deadline_us")
     rec["verify_last_index"] = sv.get("last_index")
     if vg is not None:
         sg = F.vsummary(vg, "verify-logo")
@@ -370,7 +373,7 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     xy = ["--layer-xy", "1488,64"]
-    g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", N, "--duration", RUN_S + 60, *v)
+    g = F.FProc(out, f"{sub}/gen", "gen", d, "--flows", N, "--deadline-ms", F.COMP_DEADLINE_MS, "--duration", RUN_S + 60, *v)
     xa = [F.FProc(out, f"{sub}/gfxA{k}", "gfxgen", d, "--flows", cnt, "--flow-base", base, "--layers", 1, "--layer-geom", "logo",
                   "--mode", "pace", "--duration", RUN_S + 60, *v) for k, (base, cnt) in enumerate(ranges(victim))]
     xb = F.FProc(out, f"{sub}/gfxB", "gfxgen", d, "--flows", 1, "--flow-base", victim, "--layers", 1, "--layer-geom", "logo",
@@ -618,6 +621,14 @@ def logo_gate(fault, r):
     if fault == "stall":
         if fa.get("stalls", 0) < 1:
             bad.append(f"paveikto stalls={fa.get('stalls', 0)} < 1")
+        # V20: su numatytosiomis (be --deadline-ms) užstrigusio įėjimo spraga commit'inama ties B = T + D, D = 3·P/4 = 15 ms;
+        # kol įėjimas Late (iki Stalled, M = 3) — bent 3 tokios spragos, kiekviena 15 ms ± 1 ms po T(i)
+        if r.get("deadline_us") != DEADLINE_US:
+            bad.append(f"logo deadline_us={r.get('deadline_us')} ≠ {DEADLINE_US} (numatytoji 3·P/4)")
+        lo, hi, nl_ = fa.get("gap_late_commit_min_us"), fa.get("gap_late_commit_max_us"), fa.get("gap_late_commits", 0)
+        if nl_ < 3 or lo is None or hi is None or lo < DEADLINE_US - DEADLINE_TOL_US or hi > DEADLINE_US + DEADLINE_TOL_US:
+            bad.append(f"paveikto spragų commit'ai ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
+                       f"{DEADLINE_US} ± {DEADLINE_TOL_US} µs")
         post = r.get("post") or {}
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
                 post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):

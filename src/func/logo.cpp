@@ -248,7 +248,13 @@ struct LogoFn final : engine::TickFunction {
                 break;
             case engine::Outcome::GapNoContent: break;
             case engine::Outcome::GapStartup: break;  // įėjimas dar neprisijungė (--start immediate): ne praradimas (gap_startup)
-            case engine::Outcome::GapLate:
+            case engine::Outcome::GapLate: {
+                // Spragos commit'o vėlavimas nuo T(i) (end_unit — iškart po commit'o; V20: riba B = T + D, D = 3·P/4)
+                const std::uint64_t us = (now_tai() - ti) / 1000;
+                f.inc("gap_late_commits");
+                if (!f.c.count("gap_late_commit_min_us") || us < f.c["gap_late_commit_min_us"]) f.c["gap_late_commit_min_us"] = us;
+                if (us > f.c["gap_late_commit_max_us"]) f.c["gap_late_commit_max_us"] = us;
+            }
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
                 if (c.invalid > s.invalid) f.loss("in_invalid", ti);
                 else if (c.too_late > s.too_late) f.loss("too_late", ti);
@@ -383,6 +389,7 @@ int run_logo(const Opts& o_in) {
     engine::SystemClock clk;
     EngineStats es(o, "logo");
     engine::StatsHub& hub = es.hub;
+    st.proc["deadline_us"] = static_cast<std::uint64_t>(deadline_ns(o) / 1000);  // efektyvi riba D (V20: auto 3·P/4)
     engine::TickEngine eng(engine_config(o, kLogoTiming, o.read_offset_us * 1000), clk, hub, stop);
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;

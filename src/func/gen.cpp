@@ -30,6 +30,7 @@ struct GenFn final : engine::TickFunction {
     const Opts& o;
     Stats& st;
     bool cpu, host_gpu;
+    std::int64_t late_ns = deadline_ns(o);  // „vėlaus commit'o“ slenkstis (V20)
     ThreadPool& pool;
     std::vector<media::GenJob>& jobs;
     std::vector<std::uint32_t*>& host_dst;
@@ -165,9 +166,10 @@ struct GenFn final : engine::TickFunction {
             st.add_hist("commit_lateness", late);
             st.commit_lateness_s.max(mxlIndexToTimestamp(&r, i) / 1'000'000'000, late / 1000);
         }
-        // Vėlesnis nei --deadline-ms commit'as: vartotojai su tokia riba šio indekso nesulaukia. Skaitiklis (visam
-        // paleidimui, ne tik po warmup) ir eilutė su TAI laiku — izoliacijos testai priskiria praradimus aukštupiui.
-        if (late > std::uint64_t{o.deadline_ms} * 1'000'000) {
+        // Vėlesnis nei žemupio riba (--deadline-ms; 0 — auto 3·P/4, kaip žemupio numatytoji) commit'as: vartotojai su tokia
+        // riba šio indekso nesulaukia. Skaitiklis (visam paleidimui, ne tik po warmup) ir eilutė su TAI laiku — izoliacijos
+        // testai priskiria praradimus aukštupiui.
+        if (late > static_cast<std::uint64_t>(late_ns)) {
             st.proc["late_commits"]++;
             std::fprintf(stderr, "[gen] vėlus commit: indeksas %llu, %.3f ms po T(i), TAI %llu\n", static_cast<unsigned long long>(i),
                          static_cast<double>(late) / 1e6, static_cast<unsigned long long>(t_done));

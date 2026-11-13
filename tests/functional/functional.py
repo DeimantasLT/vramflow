@@ -831,10 +831,14 @@ def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
             lost = sum(f.get(k, 0) for f in fl for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips"))
             okf = [f.get("fields_ok", 0) for f in fl]
             pv = (sv or {}).get("proc") or {}
+            # V20: numatytoji riba D = 3·P/4 (P — grain'o periodas): 25p — 30 ms (nepakitusi), 50 Hz — 15 ms
+            dl, want_dl = ((sl or {}).get("proc") or {}).get("deadline_us"), 0.75 * 1e6 / hz
             ok = (sl is not None and sv is not None and rl == 0 and lost == 0 and len(okf) == N and min(okf) >= 0.9 * D * hz
-                  and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0 and sl.get("format") == fmt)
+                  and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0 and sl.get("format") == fmt
+                  and dl is not None and abs(dl - want_dl) <= 1)
             res.append(result(tid, "PASS" if ok else "FAIL",
-                              why=f"logo exit={rl} praradimai={lost} fields_ok={okf} (>= {0.9 * D * hz:.0f}) verify exit={rv} "
+                              why=f"deadline_us={dl} (laukta {want_dl:.0f}) logo exit={rl} praradimai={lost} fields_ok={okf} "
+                                  f"(>= {0.9 * D * hz:.0f}) verify exit={rv} "
                                   f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
                                   f"capacity_errors={pv.get('capacity_errors')} proc_ms={((sl or {}).get('hist') or {}).get('proc_ms')}",
                               logo=sl, verify=sv))

@@ -122,7 +122,8 @@ def start_sources(out, sub, d, func, v, roles):
     """roles: flow'o numeris → gamintojo žyma; grąžina {žyma: FProc}. composite — ir gfxgen sluoksniai (vienas procesas visiems)."""
     procs = {}
     for tag, flows in roles.items():
-        procs[tag] = F.FProc(out, f"{sub}/gen-{tag}", "gen", d, "--flows", len(flows), "--flow-base", flows[0], "--duration", DUR + 60, *v)
+        procs[tag] = F.FProc(out, f"{sub}/gen-{tag}", "gen", d, "--flows", len(flows), "--flow-base", flows[0], "--deadline-ms", 30,
+                             "--duration", DUR + 60, *v)  # gen „vėlus commit“ slenkstis = funkcijos riba (30)
     if func == "composite":
         procs["gfx"] = F.FProc(out, f"{sub}/gfx", "gfxgen", d, "--flows", N, "--layers", 1, "--layer-geom", "logo", "--mode", "pace",
                                "--duration", DUR + 60, *v)
@@ -227,7 +228,8 @@ def scenario(out, name, func, tag, impl, storage, faults, aligned=False):
             procs["restart"].kill9()
             time.sleep(1)
             n = faults["restart"]
-            procs["restart"] = F.FProc(out, f"{sub}/gen-restart2", "gen", d, "--flows", 1, "--flow-base", n, "--duration", DUR + 60, *v)
+            procs["restart"] = F.FProc(out, f"{sub}/gen-restart2", "gen", d, "--flows", 1, "--flow-base", n, "--deadline-ms", 30,
+                                       "--duration", DUR + 60, *v)
         rc["verify"] = vf.wait(timeout=DUR + 60)
         rc[func] = fn.wait(timeout=DUR + 60)
     finally:

@@ -75,6 +75,9 @@ void inputs(CLI::App* c, Opts& o) {
     c->add_option("--on-format-change", o.on_format_change, "įėjimas grįžo kitu formatu: exit (exit 6, numatyta) | wait")
         ->check(CLI::IsMember({"exit", "wait"}));
 }
+constexpr const char* kDeadlineHelp =
+    "paskutinė įėjimų laukimo riba nuo T(i), ms; 0 — auto 3·P/4 (numatyta: 50 Hz — 15, 25 Hz — 30; WSL2 kampanijos — 30)";
+
 // MXL video rašytojai (gen, logo, composite, dec): spragų politika K3 (production-grade §6 K3, planas §6 D4).
 void writers(CLI::App* c, Opts& o) {
     c->add_option("--on-loss", o.on_loss,
@@ -93,6 +96,8 @@ int main(int argc, char** argv) {
     auto* g = app.add_subcommand("gen", "N × v210 (--format, numatytasis 1080i50) (+ audio) generatorius");
     common(g, o);
     writers(g, o);
+    g->add_option("--deadline-ms", o.deadline_ms,
+                  "„vėlaus commit'o“ slenkstis (eilutė ir late_commits): žemupio riba, ms; 0 — auto 3·P/4 (numatyta)");
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
     g->add_option("--audio-late-ms", o.audio_late_ms,
@@ -112,7 +117,7 @@ int main(int argc, char** argv) {
                   "įėjimų (--input-wait-ms), tada kurti išėjimus")
         ->check(CLI::IsMember({"immediate", "wait-all"}));
     l->add_option("--inject-every", o.inject_every);
-    l->add_option("--deadline-ms", o.deadline_ms);
+    l->add_option("--deadline-ms", o.deadline_ms, kDeadlineHelp);
     l->add_option("--read-offset-us", o.read_offset_us);
     l->add_option("--test-fault-proc-delay-ms", o.test_fault_proc_delay_ms)->group("");  // izoliacijos vartų meta-testui
     auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
@@ -125,7 +130,7 @@ int main(int argc, char** argv) {
     cp->add_option("--base", o.base, "gen (bazė flow_id(--in-role, n)) | none (tik su --out-format v210a)")->check(CLI::IsMember({"gen", "none"}));
     cp->add_option("--out-format", o.out_format, "v210 | v210a")->check(CLI::IsMember({"v210", "v210a"}));
     cp->add_option("--layer-flow", o.layer_flow, "K:UUID — k-tojo (0…K-1) sluoksnio flow ID (visiems išėjimams), pvz. kito composite išėjimas");
-    cp->add_option("--deadline-ms", o.deadline_ms);
+    cp->add_option("--deadline-ms", o.deadline_ms, kDeadlineHelp);
     cp->add_option("--read-offset-us", o.read_offset_us);
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
@@ -147,7 +152,7 @@ int main(int argc, char** argv) {
     common(e, o);
     inputs(e, o);
     e->add_option("--encoder", o.encoder, "nvenc | x264");
-    e->add_option("--deadline-ms", o.deadline_ms);
+    e->add_option("--deadline-ms", o.deadline_ms, kDeadlineHelp);
     e->add_option("--read-offset-us", o.read_offset_us);
     e->add_option("--preset", o.preset);
     e->add_option("--tune", o.tune);

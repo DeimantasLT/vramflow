@@ -132,6 +132,26 @@ TEST_CASE("gap_policy: --on-loss / --hold-ms → EngineConfig abiem ribų režim
     CHECK(func::gap_policy("leave") == GapPolicy::Leave);
 }
 
+// V20 (K-T2): --deadline-ms 0 (numatyta) — auto 3·P/4 pagal grain'ų dažnį; aiški reikšmė — tokia pati.
+TEST_CASE("timing: --deadline-ms numatyta = 3·P/4 (50 Hz — 15 ms, 25 Hz — 30 ms), aiški — nepakitusi", "[func][timing]") {
+    func::Opts o;
+    CHECK(o.deadline_ms == 0u);
+    o.fmt = vramflow::kFmt1080i50;  // 50 laukų/s
+    CHECK(func::deadline_ns(o) == 15'000'000);
+    CHECK(func::engine_config(o, func::EngineTiming::Isolation, 500'000).cuts.deadline_ns == 15'000'000);
+    CHECK(func::engine_config(o, func::EngineTiming::Legacy, 0).cuts.deadline_ns == 15'000'000);
+    std::string why;
+    REQUIRE(vramflow::parse_format("1080p25", o.fmt, why));
+    CHECK(func::deadline_ns(o) == 30'000'000);
+    CHECK(func::engine_config(o, func::EngineTiming::Isolation, 500'000).cuts.deadline_ns == 30'000'000);
+    REQUIRE(vramflow::parse_format("1080i59.94", o.fmt, why));
+    CHECK(func::deadline_ns(o) == engine::default_cuts({60000, 1001}).deadline_ns);  // 12,51 ms
+    o.fmt = vramflow::kFmt1080i50;
+    o.deadline_ms = 30;  // WSL2 kampanijos — aiškiai
+    CHECK(func::deadline_ns(o) == 30'000'000);
+    CHECK(func::engine_config(o, func::EngineTiming::Isolation, 500'000).cuts.deadline_ns == 30'000'000);
+}
+
 TEST_CASE("gap_policy: GapFill — Repeat == to paties pariteto šaltinis, Black == Y 64 / C 512, Invalid — žymė (host, cuda-linear)",
           "[func][gap][mxl]") {
     const bool cuda = GENERATE(false, true);

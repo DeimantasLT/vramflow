@@ -405,6 +405,7 @@ int run_composite(const Opts& o) {
     // Startas — wait-all (V18): išėjimo rastras priklauso nuo sluoksnių įėjimų formato, todėl įėjimų laukta prieš kuriant išėjimus
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
     ecfg.start = engine::StartMode::WaitAll;
+    st.proc["deadline_us"] = static_cast<std::uint64_t>(ecfg.cuts.deadline_ns / 1000);  // efektyvi riba D (V20)
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
         engine::UnitSpec u;

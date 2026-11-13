@@ -3,7 +3,8 @@
 > **Įgyvendinimo būsena (2026-11-13):** 0–3 etapai ir V19, V21 — įgyvendinti; **V17** (spragų politika K3: `--on-loss`,
 > `--hold-ms`, ritmo gija iki pirmo `submit` — INVALID) — įgyvendinta; **V18** (`--start immediate` — `logo`; `composite` ir
 > `enc` lieka wait-all: `composite` išėjimo rastras priklauso nuo sluoksnių įėjimų, `enc` MXL išėjimų neturi) — įgyvendinta;
-> V20 — žr. §9 eilutę. Žemiau — pirminis planas.
+> **V20** (`--deadline-ms` 0 = auto `3·P/4`; `gen` „vėlaus commit'o“ slenkstis — tas pats; WSL2 kampanijos — 30 aiškiai)
+> — įgyvendinta. Žemiau — pirminis planas.
 >
 > **Būsena (pirminė):** planas, **laukia autoriaus patvirtinimo**. Kodas nekeistas, niekas nekompiliuota ir nepaleista (tuo metu kitas
 > agentas taisė kompiliatoriaus įspėjimus; GPU neliesta). Teiginiai apie VRAMFlow kodą — iš skaitymo `git show HEAD:<kelias>`,

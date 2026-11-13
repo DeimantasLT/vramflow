@@ -783,6 +783,7 @@ int run_enc(const Opts& o) {
     // Startas — wait-all (V18): enc MXL išėjimų neturi, įėjimų laukta prieš variklį (attach_inputs)
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
     ecfg.start = engine::StartMode::WaitAll;
+    st.proc["deadline_us"] = static_cast<std::uint64_t>(ecfg.cuts.deadline_ns / 1000);  // efektyvi riba D (V20)
     engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;

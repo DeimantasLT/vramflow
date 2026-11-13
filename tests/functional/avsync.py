@@ -177,7 +177,10 @@ def late_audio_run(out, sub, impl, storage, enc, port, D, late_ms, n=4):
         cap = subprocess.Popen([sys.executable, str(AV_OFFSET), str(ts), "--capture-port", str(port), "--seconds", str(D + 3),
                                 "--json", str(av_json)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
-        ea = ["--encoder", enc, "--audio", 1, "--port-base", port] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
+        # --deadline-ms 30 aiškiai (V20): scenarijus — realaus laiko garso rašytojas, kadro garsas ateina ~T + 20 ms; su
+        # numatytąja 3·P/4 = 15 ms (50 laukų/s) jis visada pavėluotų. Kontrolinis paleidimas — su ta pačia riba.
+        ea = (["--encoder", enc, "--audio", 1, "--port-base", port, "--deadline-ms", 30] +
+              (["--x264-preset", "ultrafast"] if enc == "x264" else []))
         e = F.FProc(out, sub, "enc", d, "--flows", n, "--duration", D, "--warmup", 2, *ea, *v)
         re_ = e.wait(timeout=D + 60)
         cap.wait(timeout=D + 120)

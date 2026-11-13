@@ -55,7 +55,7 @@ ENV = dict(os.environ, LD_LIBRARY_PATH=os.environ.get("LD_LIBRARY_PATH") or _LIB
 
 GRAIN_NS = 20_000_000  # 1080i50: grain'as = laukas, 50 Hz
 N_VICTIM = 7
-DEADLINE_MS = 30.0  # gen numatytasis --deadline-ms (func_common.hpp)
+DEADLINE_MS = 30.0  # WSL2 kampanijos riba (funkcijų numatytoji nuo V20 — auto 3·P/4, 15 ms prie 50 Hz)
 PRE_S, POST_S = 0.2, 1.0  # įvykio langas
 GAP_S = 5.0  # tarpas tarp įvykių
 # MXL flow `data` failo poslinkiai (patikrinta empiriškai su MXL 1.2.0 / PR #653: head == einamasis indeksas, šalia —

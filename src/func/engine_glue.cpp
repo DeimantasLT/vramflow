@@ -11,16 +11,21 @@
 
 namespace mxlv::func {
 
+std::int64_t deadline_ns(const Opts& o) {
+    if (o.deadline_ms > 0) return static_cast<std::int64_t>(o.deadline_ms) * 1'000'000;
+    return engine::default_cuts(o.fmt.grain_rate()).deadline_ns;  // 3·P/4 (K-T2)
+}
+
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns) {
     const vramflow::Rational rate = o.fmt.grain_rate();
-    const auto deadline_ns = static_cast<std::int64_t>(o.deadline_ms) * 1'000'000;
+    const std::int64_t dl = deadline_ns(o);
     engine::EngineConfig c;
     if (t == EngineTiming::Legacy) {
-        c = engine::EngineConfig::legacy(rate, read_offset_ns, deadline_ns);
+        c = engine::EngineConfig::legacy(rate, read_offset_ns, dl);
     } else {
         c.cuts = engine::default_cuts(rate);
         c.cuts.read_offset_ns = read_offset_ns;
-        c.cuts.deadline_ns = deadline_ns;
+        c.cuts.deadline_ns = dl;
         c.stall_after = 3;
         c.late_clear_run = 8;
         c.wait = engine::WaitMode::Pivot;
