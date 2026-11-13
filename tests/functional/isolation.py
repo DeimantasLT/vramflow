@@ -18,7 +18,23 @@ fiso_enc_audio — kaip fiso_enc, bet paveikto srauto video ir garsas — skirti
                  Sveikiems — kaip fiso_enc; paveiktam — video nenukenčia, prarastas garsas suskaičiuotas.
 fiso_teeth     — vartų „dantų“ meta-testas: logo C, logo G ir enc C su --test-fault-proc-delay-ms (funkcija vėluoja, kol trūksta
                  įėjimo) privalo būti FAIL (30 ms ir 10 ms; 10 ms — ir dėl lango p99), be injekcijos — PASS.
-Variantai: C (cpu + host, x264) ir G (gpu + cuda-linear, nvenc); FISO_VARIANTS=C,G, FISO_N=8.
+Variantai: C (cpu + host, x264) ir G (gpu + cuda-linear, nvenc); FISO_VARIANTS=C,G, FISO_N=8 (visiems).
+
+N kiekvienam vartui: 8, išskyrus enc C (x264; fiso_enc[C], fiso_enc_audio[C], fiso_teeth[enc-C]) — N = ENC_C_N = 6
+(FISO_ENC_C_N; FISO_N, jei nurodytas, galioja visiems). Izoliacijos vartai turi veikti TALPOS RIBOSE: jie lygina sveikų
+srautų vėlavimą gedimo lange su to paties paleidimo kontroliniu langu ir aukštupio (gen) vėlavimo pokyčiu; kai mašina
+apkrauta tiek, kad pats gedimo momentas (nužudyto proceso išvalymas) pavėlina visus procesus, vėlavimą lemia apkrova, ne
+funkcijos izoliacija. N = 8 riba buvo viršijama < 1 ms (25,85–25,99 ms prieš 25,28 ms) maždaug 1 iš 3 paleidimų, be jokių
+praradimų. Matavimas (tests/perf/enc_headroom.py, be gedimo, x264 ultrafast, 1080i50 + garsas):
+  N   sistemos CPU % (12 loginių)   enc CPU %   frame_lateness p50 / p99 / max ms   sekundžių maks. mediana ms
+  2   7,6 … 8,2                     76          5,0 … 5,7 / 6,8 … 7,5 / 7,3 … 8,2   6,3 … 7,4
+  4   17,4                          176         5,8 … 6,4 / 8,5 … 9,0 / 10,2 … 11,3  8,0 … 8,4
+  6   26,7 … 27,1                   280         7,4 … 7,7 / 9,3 / 9,6 … 12,6        8,8 … 9,0
+  8   41,7 … 42,0                   396 … 400   8,8 / 10,6 … 10,9 / 12,9 … 13,1     9,9 … 10,0
+(2 pakartojimai, 0 praradimų visur). Ryzen AI 9 HX 370, WSL2 — 12 loginių CPU = 6 branduoliai × 2 SMT: N = 8 užima ≈ 5,0
+loginio CPU (5 iš 6 fizinių branduolių, jei kiekviena gija — atskirame), N = 6 — ≈ 3,3 (≈ pusė). Pasirinkta N = 6:
+didžiausias N, kai užimta ne daugiau kaip pusė fizinių branduolių, o vėlavimas — tolygus (p99 9,3 ms prieš 10,6 … 10,9 ms
+prie N = 8).
 
 Savikontrolė (vienas paleidimas, ne atskiras kontrolinis): funkcija įrašo kiekvieno flow'o didžiausią commit'o vėlavimą
 kiekvienai indekso laiko sekundei (santraukos `lateness_s`), gen — savo commit'o vėlavimą (`commit_lateness_s`). Langai (TAI):
@@ -59,7 +75,17 @@ import time
 import functional as F  # noqa: E402
 
 VARIANTS = {"C": ("cpu", "host", "x264"), "G": ("gpu", "cuda-linear", "nvenc")}
-N = int(os.environ.get("FISO_N", "8"))
+N_DEFAULT = int(os.environ.get("FISO_N", "8"))
+# enc C (x264): didžiausias N su aiškia CPU atsarga (matavimas — modulio aprašas, docs/rezultatai/2026-11-12-izoliacija-po.md)
+ENC_C_N = int(os.environ.get("FISO_N", os.environ.get("FISO_ENC_C_N", "6")))
+N = N_DEFAULT  # einamojo paleidimo N (use_n)
+
+
+def use_n(func, tag):
+    """Nustato einamojo vartų paleidimo N: enc C — ENC_C_N, kiti — N_DEFAULT (paleidimai nuoseklūs)."""
+    global N
+    N = ENC_C_N if (func == "enc" and tag == "C") else N_DEFAULT
+    return N
 FAULT_AT = float(os.environ.get("FISO_FAULT_AT", "12"))  # s po funkcijos starto
 STALL_S = 5.0
 RUN_S = 26  # funkcijos trukmė
@@ -765,6 +791,7 @@ def probe(out, name, runner, faults):
         tid = f"{name}[{tag}:{pos}]"
         args = (out, tag, impl, storage) + ((enc,) if runner in (run_enc, run_enc_audio) else ())
         gate = {run_enc: enc_gate, run_enc_audio: enc_audio_gate}.get(runner, logo_gate)
+        use_n("enc" if runner in (run_enc, run_enc_audio) else "other", tag)
         for fault in faults:
             r = runner(*args, fault, pos)
             if r.get("err"):
@@ -781,7 +808,8 @@ def probe(out, name, runner, faults):
             bad = gate(fault, r)
             if r.get("post"):
                 why += f" | po SIGCONT: {r['post']}"
-            res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") + why, after=r))
+            res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"N={N} {'; '.join(bad)} || " if bad else f"N={N} ") + why,
+                                after=r))
     return res
 
 
@@ -793,6 +821,7 @@ def fiso_kill(out):
     res = probe(out, "fiso_kill", run_logo, ["kill"])
     for pol in ("freeze", "black"):
         for tag, impl, storage, _ in variants():
+            use_n("logo", tag)
             tid = f"fiso_kill[{tag}:{POLICY_POS}:{pol}]"
             r = run_logo(out, tag, impl, storage, "kill", POLICY_POS, suffix=f"-{pol}", policy=pol)
             if r.get("err"):
@@ -833,6 +862,10 @@ def fiso_teeth(out):
         tid = f"fiso_teeth[{func}-{tag}]"
         if tag not in [t for t, *_ in variants()]:
             continue
+        only = [x for x in os.environ.get("FISO_TEETH", "").split(",") if x]  # pvz. enc-C (pakartojimams); tuščia — visi
+        if only and f"{func}-{tag}" not in only:
+            continue
+        use_n(func, tag)
         runs = {}
         for d in (30, 10, 0):
             extra = ["--test-fault-proc-delay-ms", d] if d else []
@@ -850,8 +883,9 @@ def fiso_teeth(out):
         ok = bool(bad[30]) and bool(lat10) and bool(p99_10) and not bad[0]
         show = lambda b: ("FAIL " + "; ".join(b)[:500]) if b else "PASS"  # noqa: E731
         res.append(F.result(tid, "PASS" if ok else "FAIL",
-                            why=f"30 ms: {show(bad[30])} | 10 ms: {show(bad[10])} (vėlavimo ribos radinių {len(lat10)}, "
-                                f"p99 radinių {len(p99_10)}) | 0 ms: {show(bad[0])}"))
+                            why=f"N={N} 30 ms: {show(bad[30])} | 10 ms: {show(bad[10])} (vėlavimo ribos radinių {len(lat10)}, "
+                                f"p99 radinių {len(p99_10)}) | 0 ms: {show(bad[0])}",
+                            after={str(d): r for d, r in runs.items()}))  # visi trys įrašai — analizei (functional.json)
     return res
 
 

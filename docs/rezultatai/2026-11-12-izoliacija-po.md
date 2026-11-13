@@ -56,3 +56,36 @@ dažnis ≈ 1 iš 3.
 Kas neįrodyta: priežastis (WSL2 GPU paravirtualizacija ir kelių kontekstų laiko dalijimas, kai vienas kontekstas
 sustabdytas, yra tik hipotezė); vėlaus tick'o laikas nuo SIGSTOP / SIGCONT dabar registruojamas (`late_ticks` su `vs_stop_ms`,
 `vs_cont_ms`), bet nuo jo įjungimo sutrikimas dar nepasikartojo. Patikrinti natyviame Linux (ne WSL2) — ar dingsta.
+
+## Atnaujinimas 2026-11-13: enc C vartai talpos ribose (T1) ir favsync_late_audio[C] (T2)
+
+### T1 — fiso_enc[C] N = 8 → 6
+
+Ankstesnėje patikroje fiso_enc[C:*] krisdavo ≈ 1 iš 3 pilnų paleidimų: visų sveikų srautų maks. vėlavimas gedimo sekundę
+25,85–25,99 ms prieš ribą 25,28 ms (kontrolė 11,31, Δup 7,47), be jokių praradimų. x264 atsarga šioje mašinoje
+(`tests/perf/enc_headroom.py`: ta pati grandinė kaip fiso_enc, be gedimo, x264 ultrafast, 1080i50 + garsas, 2 pakartojimai):
+
+| N | sistemos CPU, % iš 12 loginių | enc CPU, % vieno | frame_lateness p50 / p99 / max, ms | sekundžių maks. mediana, ms |
+|---|---|---|---|---|
+| 2 | 7,6 … 8,2 | 76 | 5,0 … 5,7 / 6,8 … 7,5 / 7,3 … 8,2 | 6,3 … 7,4 |
+| 4 | 17,4 | 176 | 5,8 … 6,4 / 8,5 … 9,0 / 10,2 … 11,3 | 8,0 … 8,4 |
+| 6 | 26,7 … 27,1 | 280 | 7,4 … 7,7 / 9,3 / 9,6 … 12,6 | 8,8 … 9,0 |
+| 8 | 41,7 … 42,0 | 396 … 400 | 8,8 / 10,6 … 10,9 / 12,9 … 13,1 | 9,9 … 10,0 |
+
+Praradimų 0 visur. WSL2 rodo 12 loginių CPU = 6 branduoliai × 2 SMT: N = 8 užima ≈ 5,0 loginio CPU (5 iš 6 fizinių
+branduolių, jei kiekviena gija — atskirame), N = 6 — ≈ 3,3. Pasirinkta **N = 6** (`isolation.py` `ENC_C_N`; kiti vartai — 8).
+
+Vartų atsarga — mažiausias (riba − sveiko srauto vėlavimas) per gedimo lango sekundes:
+
+| N | paleidimų (× 3 vietos) | PASS | mažiausia atsarga | mediana |
+|---|---|---|---|---|
+| 6 | 10 × 3 = 30 | **30 / 30** | 3,86 ms | 5,78 ms |
+| 8 | 3 × 3 = 9 | 8 / 9 (1 — visi sveiki `frames_encoded` 646 < 649) | 1,87 ms | 6,03 ms |
+
+fiso_teeth[enc-C] prie N = 6: injekcija 30 ms — vartai FAIL 16 / 16, 10 ms — FAIL 16 / 16 (lango p99 taisyklė 16 / 16, maks.
+vėlavimo taisyklė 13 / 16), be injekcijos — PASS 16 / 16. Meta-testas (reikalauja, kad 10 ms pagautų ABI taisyklės) —
+13 / 16 (8 / 10 + 5 / 6). Kodėl maks. vėlavimo taisyklė kartais nesuveikia: 10 ms injekcija pavėlina ir sveiką aukštupį — `gen` (C, turinys
+CPU) commit'o vėlavimas pakyla 2–5 ms KIEKVIENĄ gedimo lango sekundę (kontrolėje maks. 6,6 ms; išmatuota 6 paleidimais);
+hipotezė (nepatikrinta): pavėlintas enc darbas (weave, x264) persislenka ant `gen` kito lauko generavimo CPU laiko. Δup šį funkcijos sukeltą aukštupio vėlavimą priskiria aukštupiui,
+ir atsarga lieka 0 … 1,5 ms. Tai žinomas vartų „Ko vartai NEAPTINKA“ atvejis (Δup „paaiškina“), ne N pasekmė; taisymas —
+gamintojų ir tikrinamos funkcijos CPU rinkinių atskyrimas harness'e (neįgyvendinta).
