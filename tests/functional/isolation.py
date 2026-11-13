@@ -120,6 +120,7 @@ GAP_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "outs
             "sample_lapped", "gap_repeat", "gap_black", "gap_other", "gap_repeat_first", "gap_repeat_last", "gap_black_first",
             "gap_black_last", "last_good_index")
 HOLD_FIELDS = 50  # --hold-ms 1000 (numatyta) prie 50 laukų/s
+DL = 0  # --deadline-ms 0 (auto 3·P/4) visiems logo / enc / gen: vartai tikrina numatytąją laiką (V20), ne harness'o 30 ms
 
 
 def variants():
@@ -320,7 +321,8 @@ def with_budget(rec, s_fn, up_whole_extra=0):
 
 def gens(out, sub, d, v, victim, *extra):
     """Sveikų flow'ų gamintojai — po vieną kiekvienai ištisinei atkarpai."""
-    return [F.FProc(out, f"{sub}/genA{k}", "gen", d, "--flows", cnt, "--flow-base", base, "--duration", RUN_S + 60, *extra, *v)
+    return [F.FProc(out, f"{sub}/genA{k}", "gen", d, "--flows", cnt, "--flow-base", base, "--deadline-ms", DL, "--duration", RUN_S + 60,
+                    *extra, *v)
             for k, (base, cnt) in enumerate(ranges(victim))]
 
 
@@ -334,7 +336,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     ga = gens(out, sub, d, v, victim)
-    gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", victim, "--duration", RUN_S + 60, *v)
+    gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", victim, "--deadline-ms", DL, "--duration", RUN_S + 60, *v)
     if policy:
         extra = (*extra, "--on-loss", policy)
     lg = vf = vp = vg = None
@@ -345,7 +347,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
             return {"err": "gen flow'ai neatsirado"}
         t0 = time.monotonic()
         mark_start()
-        lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", LOGO_RUN_S, "--warmup", WARM_S, *extra, *v)
+        lg = F.FProc(out, sub, "logo", d, "--flows", N, "--deadline-ms", DL, "--duration", LOGO_RUN_S, "--warmup", WARM_S, *extra, *v)
         if not F.wait_flows(d, [F.role_flow_id(2, n) for n in range(N)], 30):
             return {"err": "logo išėjimo flow'ai neatsirado"}
         vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", VERIFY_S, "--warmup", 1,
@@ -460,11 +462,13 @@ def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False, e
     ga = gens(out, sub, d, v, victim, "--audio", 1)
     gbv = None
     if audio_only:  # paveiktas srautas: video ir garsas — skirtingi procesai, gedimas — tik garso gamintojui
-        gbv = F.FProc(out, f"{sub}/genBv", "gen", d, "--flows", 1, "--flow-base", victim, "--duration", RUN_S + 60, *v)
+        gbv = F.FProc(out, f"{sub}/genBv", "gen", d, "--flows", 1, "--flow-base", victim, "--deadline-ms", DL, "--duration", RUN_S + 60,
+                      *v)
         gb = F.FProc(out, f"{sub}/genBa", "gen", d, "--flows", 1, "--flow-base", victim, "--video", 0, "--audio", 1,
-                     "--duration", RUN_S + 60, *v)
+                     "--deadline-ms", DL, "--duration", RUN_S + 60, *v)
     else:
-        gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", victim, "--audio", 1, "--duration", RUN_S + 60, *v)
+        gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", victim, "--audio", 1, "--deadline-ms", DL,
+                     "--duration", RUN_S + 60, *v)
     e = sink = None
     re_ = None
     t_fault = None
@@ -477,7 +481,8 @@ def run_enc(out, tag, impl, storage, enc, fault, pos="last", audio_only=False, e
         ea = ["--encoder", enc, "--port-base", ENC_PORT] + (["--x264-preset", "ultrafast"] if enc == "x264" else [])
         t0 = time.monotonic()
         mark_start()
-        e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--duration", RUN_S, "--warmup", WARM_S, *ea, *extra, *v)
+        e = F.FProc(out, sub, "enc", d, "--flows", N, "--audio", 1, "--deadline-ms", DL, "--duration", RUN_S, "--warmup", WARM_S, *ea,
+                    *extra, *v)
         mark_ready()
         t_fault = apply_fault(fault, gb, t0)
         re_ = e.wait(timeout=RUN_S + 60)

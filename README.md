@@ -343,9 +343,10 @@ Options of the MXL video writers (`gen`, `logo`, `composite`, `dec`) — every i
 Timing of the readers (`logo`, `composite`, `enc`): an input that is not there by the deadline `D` after `T(i)` makes
 that index a gap. `--deadline-ms 0` (default) means **`D = 3·P/4`** of the grain period `P`: 15 ms at 50 grains/s
 (1080i50, 1080p50, 720p50), 30 ms at 25p, 12.5 ms at 59.94 Hz; a value above `2P − G` is clamped with a warning. The
-summary states the effective value (`deadline_us`, proc). WSL2 measurement campaigns (`tests/perf/capacity.py`, the
-`composite` and targeted functional tests) pass `--deadline-ms 30` explicitly, because GPU scheduling hiccups of
-17–30 ms are common there. `gen --deadline-ms` sets only the threshold of its own "late commit" counter and stderr line
+summary states the effective value (`deadline_us`, proc). WSL2 measurement campaigns (`tests/perf/capacity.py`) and
+the functional harness (`tests/functional/functional.py`: `gen`, `logo`, `enc`, `composite`) pass `--deadline-ms 30`
+explicitly, because GPU scheduling hiccups of 17–30 ms are common there; the tests that pin the default timing (isolation
+gates, `ffmt_logo`) pass `--deadline-ms 0` and attribute an index the upstream itself delivered late to the upstream. `gen --deadline-ms` sets only the threshold of its own "late commit" counter and stderr line
 (default: the same `3·P/4`, i.e. what a reader with the default deadline would miss).
 
 Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` (and `gap_startup`

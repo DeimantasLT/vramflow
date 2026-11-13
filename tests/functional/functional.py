@@ -302,6 +302,12 @@ COMP_VARIANTS = [("C", "cpu", "host"), ("H", "gpu", "host"), ("G", "gpu", "cuda-
 # Įėjimų laukimo riba: gen / gfxgen (kiti procesai WSL2) kartais vėluoja > 15 ms (išmatuota: ~1 iš 3000 lauko-flow'ų), todėl
 # funkciniuose testuose 30 ms (kaip logo numatytoji); našumo matavimas (užduotis 10) naudoja 15.
 COMP_DEADLINE_MS = int(os.environ.get("FCOMP_DEADLINE_MS", "30"))
+# V20 (K-T2): funkcijų numatytoji riba — auto 3·P/4 (15 ms prie 50 Hz). Funkciniai testai veikia WSL2, kur gen / GPU procesų
+# sutrikimai 17–30 ms nėra reti (pilname paleidime prie 15 ms — 2 tokie indeksai per 65 testus), todėl, kaip kampanijos (K-T2),
+# jie nurodo 30 ms aiškiai: FProc prideda --deadline-ms FUNC_DEADLINE_MS gen / logo / enc procesams, kurių testas jos nenurodė.
+# Numatytąją laiką tikrinantys testai (izoliacijos vartai, ffmt_logo) nurodo --deadline-ms 0 (auto) patys.
+FUNC_DEADLINE_MS = int(os.environ.get("FFUNC_DEADLINE_MS", "30"))
+DEADLINE_SUBS = ("gen", "logo", "enc")
 
 
 def comp_variants():
@@ -321,7 +327,10 @@ class FProc:
         self.out.mkdir(parents=True, exist_ok=True)
         self.sub = sub
         self.err_path = self.out / f"{sub}.err"
-        self.p = subprocess.Popen([FUNC_BIN, sub, "--domain", str(domain), "--out", str(self.out), *map(str, args)],
+        args = [str(a) for a in args]
+        if sub in DEADLINE_SUBS and "--deadline-ms" not in args:
+            args += ["--deadline-ms", str(FUNC_DEADLINE_MS)]
+        self.p = subprocess.Popen([FUNC_BIN, sub, "--domain", str(domain), "--out", str(self.out), *args],
                                   stdout=subprocess.DEVNULL, stderr=open(self.err_path, "w"), env=ENV)
 
     def wait(self, timeout=None):
@@ -808,13 +817,13 @@ def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
             sub = f"ffmt-logo-{fmt}-{tag}"
             d = fresh_domain(sub)
             v = vcommon(impl, storage) + ["--format", fmt]
-            g = FProc(out, sub, "gen", d, "--flows", N, "--duration", D + 40, *v)
+            g = FProc(out, sub, "gen", d, "--flows", N, "--deadline-ms", 0, "--duration", D + 40, *v)  # numatytoji riba (V20)
             lg = vf = None
             try:
                 if not wait_flows(d, [role_flow_id(1, n) for n in range(N)]):
                     res.append(result(tid, "FAIL", why="gen flow'ai neatsirado"))
                     continue
-                lg = FProc(out, sub, "logo", d, "--flows", N, "--duration", D + 8, "--warmup", 2, *v)
+                lg = FProc(out, sub, "logo", d, "--flows", N, "--deadline-ms", 0, "--duration", D + 8, "--warmup", 2, *v)
                 if not wait_flows(d, [role_flow_id(2, n) for n in range(N)], 20):
                     res.append(result(tid, "FAIL", why="logo išėjimo flow'ai neatsirado"))
                     continue
@@ -828,16 +837,24 @@ def ffmt_logo(out, fmts=None, variants=None, tag_prefix="ffmt_logo"):
                         pr.term()
             sl, sv = vsummary(lg, "logo"), vsummary(vf, "verify-logo")
             fl = (sl or {}).get("flows") or []
-            lost = sum(f.get(k, 0) for f in fl for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips"))
+            lost_f = [sum(f.get(k, 0) for k in ("late_fields", "lapped", "too_late", "in_invalid", "read_errors", "late_skips")) for f in fl]
+            lost = sum(lost_f)
+            # Priskyrimas (kaip izoliacijos vartai): indeksas, kurį pats gen commit'ino vėliau nei riba (late_commits, eilutė su
+            # TAI) ar praleido, logo nepasiekia — tai ne funkcijos praradimas. Be aukštupio sutrikimų biudžetas 0 (kaip anksčiau).
+            gp = ((g.summary() or {}).get("proc") or {}) if g is not None else {}
+            budget = gp.get("late_commits", 0) + gp.get("late_skips", 0)
             okf = [f.get("fields_ok", 0) for f in fl]
             pv = (sv or {}).get("proc") or {}
             # V20: numatytoji riba D = 3·P/4 (P — grain'o periodas): 25p — 30 ms (nepakitusi), 50 Hz — 15 ms
             dl, want_dl = ((sl or {}).get("proc") or {}).get("deadline_us"), 0.75 * 1e6 / hz
-            ok = (sl is not None and sv is not None and rl == 0 and lost == 0 and len(okf) == N and min(okf) >= 0.9 * D * hz
+            attributed = max(lost_f, default=0) <= budget
+            exit_ok = rl == 0 or (rl == 4 and lost > 0 and attributed)  # griežtas exit 4 — tik dėl aukštupio priskirtų
+            ok = (sl is not None and sv is not None and exit_ok and attributed and len(okf) == N and min(okf) >= 0.9 * D * hz - budget
                   and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0 and sl.get("format") == fmt
                   and dl is not None and abs(dl - want_dl) <= 1)
             res.append(result(tid, "PASS" if ok else "FAIL",
-                              why=f"deadline_us={dl} (laukta {want_dl:.0f}) logo exit={rl} praradimai={lost} fields_ok={okf} "
+                              why=f"deadline_us={dl} (laukta {want_dl:.0f}) logo exit={rl} praradimai={lost_f} (aukštupio biudžetas "
+                                  f"{budget}) fields_ok={okf} "
                                   f"(>= {0.9 * D * hz:.0f}) verify exit={rv} "
                                   f"verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')} "
                                   f"capacity_errors={pv.get('capacity_errors')} proc_ms={((sl or {}).get('hist') or {}).get('proc_ms')}",
