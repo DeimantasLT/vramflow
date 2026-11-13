@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <cstdio>
 #include <map>
 #include <string>
 #include <vector>
@@ -66,6 +67,75 @@ TEST_CASE("round2: vienas vėlus Wanted grain'as kainuoja tik tą indeksą", "[e
     CHECK(at[1033] == 1'300'000);  // kitas — vėl su garsu, laukiama iki jo
     CHECK(hub.in(eng.in_id(u, 1)).stalls == 0);
     CHECK(hub.in(eng.in_id(u, 1)).lost == 1);
+}
+
+// T2 (favsync_late_audio[C] nestabilumas): N = 4 enc formos vienetai (video 2 grain'ai, stride 2 + Wanted garsas), garsas be
+// rašymo laiko (kaip MxlAudioInput: paruošimo laikas — stebėjimo momentas). Vieno vieneto garsas kiekvieną kadrą ateina
+// T + 20 ms (D = 30 ms — C fazė). Vienas visų vėlus video kadras (T + 6,5 ms > a(i)) visus vienetus padaro Straggler'iais.
+// Kitų trijų A paleidimas po to turi grįžti į tą patį kaip kontroliniame (visų garsas laiku) — anksčiau ašis buvo vėluojantis
+// vieneto 0 garsas (didžiausias ewma), variklis laukdavo jo iki a(i), kitų laiku atėjęs garsas būdavo „pamatytas“ tik po
+// a(i) (vėlus), Late nebenusiimdavo ir A visam laikui likdavo ties a(i) (+1,2 ms; favsync_late_audio[C] 2 iš 10).
+namespace {
+std::map<Index, std::int64_t> a_start(bool late) {
+    VirtualClock clk(static_cast<std::uint64_t>(T(1000)));
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    EngineConfig cfg = Rig::test_config();
+    cfg.cuts.deadline_ns = 30'000'000;
+    std::vector<std::unique_ptr<ScriptedInput>> video, audio;
+    TickEngine eng(cfg, clk, hub, stop);
+    for (std::uint32_t n = 0; n < 4; ++n) {
+        video.push_back(std::make_unique<ScriptedInput>(clk));
+        audio.push_back(std::make_unique<ScriptedInput>(clk));
+        // vienas vėlus video kadras visiems (C gen p99 ≈ 5,8 ms > a(i) = 5,5 ms): visi vienetai tampa Straggler'iais
+        video[n]->arrival = [](Index j) { return std::int64_t{j == 1041 ? 6'500'000 : 4'000'000}; };
+        audio[n]->arrival = [late, n](Index) { return std::int64_t{late && n == 0 ? 20'000'000 : 500'000}; };
+        audio[n]->no_write_time = true;
+        audio[n]->timeout_overshoot_ns = 200'000;  // tikras pabudimas po laukimo ribos — ~0,1–0,4 ms vėliau
+        video[n]->timeout_overshoot_ns = 200'000;
+        UnitSpec s;
+        s.name = "enc" + std::to_string(n);
+        s.in.push_back(InputSpec{video[n].get(), {}, 2, Need::Required, InMode::Exact});
+        s.in.push_back(InputSpec{audio[n].get(), {}, 1, Need::Wanted, InMode::Exact});
+        s.stride = 2;
+        s.residue = 1;
+        std::uint32_t u = 0;
+        std::string why;
+        REQUIRE(eng.add_unit(s, u, why));
+    }
+    RecordingFunction fn(clk);
+    std::map<Index, std::int64_t> at;  // indekso pirmo batch'o su kitais (1..3) vienetais laikas nuo T(i)
+    fn.on_process = [&](const Batch& b, TickContext&) {
+        for (const UnitTick& ut : b.units)
+            if (ut.unit != 0 && !at.count(ut.index)) at[ut.index] = static_cast<std::int64_t>(clk.now_tai()) - T(ut.index);
+    };
+    fn.on_end_tick = [&](Index i, TickContext&) {
+        if (i >= 1301) stop = true;
+    };
+    eng.run(fn);
+    return at;
+}
+}  // namespace
+
+TEST_CASE("round2: nuolat vėluojantis vieno vieneto Wanted garsas kitų A paleidimo nevėlina (T2)", "[engine][round2][wanted]") {
+    const auto ctrl = a_start(false), late = a_start(true);
+    REQUIRE(ctrl.size() > 80);
+    REQUIRE(late.size() > 80);
+    std::size_t worse = 0, n = 0;
+    std::int64_t worst = 0;
+    for (const auto& [i, t] : late) {
+        if (i <= 1041 || !ctrl.count(i)) continue;  // nuo pirmo kadro po vėlaus (1041): ir atsigavimas turi būti kaip kontrolėje
+        ++n;
+        worst = std::max(worst, t - ctrl.at(i));
+        worse += t > ctrl.at(i);
+    }
+    INFO("indeksų " << n << ", vėlesnių nei kontrolėje " << worse << ", blogiausias +" << worst / 1000 << " µs");
+    std::string seq;
+    for (Index i = 1043; i < 1061; i += 2)
+        seq += std::to_string(i) + ": " + std::to_string(ctrl.at(i) / 1000) + "/" + std::to_string(late.at(i) / 1000) + " µs; ";
+    INFO("A paleidimas po vėlaus kadro (kontrolė / vėluojantis): " << seq);
+    CHECK(n > 80);
+    CHECK(worse == 0);
 }
 
 TEST_CASE("round2: paleidimo spragos — ne praradimas", "[engine][round2][startup]") {

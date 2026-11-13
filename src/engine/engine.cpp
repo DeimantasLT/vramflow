@@ -791,9 +791,12 @@ struct TickEngine::Impl {
             }
         });
         const bool no_quorum = !any_q;
+        // Be kvorumo laukiama tik šviežių Straggler'ių, kurių laukiamas paruošimo laikas ≤ a(i) (nežinomas — laukiama), kaip
+        // B taisyklėje. Nuolat vėluojantis vienetas (pvz. vieno srauto garsas ties T + 20 ms) kitų, po vieno bendro vėlaus
+        // kadro tapusių Straggler'iais, nebelaiko iki a(i), kol jų Late nusiims (T2: +1,2 ms 8 kadrus iš eilės).
         if (no_quorum)
             for_rec(r, [&](const Unit& u) {
-                if (u.stage == Stage::WaitB && fresh(u) && !ready(u, false)) wait = true;
+                if (u.stage == Stage::WaitB && fresh(u) && !ready(u, false) && expected(u) <= r.cuts.a) wait = true;
             });
         if (!any && r.joiners > 0) wait = true;  // tik prisijungsiantys — A nepaleidžiama tuščia
         if (wait && now() < r.cuts.a) return;
@@ -1022,8 +1025,13 @@ struct TickEngine::Impl {
             if (r.idx == newest && !r.a_done) {
                 bool any_q = false;
                 for_rec(r, [&](const Unit& u) { any_q = any_q || u.stage == Stage::WaitA; });
+                // Be kvorumo — tik tie švieži Straggler'iai, kurie gali paleisti A (laukiami iki a(i), kaip fire_a): kitaip
+                // ašis būtų nuolat vėluojantis įėjimas (didžiausias ewma), variklis lauktų jo iki a(i) ir laiku paruoštų
+                // brolių nepastebėtų (įėjimas be rašymo laiko — garsas — tada atrodo vėlus, Late nenusiima; T2).
                 for_rec(r, [&](const Unit& u) {
-                    if (any_q ? u.stage == Stage::WaitA : (u.stage == Stage::WaitB && fresh(u))) consider(u);
+                    if (any_q ? u.stage == Stage::WaitA
+                              : (u.stage == Stage::WaitB && fresh(u) && (ready(u, false) || expected(u) <= r.cuts.a)))
+                        consider(u);
                 });
                 if (pivot >= 0) return pivot;
             }

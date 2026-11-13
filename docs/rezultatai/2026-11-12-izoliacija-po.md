@@ -89,3 +89,25 @@ CPU) commit'o vėlavimas pakyla 2–5 ms KIEKVIENĄ gedimo lango sekundę (kontr
 hipotezė (nepatikrinta): pavėlintas enc darbas (weave, x264) persislenka ant `gen` kito lauko generavimo CPU laiko. Δup šį funkcijos sukeltą aukštupio vėlavimą priskiria aukštupiui,
 ir atsarga lieka 0 … 1,5 ms. Tai žinomas vartų „Ko vartai NEAPTINKA“ atvejis (Δup „paaiškina“), ne N pasekmė; taisymas —
 gamintojų ir tikrinamos funkcijos CPU rinkinių atskyrimas harness'e (neįgyvendinta).
+
+### T2 — favsync_late_audio[C]: priežastis ir pataisa
+
+10 paleidimų prieš pataisą: 8 / 10 PASS. Kitų srautų (1–3) sekundžių maks. vėlavimo mediana vėluojančiame paleidime
+didesnė nei kontroliniame vidutiniškai +0,61 ms (−2,14 … +1,15; 2 viršijo +1 ms ribą). Aukštupis (`gen` video) abiem
+paleidimais vienodas (commit p50 3,9–4,0 ms). Laikinas `enc` matavimas (A paleidimo laikas nuo T(i)): kontrolė 4,2–4,4 ms;
+vėluojantis — dvi būsenos: 4,3 ms arba **5,70 ms = a(i) + 0,2** (A paleidžiama ties riba, ne kai kiti paruošti). Gyva
+statistika: kitų srautų GARSO įėjimai vėluojančiame paleidime „vėlūs“ 79–102 kartus iš 500 (kontrolėje 31), nors garsas
+rašomas iš anksto.
+
+Priežastis — variklio taisyklė be kvorumo. Vienas visiems bendras vėlus video kadras (C `gen` p99 5,7 ms > a(i) = 5,5 ms)
+visus vienetus padaro Straggler'iais. Be kvorumo `fire_a` laukė VISŲ šviežių Straggler'ių iki a(i), įskaitant srautą 0,
+kurio garsas pagal scenarijų visada ateina T + 20 ms; ašis buvo tas pats vėluojantis garsas (didžiausias ewma), todėl
+variklis miegojo iki a(i) ir kitų laiku atėjusio garso nepastebėdavo. Garsas be rašymo laiko (`MxlAudioInput::last_write_tai`
+= 0 — MXL tęstinio flow'o neatnaujina) paruoštu laikomas stebėjimo momentu, t. y. po a(i) — vėlus, todėl Late nenusiimdavo ir
+kiti tris srautai ilgam likdavo ties a(i). Virtualaus laiko testas (`round2: nuolat vėluojantis vieno vieneto Wanted garsas
+…`) tai atkuria: po vieno vėlaus kadro 8 kadrai iš eilės ties 5,7 ms (kontrolė — 4,0).
+
+Pataisa (`engine.cpp`): be kvorumo A laukia tik tų šviežių Straggler'ių, kurių laukiamas paruošimo laikas ≤ a(i)
+(nežinomas — laukiama; kaip B taisyklėje), ir ašis renkama tik iš jų. Po pataisos 10 / 10 PASS; A paleidimas 3,97–4,16 ms
+(kontrolė 4,16–4,26); kitų srautų mediana −0,54 ms (−0,84 … −0,07) — vėluojančiame paleidime A batch'e trys vienetai.
+Testo riba (+1 ms) nepakeista.

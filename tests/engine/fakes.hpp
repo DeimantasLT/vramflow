@@ -40,6 +40,8 @@ public:
     std::function<void(Index j, std::uint64_t timeout)> on_wait;
     std::function<bool(std::uint64_t now)> gone;  // flow atkurtas / ištrintas → probe grąžina Gone
     bool mismatch_flag = false;
+    bool no_write_time = false;  // last_write_tai() == 0 (kaip MxlAudioInput: tęstinio flow'o rašymo laikas nežinomas)
+    std::uint64_t timeout_overshoot_ns = 0;  // wait() be grain'o grįžta tiek vėliau už ribą (tikras pabudimas niekada ne lygiai)
     std::uint32_t slots = 10;
 
     std::uint64_t waits = 0, probes = 0, alive_calls = 0, attach_calls = 0;
@@ -65,6 +67,7 @@ public:
         return head_;
     }
     std::uint64_t last_write_tai() override {
+        if (no_write_time) return 0;
         const Index h = head();
         if (h == kNoIndex) return 0;
         return static_cast<std::uint64_t>(T(h, rate_) + arrival(h));
@@ -98,7 +101,7 @@ public:
                 return probe(j, out);
             }
         }
-        clk_.advance(deadline - now);
+        clk_.advance(deadline - now + timeout_overshoot_ns);
         return probe(j, out);
     }
     bool writer_alive() override {
