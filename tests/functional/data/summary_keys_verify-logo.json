@@ -48,6 +48,17 @@
   "top": [],
   "proc": [],
   "hist": [],
-  "flows": []
+  "flows": [
+   "gap_black",
+   "gap_black_first",
+   "gap_black_last",
+   "gap_other",
+   "gap_other_first",
+   "gap_other_last",
+   "gap_repeat",
+   "gap_repeat_first",
+   "gap_repeat_last",
+   "last_good_index"
+  ]
  }
 }

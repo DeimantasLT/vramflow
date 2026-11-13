@@ -42,6 +42,10 @@
   "hist": [],
   "flows": [
    "fields_written",
+   "gap_black",
+   "gap_frozen",
+   "gap_invalid",
+   "gap_startup",
    "unit_failed",
    "unit_failures",
    "unit_recoveries"

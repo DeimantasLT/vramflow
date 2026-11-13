@@ -19,7 +19,9 @@
    "strict_exit",
    "versions"
   ],
-  "proc": [],
+  "proc": [
+   "deadline_us"
+  ],
   "hist": [
    "out_lateness",
    "proc_ms",
@@ -40,6 +42,10 @@
   ],
   "flows": [
    "fields_ok",
+   "gap_black",
+   "gap_frozen",
+   "gap_invalid",
+   "gap_startup",
    "lapped",
    "late_skips",
    "lateness_max_us",

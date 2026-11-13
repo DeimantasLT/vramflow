@@ -21,7 +21,9 @@
    "strict_exit",
    "versions"
   ],
-  "proc": [],
+  "proc": [
+   "deadline_us"
+  ],
   "hist": [
    "encode_ms",
    "frame_lateness",
