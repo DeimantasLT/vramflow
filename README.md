@@ -288,16 +288,19 @@ mxlDestroyInstance(inst);
 Functions return `0` or an error code; `vfgfx_last_error(g)` gives the message of the last failed call (the pacing
 thread has its own, `vfgfx_pacing_error(g)`). The full contract (versioning and ABI policy, threads, memory, timing,
 grain indices, CUDA stream ordering) is the comment at the top of [`include/vramflow/gfx.h`](include/vramflow/gfx.h).
-The library is at release 0.2.0 (`vfgfx_version()`). The SONAME carries the ABI epoch, not the release:
+The library is at release 0.3.0 (`vfgfx_version()`; changes in the *CHANGES* section of `gfx.h`). The SONAME carries the ABI epoch, not the release:
 `libvramflow-gfx.so.1`, with symbols versioned `VFGFX_1`; releases that only add functions, struct tail fields, flags or
 enum values keep it, so a program built against epoch 1 keeps working with later epoch-1 releases.
 Link with `-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
 (see `tests/gfx_ctypes_smoke.py`).
 
 A paced writer commits every index: until the first `vfgfx_submit` / `vfgfx_submit_at` frame is current, each grain is
-committed with `MXL_GRAIN_FLAG_INVALID` (counted in `stats.no_frame`, not in `stats.committed`); from the first frame on,
-the current frame repeats until it is replaced. This is a behaviour change of release 0.2 (before, nothing was committed
-until the first frame); see *GAPS* in `gfx.h`.
+committed with `MXL_GRAIN_FLAG_INVALID` and a transparent-black payload (written once per ring slot; counted in
+`stats.no_frame`, not in `stats.committed`); from the first frame on, the current frame repeats until it is replaced.
+This is a behaviour change of release 0.3 (before, nothing was committed until the first frame): `stats.last_committed_index`
+is no longer `VFGFX_INDEX_NONE` before the first frame, and `vfgfx_write` after `vfgfx_stop_pacing` needs an index above
+it. `stats.last_frame_index` (new in 0.3, same struct size) is the last index committed *with a frame*. See *CHANGES* and
+*GAPS* in `gfx.h`.
 
 **A failed graphics layer never takes the programme off air.** In `composite` only the base is required; every layer is
 optional. A layer that is INVALID (for example a paced writer before its first frame), not attached yet, stalled, gone,

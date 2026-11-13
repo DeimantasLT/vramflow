@@ -77,7 +77,7 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
 
   # Versija ir ABI epocha — vienintelis šaltinis include/vramflow/gfx.h (VFGFX_VERSION_*, VFGFX_ABI_VERSION). SONAME
   # politika (gfx.h „VERSIONING AND ABI“): SONAME = libvramflow-gfx.so.<ABI epocha>, nepriklausomai nuo leidimo versijos;
-  # epocha keičiama tik nesuderinamo pakeitimo atveju (0.1 turėjo .so.0, 0.2 — .so.1).
+  # epocha keičiama tik nesuderinamo pakeitimo atveju (0.1 turėjo .so.0, 0.2 ir 0.3 — .so.1).
   file(STRINGS ${CMAKE_SOURCE_DIR}/include/vramflow/gfx.h _vfgfx_ver
        REGEX "^#define VFGFX_(VERSION_MAJOR|VERSION_MINOR|VERSION_PATCH|ABI_VERSION) [0-9]+")
   foreach(_part VERSION_MAJOR VERSION_MINOR VERSION_PATCH ABI_VERSION)

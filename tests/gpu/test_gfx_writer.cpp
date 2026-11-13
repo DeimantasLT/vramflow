@@ -909,11 +909,52 @@ TEST_CASE("gfx_writer: palaikomi formatai (25p, 29,97p, 59,94p, 50i, 59,94i) pri
     vfgfx_writer_destroy(w);
 }
 
+// Peržiūra 2026-11-13 p. 6 (0.3.0): vfgfx_stats.last_frame_index — paskutinis indeksas SU kadru; last_committed_index skaičiuoja
+// ir INVALID („be kadro“) grain'us. Iki pirmo kadro: last_committed_index ≠ NONE, last_frame_index == NONE; po kadrų —
+// last_frame_index == paskutinis turinio commit'as; po stop vfgfx_write turi naudoti indeksą > last_committed_index.
+TEST_CASE("gfx_writer: 0.3 — last_frame_index (su kadru) prieš last_committed_index (ir INVALID)", "[gfx_writer][mxl][virtual][abi]") {
+    Domain d(70);
+    FlowId fid;
+    vfgfx_writer w = nullptr;
+    REQUIRE(vfgfx_writer_create(d.inst, def(fid.id, 1920, 1080, true).c_str(), nullptr, &w) == 0);
+    Frame a(1920, 1080, 11, VFGFX_ALPHA_STRAIGHT, false);
+    VirtualPace vp;
+    Recorder rec, gaps;
+    gi::PacingHooks hk = vp.hooks();
+    hk.on_commit = [&](std::uint64_t i) { rec.add(i); };
+    hk.on_gap = [&](std::uint64_t i) { gaps.add(i); };
+    REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
+    vfgfx_stats s = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &s) == 0);
+    CHECK(s.last_committed_index == VFGFX_INDEX_NONE);
+    CHECK(s.last_frame_index == VFGFX_INDEX_NONE);
+    REQUIRE(vfgfx_start_pacing(w, 0) == 0);
+    vp.run(10);
+    REQUIRE(vfgfx_get_stats(w, &s) == 0);
+    const auto inv = gaps.snapshot();
+    REQUIRE(inv.size() == 10);
+    CHECK(s.last_committed_index == inv.back());  // INVALID grain'ai — commit'ai
+    CHECK(s.last_frame_index == VFGFX_INDEX_NONE);  // kadro dar nebuvo
+    REQUIRE(vfgfx_submit(w, &a.f) == 0);
+    vp.run(6);
+    REQUIRE(vfgfx_stop_pacing(w) == 0);
+    REQUIRE(vfgfx_get_stats(w, &s) == 0);
+    const auto all = rec.snapshot();
+    REQUIRE(all.size() == 6);
+    CHECK(s.last_frame_index == all.back());
+    CHECK(s.last_committed_index == all.back());
+    CHECK(vfgfx_write(w, s.last_committed_index, &a.f) != 0);      // jau įrašytas
+    CHECK(vfgfx_write(w, s.last_committed_index + 1, &a.f) == 0);  // kitas — galima
+    REQUIRE(vfgfx_get_stats(w, &s) == 0);
+    CHECK(s.last_frame_index == s.last_committed_index);
+    vfgfx_writer_destroy(w);
+}
+
 // --- ABI 0.2: struktūrų dydžiai, vėliavos, versija, klaidų išvalymas -------------------------------------------------------
 
 TEST_CASE("gfx_writer: versija — antraštė == biblioteka", "[gfx_writer][abi]") {
     CHECK(vfgfx_version() == VFGFX_VERSION);
-    CHECK(VFGFX_VERSION == VFGFX_MAKE_VERSION(0, 2, 0));
+    CHECK(VFGFX_VERSION == VFGFX_MAKE_VERSION(0, 3, 0));
     CHECK(std::string(vfgfx_version_string()) == VFGFX_VERSION_STRING);
 }
 
@@ -1884,7 +1925,9 @@ TEST_CASE("gfx_writer: vfgfx_get_format — flow'o geometrija, dažnis, skenavim
 // ABI išdėstymas užfiksuotas (tas pats tikrinama C ir ctypes testuose).
 static_assert(sizeof(vfgfx_frame) == 80 && offsetof(vfgfx_frame, cuda_stream) == 40 && offsetof(vfgfx_frame, reserved) == 48,
               "vfgfx_frame išdėstymas");
-static_assert(sizeof(vfgfx_stats) == 200 && offsetof(vfgfx_stats, pacing) == 120 && offsetof(vfgfx_stats, reserved) == 136,
+// 0.3: last_frame_index buvusioje rezervuotoje vietoje (136), reserved — nuo 144; dydis nepakitęs (200)
+static_assert(sizeof(vfgfx_stats) == 200 && offsetof(vfgfx_stats, pacing) == 120 && offsetof(vfgfx_stats, last_frame_index) == 136 &&
+                  offsetof(vfgfx_stats, reserved) == 144,
               "vfgfx_stats išdėstymas");
 static_assert(sizeof(vfgfx_flow_params) == 104 && offsetof(vfgfx_flow_params, width) == 40 &&
                   offsetof(vfgfx_flow_params, frame_rate_num) == 56 && offsetof(vfgfx_flow_params, reserved) == 72,

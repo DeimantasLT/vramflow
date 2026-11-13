@@ -33,6 +33,18 @@
  *    For the output struct (vfgfx_stats) the library fills the fields it knows within the caller's struct_size and
  *    zeroes the rest; struct_size and flags are not modified.
  *
+ * CHANGES (observable behaviour; the ABI epoch stays 1, SONAME libvramflow-gfx.so.1, symbols unchanged)
+ *  0.3.0
+ *   - A paced writer commits EVERY index from vfgfx_start_pacing on: until the first frame is current each grain is an
+ *     INVALID grain (see GAPS). Observable for a 0.2 client: stats.last_committed_index is no longer
+ *     VFGFX_INDEX_NONE before the first frame, and vfgfx_write after vfgfx_stop_pacing needs an index above the last
+ *     INVALID grain the thread committed (not only above the last frame). stats.no_frame counts those grains.
+ *   - INVALID grains carry a payload: transparent black (fill Y 64 / Cb Cr 512, key 0), written once per ring slot,
+ *     so a reader that ignores the flag never sees stale or random slot memory. Content grains are unchanged.
+ *   - New field vfgfx_stats.last_frame_index (in former reserved space; sizeof(vfgfx_stats) unchanged): the last index
+ *     committed WITH a frame, VFGFX_INDEX_NONE before the first one; last_committed_index also counts INVALID grains.
+ *  0.2.0 — ABI epoch 1 (SONAME .so.1, symbol node VFGFX_1), extensible structs, vfgfx_submit_at, BGRA, CUDA frames.
+ *
  * WRITER LIFETIME
  *  vfgfx_writer_create() creates the MXL flow (from a flow definition JSON, see vfgfx_flow_def()) and its writer on the
  *  given mxlInstance; vfgfx_writer_destroy() stops pacing, releases the writer and frees everything. The instance must
@@ -52,12 +64,14 @@
  *    of the MXL writer and vfgfx_write fails with VFGFX_ERR_STATE. vfgfx_submit / vfgfx_submit_at are also allowed
  *    before vfgfx_start_pacing (the frames are then ready when pacing starts, and no INVALID grain is written).
  *
- * GAPS (paced mode; behaviour change in 0.2: before, nothing was committed until the first frame)
+ * GAPS (paced mode; behaviour change in 0.3: before, nothing was committed until the first frame)
  *  - Index without a frame (before the first vfgfx_submit / vfgfx_submit_at becomes current): the thread opens the grain,
- *    sets MXL_GRAIN_FLAG_INVALID and validSlices = totalSlices and commits it at the index's commit time, without
- *    touching the payload. A reader blocked on that index wakes up at once with MXL_STATUS_OK + the INVALID flag (it does
- *    not wait for the next commit). Counted in stats.no_frame; NOT in stats.committed / vfgfx_committed (content grains
- *    only); stats.last_committed_index includes them (a later vfgfx_write must use a higher index).
+ *    sets MXL_GRAIN_FLAG_INVALID and validSlices = totalSlices and commits it at the index's commit time. Its payload is
+ *    transparent black (fill Y 64 / Cb Cr 512, key 0), written into a ring slot only once while that slot holds no frame
+ *    (cost: one grain copy per slot on the first lap, nothing after). A reader blocked on that index wakes up at once
+ *    with MXL_STATUS_OK + the INVALID flag (it does not wait for the next commit). Counted in stats.no_frame; NOT in
+ *    stats.committed / vfgfx_committed (content grains only); stats.last_committed_index includes them (a later
+ *    vfgfx_write must use a higher index), stats.last_frame_index does not.
  *  - Once a frame is current, every grain repeats it until another frame replaces it — static graphics, not a gap.
  *  - Indices skipped because the thread woke up late (stats.late_skips) are not filled: MXL marks them invalid itself
  *    when the next index is opened. The policy is fixed ("invalid"); freeze / black are policies of the media
@@ -184,11 +198,11 @@ extern "C" {
 
 /* --- Version --------------------------------------------------------------------------------------------------------- */
 #define VFGFX_VERSION_MAJOR 0
-#define VFGFX_VERSION_MINOR 2
+#define VFGFX_VERSION_MINOR 3
 #define VFGFX_VERSION_PATCH 0
 #define VFGFX_MAKE_VERSION(major, minor, patch) (((uint32_t)(major) << 16) | ((uint32_t)(minor) << 8) | (uint32_t)(patch))
 #define VFGFX_VERSION VFGFX_MAKE_VERSION(VFGFX_VERSION_MAJOR, VFGFX_VERSION_MINOR, VFGFX_VERSION_PATCH)
-#define VFGFX_VERSION_STRING "0.2.0"
+#define VFGFX_VERSION_STRING "0.3.0"
 #define VFGFX_ABI_VERSION 1 /* ABI epoch: SONAME libvramflow-gfx.so.1, symbol version node VFGFX_1 */
 
 /* --- Error codes ------------------------------------------------------------------------------------------------------ */
@@ -265,12 +279,13 @@ typedef struct vfgfx_stats {
     uint32_t queue_depth;          /* vfgfx_submit_at frames pending */
     uint32_t queue_capacity;       /* maximum pending frames (>= VFGFX_SUBMIT_AT_MIN_QUEUE) */
     uint32_t reserved0;
-    uint64_t reserved[8];
+    uint64_t last_frame_index;     /* 0.3: index of the most recent commit WITH a frame (not INVALID), VFGFX_INDEX_NONE if none */
+    uint64_t reserved[7];
 } vfgfx_stats;
 
-#define VFGFX_STATS_INIT                                                                                    \
-    { (uint32_t)sizeof(vfgfx_stats), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, \
-      {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u} }
+#define VFGFX_STATS_INIT                                                                                        \
+    { (uint32_t)sizeof(vfgfx_stats), 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, \
+      {0u, 0u, 0u, 0u, 0u, 0u, 0u} }
 
 /* Flow definition parameters (vfgfx_flow_def): either `format`, or width/height/scan/frame rate. */
 typedef struct vfgfx_flow_params {

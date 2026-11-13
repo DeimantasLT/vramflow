@@ -16,7 +16,7 @@ _Static_assert(offsetof(vfgfx_frame, pixels) == 8 && offsetof(vfgfx_frame, width
 _Static_assert(sizeof(vfgfx_stats) == 200, "vfgfx_stats size");
 _Static_assert(offsetof(vfgfx_stats, committed) == 8 && offsetof(vfgfx_stats, next_pacing_index) == 112 &&
                    offsetof(vfgfx_stats, pacing) == 120 && offsetof(vfgfx_stats, reserved0) == 132 &&
-                   offsetof(vfgfx_stats, reserved) == 136,
+                   offsetof(vfgfx_stats, last_frame_index) == 136 && offsetof(vfgfx_stats, reserved) == 144,
                "vfgfx_stats layout");
 _Static_assert(sizeof(vfgfx_flow_params) == 104, "vfgfx_flow_params size");
 _Static_assert(offsetof(vfgfx_flow_params, flow_id) == 8 && offsetof(vfgfx_flow_params, format) == 32 &&

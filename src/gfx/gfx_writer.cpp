@@ -254,6 +254,7 @@ struct vfgfx_writer_s {
 
     std::atomic<std::uint64_t> committed{0};
     std::atomic<std::uint64_t> last_index{VFGFX_INDEX_NONE};  // paskutinio commit'into indekso (abu režimai)
+    std::atomic<std::uint64_t> last_frame{VFGFX_INDEX_NONE};  // 0.3: paskutinio commit'into SU kadru (be INVALID)
     std::atomic<std::uint64_t> n_written{0}, n_submitted{0}, n_scheduled{0}, n_sched_late{0}, n_sched_replaced{0},
         n_caller_errors{0};
     std::mutex op_m;   // write / start_pacing / stop_pacing serializacija
@@ -441,6 +442,7 @@ struct vfgfx_writer_s {
             return static_cast<int>(st);
         }
         last_index.store(out.last_committed);
+        last_frame.store(out.last_committed);
         committed.fetch_add(1);
         return 0;
     }
@@ -1249,6 +1251,7 @@ static int get_stats_impl(vfgfx_writer w, vfgfx_stats* out) {
     s.scheduled_replaced = w->n_sched_replaced.load();
     s.caller_errors = w->n_caller_errors.load();
     s.last_committed_index = w->last_index.load();
+    s.last_frame_index = w->last_frame.load();
     {
         std::lock_guard<std::mutex> l(w->lat_m);
         s.next_pacing_index = w->min_scheduled_index();

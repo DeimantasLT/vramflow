@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 # SPDX-License-Identifier: Apache-2.0
-"""libvramflow-gfx ctypes dūmų testas (ABI 0.2): versija, vfgfx_flow_def -> vfgfx_writer_create (host), vienas RGBA ir
+"""libvramflow-gfx ctypes dūmų testas (ABI 0.3): versija, vfgfx_flow_def -> vfgfx_writer_create (host), vienas RGBA ir
 vienas BGRA kadras per vfgfx_write, vfgfx_get_stats (committed == written == 2), klaidos išvalymas, sunaikinimas.
 Naudojimas: gfx_ctypes_smoke.py <libvramflow-gfx.so> [libmxl.so] (libmxl.so keliu galima perduoti ir per MXL_LIB; kitaip
 ieškoma pagal pavadinimą). Sėkmės atveju spausdina `OK`."""
@@ -32,7 +32,7 @@ class Stats(ctypes.Structure):
                                          "pacing_errors", "caller_errors", "last_committed_index",
                                          "next_pacing_index")] + \
         [(n, ctypes.c_uint32) for n in ("pacing", "queue_depth", "queue_capacity", "reserved0")] + \
-        [("reserved", ctypes.c_uint64 * 8)]
+        [("last_frame_index", ctypes.c_uint64), ("reserved", ctypes.c_uint64 * 7)]
 
 
 class FlowParams(ctypes.Structure):
@@ -76,13 +76,14 @@ def main():
 
     # ABI išdėstymas užfiksuotas (kaip gfx_c_check.c): dydžiai ir poslinkiai be tarpų.
     assert (ctypes.sizeof(Frame), ctypes.sizeof(Stats), ctypes.sizeof(FlowParams)) == (80, 200, 104)
-    assert (Frame.cuda_stream.offset, Frame.reserved.offset, Stats.pacing.offset, Stats.reserved.offset,
-            FlowParams.width.offset, FlowParams.frame_rate_num.offset, FlowParams.reserved.offset) == (40, 48, 120, 136, 40, 56, 72)
+    # 0.3: last_frame_index buvusioje rezervuotoje vietoje (136), reserved — nuo 144 (dydis nepakitęs)
+    assert (Frame.cuda_stream.offset, Frame.reserved.offset, Stats.pacing.offset, Stats.last_frame_index.offset, Stats.reserved.offset,
+            FlowParams.width.offset, FlowParams.frame_rate_num.offset, FlowParams.reserved.offset) == (40, 48, 120, 136, 144, 40, 56, 72)
 
     version = gfx.vfgfx_version()
     vstr = gfx.vfgfx_version_string().decode()
     assert vstr == "%d.%d.%d" % (version >> 16, (version >> 8) & 255, version & 255), (version, vstr)
-    assert version >> 8 == 0x0002, "laukta 0.2.x ABI, gauta %s" % vstr
+    assert version >> 8 == 0x0003, "laukta 0.3.x, gauta %s" % vstr
 
     domain = "/dev/shm/vf-gfx-smoke-%d-%s" % (os.getpid(), uuid.uuid4().hex[:8])
     os.makedirs(domain)
@@ -116,6 +117,7 @@ def main():
         assert gfx.vfgfx_get_stats(writer, ctypes.byref(st)) == 0
         assert st.committed == 2 and st.written == 2 and st.caller_errors == 1, (st.committed, st.written, st.caller_errors)
         assert st.last_committed_index == idx + 1, st.last_committed_index
+        assert st.last_frame_index == idx + 1, st.last_frame_index  # 0.3: paskutinis su kadru (vfgfx_write — visada kadras)
         n = gfx.vfgfx_committed(writer)
         assert n == 2, "vfgfx_committed=%d, tikėtasi 2" % n
     finally:
