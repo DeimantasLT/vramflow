@@ -44,6 +44,7 @@ InputSlot& InputSlot::operator=(InputSlot&& o) noexcept {
     want_ = o.want_;
     have_want_ = o.have_want_;
     want_cuda_ = o.want_cuda_;
+    lock_storage_ = o.lock_storage_;
     ever_ = o.ever_;
     on_change_ = o.on_change_;
     state_ = o.state_;
@@ -95,8 +96,8 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
     std::string bad;
     if (have_want_ && !(fresh.fmt.raster == want_.raster && vramflow::same_rate(fresh.fmt.grain_rate(), want_.grain_rate())))
         bad = "flow " + id_ + ": formatas " + vramflow::format_name(fresh.fmt) + " != laukiamas " + vramflow::format_name(want_);
-    else if (ever_ && fresh.cuda != want_cuda_)
-        bad = "flow " + id_ + ": saugykla " + storage_name(fresh.cuda) + " != buvusi " + storage_name(want_cuda_);
+    else if ((ever_ || lock_storage_) && fresh.cuda != want_cuda_)
+        bad = "flow " + id_ + ": saugykla " + storage_name(fresh.cuda) + " != " + (ever_ ? "buvusi " : "laukiama ") + storage_name(want_cuda_);
     if (!bad.empty()) {
         fresh.release(inst);
         if (reason_ != bad) std::fprintf(stderr, "[vramflow] %s%s\n", bad.c_str(), on_change_ == FormatChange::Exit ? "" : " — laukiama");
@@ -115,7 +116,7 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
         want_ = in_.fmt;
         have_want_ = true;
     }
-    if (!ever_) want_cuda_ = in_.cuda;
+    if (!ever_ && !lock_storage_) want_cuda_ = in_.cuda;
     if (ever_) ++reattached_;
     ever_ = true;
     reason_.clear();
@@ -169,27 +170,35 @@ bool wait_attached(const std::vector<InputSlot*>& slots, mxlInstance inst, const
             all = all && st == InputSlot::State::Attached;
         }
         if (all) return true;
-        std::string missing;
-        for (InputSlot* s : slots)
-            if (s->state() != InputSlot::State::Attached) missing += (missing.empty() ? "" : ", ") + s->id();
+        const std::string missing = missing_inputs(slots);
         if (stop.load()) { err = "sustabdyta laukiant įėjimų: " + missing; return false; }
-        // Kodėl neprijungta, jei flow yra, bet netinka (kitas formatas, reader'io klaida): be to laukimas atrodytų kaip „nėra flow“.
-        std::string why;
-        for (InputSlot* s : slots)
-            if (s->state() != InputSlot::State::Attached && !s->reason().empty()) why += " [" + s->reason() + "]";
         const auto t = steady_clock::now();
         if (p.wait_ms == 0 || (p.wait_ms > 0 && t - t0 >= milliseconds(p.wait_ms))) {
-            err = "įėjimai neatsirado per " + std::to_string(p.wait_ms) + " ms (--input-wait-ms " + std::to_string(p.wait_ms) +
-                  "; 0 — laukti neribotai): " + missing + why;
+            err = inputs_timeout_text(slots, p.wait_ms);
             return false;
         }
         if (p.log_every_ms && t >= next_log) {
-            std::fprintf(stderr, "[%s] laukiu flow %s, %lld s%s\n", who, missing.c_str(),
-                         static_cast<long long>(duration_cast<seconds>(t - t0).count()), why.c_str());
+            std::fprintf(stderr, "[%s] laukiu flow %s, %lld s\n", who, missing.c_str(),
+                         static_cast<long long>(duration_cast<seconds>(t - t0).count()));
             next_log += milliseconds(p.log_every_ms);
         }
         std::this_thread::sleep_for(milliseconds(20));
     }
+}
+
+std::string missing_inputs(const std::vector<InputSlot*>& slots) {
+    std::string missing;
+    for (InputSlot* s : slots)
+        if (s->state() != InputSlot::State::Attached) missing += (missing.empty() ? "" : ", ") + s->id();
+    // Kodėl neprijungta, jei flow yra, bet netinka (kitas formatas, reader'io klaida): be to laukimas atrodytų kaip „nėra flow“.
+    for (InputSlot* s : slots)
+        if (s->state() != InputSlot::State::Attached && !s->reason().empty()) missing += " [" + s->reason() + "]";
+    return missing;
+}
+
+std::string inputs_timeout_text(const std::vector<InputSlot*>& slots, std::int64_t wait_ms) {
+    return "įėjimai neatsirado per " + std::to_string(wait_ms) + " ms (--input-wait-ms " + std::to_string(wait_ms) +
+           "; 0 — laukti neribotai): " + missing_inputs(slots);
 }
 
 }  // namespace mxlv::runtime

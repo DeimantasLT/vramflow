@@ -278,6 +278,25 @@ TEST_CASE("input_slot: formatas pasikeitė po re-attach [PF-3]", "[runtime][mxl]
     }
 }
 
+// V18 (--start immediate): išėjimai sukuriami prieš įėjimus, todėl saugykla turi būti žinoma iš parinkčių — ne iš pirmo
+// prijungimo. Kitos saugyklos flow'as — Mismatch (politika Exit → funkcija baigia exit 6), ne tylus device / host painiojimas.
+TEST_CASE("input_slot: laukiama saugykla iš parinkčių — kita saugykla atmetama jau pirmą kartą", "[runtime][mxl]") {
+    Domain d(21);
+    Producer p;
+    REQUIRE(p.start(d.inst, 21, vramflow::kFmt1080i50));  // host
+    InputSlot want_cuda(flow_id(kRoleGen, 21), &vramflow::kFmt1080i50, FormatChange::Exit);
+    want_cuda.expect_storage(true);
+    CHECK(poll_while(want_cuda, d.inst, InputSlot::State::Waiting, 1000, &p) == InputSlot::State::Mismatch);
+    INFO(want_cuda.reason());
+    CHECK(want_cuda.reason().find("host") != std::string::npos);
+    CHECK(want_cuda.reason().find("cuda-linear") != std::string::npos);
+    InputSlot want_host(flow_id(kRoleGen, 21), &vramflow::kFmt1080i50, FormatChange::Exit);
+    want_host.expect_storage(false);
+    CHECK(poll_while(want_host, d.inst, InputSlot::State::Waiting, 1000, &p) == InputSlot::State::Attached);
+    want_host.release();
+    p.stop();
+}
+
 TEST_CASE("input_slot: poll kaina, kai Attached, < 5 µs", "[runtime][mxl][perf]") {
     Domain d(9);
     Producer p;

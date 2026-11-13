@@ -106,6 +106,10 @@ struct LogoFn final : engine::TickFunction {
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
     std::uint64_t injected_at = ~0ull;
     std::uint64_t missing_at = ~0ull;  // paskutinis indeksas su GapBlocked vienetu (--test-fault-proc-delay-ms)
+    // --start immediate (V18): kol kuris nors įėjimas dar niekada neprisijungė — eilutė „laukiu flow …“ kas 5 s (kaip
+    // wait_attached), nors išėjimai jau rašomi pagal --on-loss (gap_startup). nullptr — wait-all (laukta prieš variklį).
+    const std::vector<runtime::InputSlot*>* waiting = nullptr;
+    std::uint64_t wait_t0 = 0, wait_next = 0;
 
     LogoFn(const Opts& o_, Stats& st_, const engine::StatsHub& hub_, const engine::TickEngine& eng_, bool cpu_, bool host_gpu_,
            bool inter_, media::Dim dim_, std::size_t gbytes_, std::size_t inject_word_, ThreadPool& pool_, DeviceLogo& dlogo_,
@@ -120,7 +124,29 @@ struct LogoFn final : engine::TickFunction {
     }
 
     void begin_tick(engine::Index i, engine::TickContext&) override {
-        times.wake(i, now_tai());
+        const std::uint64_t now = now_tai();
+        times.wake(i, now);
+        if (waiting && now >= wait_next) log_waiting(now);
+    }
+
+    // Tik paleidimo laukimas: įėjimai, kurie dar niekada nebuvo prijungti (Waiting); kai visi prisijungė — nebetikrinama.
+    void log_waiting(std::uint64_t now) {
+        constexpr std::uint64_t kEvery = 5'000'000'000ull;
+        if (wait_t0 == 0) {
+            wait_t0 = now;
+            wait_next = now + kEvery;
+            return;
+        }
+        std::string ids;
+        for (const runtime::InputSlot* s : *waiting)
+            if (s->state() == runtime::InputSlot::State::Waiting) ids += (ids.empty() ? "" : ", ") + s->id();
+        if (ids.empty()) {
+            waiting = nullptr;
+            return;
+        }
+        std::fprintf(stderr, "[logo] laukiu flow %s, %llu s (išėjimai rašomi: --on-loss %s, gap_startup)\n", ids.c_str(),
+                     static_cast<unsigned long long>((now - wait_t0) / 1'000'000'000ull), o.on_loss.c_str());
+        wait_next += kEvery;
     }
 
     bool process(const engine::Batch& b, engine::TickContext& ctx) override {
@@ -221,6 +247,7 @@ struct LogoFn final : engine::TickFunction {
                 times.unit_done(ut.index, now_tai(), false);
                 break;
             case engine::Outcome::GapNoContent: break;
+            case engine::Outcome::GapStartup: break;  // įėjimas dar neprisijungė (--start immediate): ne praradimas (gap_startup)
             case engine::Outcome::GapLate:
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
                 if (c.invalid > s.invalid) f.loss("in_invalid", ti);
@@ -282,17 +309,26 @@ int run_logo(const Opts& o_in) {
 
     mxlInstance inst = mxlCreateInstance(o.domain.c_str(), "");
     if (!inst) { st.fatal = "mxlCreateInstance"; return finish(2); }
-    // Įėjimai (planas §P6): paleidimo tvarka nesvarbi — laukiama pagal --input-wait-ms (numatyta neribotai); dingęs
-    // gamintojas → InputSlot Detached (indeksai skaičiuojami missing_fields), grįžęs → re-attach (reattached).
+    // Įėjimai (planas §P6): paleidimo tvarka nesvarbi; dingęs gamintojas → InputSlot Detached (indeksai skaičiuojami
+    // missing_fields), grįžęs → re-attach (reattached).
+    //   --start immediate (numatyta, V18 / K-T7): išėjimai sukuriami iškart (formatas — --format, saugykla — --impl /
+    //       --storage), variklis tiksi, įėjimai prisijungia vėliau; kol būtinas įėjimas dar neprisijungė — spragos pagal
+    //       --on-loss (gap_startup, ne praradimas). --input-wait-ms N > 0 — riba (variklis: exit 4).
+    //   --start wait-all: kaip anksčiau — laukiama visų įėjimų (--input-wait-ms), tik tada sukuriami išėjimai.
+    const bool immediate = o.start != "wait-all";
     std::vector<runtime::InputSlot> in;
     in.reserve(o.flows);
-    for (std::uint32_t n = 0; n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
-    const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
-    if (const int a = attach_inputs(in_ptr, inst, o, "logo", st.fatal)) {  // neatsirado per ribą (exit 4) arba sustabdyta (exit 0)
-        for (auto& s : in) s.release();
-        mxlDestroyInstance(inst);
-        return finish(exit_code(a));
+    for (std::uint32_t n = 0; n < o.flows; ++n) {
+        in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
+        if (immediate) in.back().expect_storage(!(cpu || host_gpu));  // kita saugykla — Mismatch (exit 6), ne painiava
     }
+    const std::vector<runtime::InputSlot*> in_ptr = slot_ptrs(in);
+    if (!immediate)
+        if (const int a = attach_inputs(in_ptr, inst, o, "logo", st.fatal)) {  // neatsirado per ribą (exit 4) arba sustabdyta (exit 0)
+            for (auto& s : in) s.release();
+            mxlDestroyInstance(inst);
+            return finish(exit_code(a));
+        }
     // Nužudyto ankstesnio logo pasenę išėjimai (be writer'io) pašalinami — kitaip perkrautas logo jų nesukurtų.
     mxlGarbageCollectFlows(inst);
     std::vector<VideoOut> out(o.flows);
@@ -301,7 +337,7 @@ int run_logo(const Opts& o_in) {
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (!create_output(inst, out[n], flow_id(kRoleLogo, o.flow_base + n), video_def(kRoleLogo, o.flow_base + n, o.run_seed, o.fmt), opts,
                            o.fmt, o, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }
-    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
+    for (std::uint32_t n = 0; n < o.flows && !rc && !immediate; ++n)  // immediate — tikrina pats slot'as (expect_storage)
         if (in[n].in().cuda == (cpu || host_gpu)) { st.fatal = "įėjimo storage neatitinka --impl/--storage"; rc = 1; }
 
     const media::Dim dim{o.fmt.raster.w, o.fmt.raster.h};
@@ -362,6 +398,7 @@ int run_logo(const Opts& o_in) {
     }
     LogoFn fn(o, st, hub, eng, cpu, host_gpu, inter, dim, gbytes, inject_word, pool, dlogo, hlogo, stream, s_in, s_out,
               warm_tai_after(o.warmup_s));
+    if (immediate) fn.waiting = &in_ptr;  // „laukiu flow …“, kol kuris nors įėjimas dar niekada neprisijungė
     bool engine_loss = false;
     std::uint32_t failed = 0;
     if (!rc) {
@@ -370,6 +407,11 @@ int run_logo(const Opts& o_in) {
         engine_loss = res.any_loss;
         failed = res.failed_units;
         rc = engine_rc(res, st);  // Fatal → kodas, FormatChange → 6, InputsTimeout → 4
+        // immediate: tas pats tekstas kaip wait-all (riba, parinktis, flow ID), ne bendras variklio pranešimas
+        if (res.reason == engine::EndReason::InputsTimeout) st.fatal = runtime::inputs_timeout_text(in_ptr, o.input_wait_ms);
+        if (res.reason == engine::EndReason::FormatChange)
+            for (const runtime::InputSlot* s : in_ptr)
+                if (s->state() == runtime::InputSlot::State::Mismatch) st.fatal = s->reason();
         to_summary(hub, eng, res, o.flows, SkipScope::PerFlow, st);
     }
     if (!cpu) {

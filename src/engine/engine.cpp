@@ -73,6 +73,7 @@ const char* to_string(Outcome o) {
         case Outcome::GapBlocked: return "GapBlocked";
         case Outcome::GapLate: return "GapLate";
         case Outcome::GapNoContent: return "GapNoContent";
+        case Outcome::GapStartup: return "GapStartup";
         case Outcome::GapClock: return "GapClock";
         case Outcome::Lapped: return "Lapped";
         case Outcome::Skipped: return "Skipped";
@@ -399,7 +400,7 @@ struct TickEngine::Impl {
         const UnitTick ut{uid(u), c, phase, {}, {}};
         ctx_index = c;
         u.busy = true;
-        fn->end_unit(ut, why, ctx);
+        fn->end_unit(ut, startup ? Outcome::GapStartup : why, ctx);  // paleidimo spraga — atskiras rezultatas (V18)
         u.busy = false;
         resolve_unit(u);
     }

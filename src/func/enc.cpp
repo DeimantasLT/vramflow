@@ -711,6 +711,7 @@ int run_enc(const Opts& o) {
                 case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti
                 case engine::Outcome::GapNoContent: audio_of_dropped(n, ut.index); return;
+                case engine::Outcome::GapStartup: audio_of_dropped(n, ut.index); return;  // enc laukia įėjimų prieš variklį
                 case engine::Outcome::GapLate:
                     fs.loss(det ? "missing_frames" : tl ? "too_late" : inv ? "in_invalid" : "late_frames", ti);
                     audio_of_dropped(n, ut.index);
@@ -779,7 +780,10 @@ int run_enc(const Opts& o) {
     engine::SystemClock clk;
     EngineStats es(o, "enc");
     engine::StatsHub& hub = es.hub;
-    engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
+    // Startas — wait-all (V18): enc MXL išėjimų neturi, įėjimų laukta prieš variklį (attach_inputs)
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
+    ecfg.start = engine::StartMode::WaitAll;
+    engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(o.in_role, o.flow_base + n);

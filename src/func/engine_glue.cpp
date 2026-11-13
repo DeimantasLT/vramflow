@@ -24,7 +24,8 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
         c.stall_after = 3;
         c.late_clear_run = 8;
         c.wait = engine::WaitMode::Pivot;
-        c.start = engine::StartMode::WaitAll;
+        // V18 (K-T7): immediate — numatyta; composite / enc įėjimų laukia prieš variklį ir čia nustato wait-all patys
+        c.start = o.start == "wait-all" ? engine::StartMode::WaitAll : engine::StartMode::Immediate;
     }
     c.on_loss = gap_policy(o.on_loss);  // K3: abiem ribų režimais (gen, dec, gfxgen — Legacy; logo, composite, enc — Isolation)
     c.hold_ns = static_cast<std::int64_t>(o.hold_ms) * 1'000'000;

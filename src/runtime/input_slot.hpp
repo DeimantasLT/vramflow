@@ -54,6 +54,12 @@ public:
     // Laukiamas formatas (po pirmo prijungimo — faktinis).
     const vramflow::VideoFormat& format() const { return want_; }
     std::uint64_t reattached() const { return reattached_; }
+    // Laukiama saugykla iš parinkčių (--start immediate: išėjimai sukuriami prieš įėjimus, V18): kita saugykla atmetama jau
+    // pirmą kartą (Mismatch / politika Wait — laukti), ne užrakinama pagal pirmą prijungimą. Kviesti prieš pirmą poll.
+    void expect_storage(bool cuda) {
+        want_cuda_ = cuda;
+        lock_storage_ = true;
+    }
     // Paskutinio atmetimo priežastis (Mismatch tekstas su abiem formatais); tuščia, jei nebuvo.
     const std::string& reason() const { return reason_; }
     // Gyvas writer'is (mxlIsFlowActive: open + flock + close, M9) — sisteminiai kvietimai; kviesti retai (variklis:
@@ -71,6 +77,7 @@ private:
     vramflow::VideoFormat want_{};
     bool have_want_ = false;
     bool want_cuda_ = false;
+    bool lock_storage_ = false;  // expect_storage: want_cuda_ žinomas iš parinkčių
     bool ever_ = false;  // buvo prijungtas bent kartą
     FormatChange on_change_ = FormatChange::Exit;
     State state_ = State::Waiting;
@@ -89,5 +96,10 @@ const char* state_name(InputSlot::State s);
 // false: err — laiko riba (su --input-wait-ms paaiškinimu), Mismatch priežastis arba sustabdymas.
 bool wait_attached(const std::vector<InputSlot*>& slots, mxlInstance inst, const OpenPolicy& p, const std::atomic<bool>& stop,
                    const char* who, std::string& err);
+// Neprijungtų slot'ų ID (per kablelį) ir, jei yra, kodėl flow'as neprijungtas („ [priežastis]“) — laukimo eilutei ir klaidai.
+std::string missing_inputs(const std::vector<InputSlot*>& slots);
+// „įėjimai neatsirado per N ms (--input-wait-ms N; 0 — laukti neribotai): <missing_inputs>“ — wait_attached ir variklio
+// InputsTimeout (--start immediate) tekstas.
+std::string inputs_timeout_text(const std::vector<InputSlot*>& slots, std::int64_t wait_ms);
 
 }  // namespace mxlv::runtime

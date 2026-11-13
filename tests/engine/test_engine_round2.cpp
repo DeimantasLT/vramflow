@@ -80,6 +80,15 @@ TEST_CASE("round2: paleidimo spragos — ne praradimas", "[engine][round2][start
     CHECK(r.hub.unit(r.eng->unit_id(0)).gaps == 0);
     CHECK(r.in(0).lost == 0);
     CHECK_FALSE(res.any_loss);
+    // V18: funkcija paleidimo spragą mato atskiru rezultatu (ne GapBlocked — tai ne praradimas, neskaičiuojama missing_fields)
+    std::size_t startup = 0, blocked = 0;
+    for (const auto& e : r.fn.ends) {
+        startup += e.outcome == Outcome::GapStartup;
+        blocked += e.outcome == Outcome::GapBlocked;
+    }
+    CHECK(startup == 10);
+    CHECK(blocked == 0);
+    CHECK(std::string(to_string(Outcome::GapStartup)) == "GapStartup");
 }
 
 TEST_CASE("round2: B nelaukia įprastai lėto Straggler'io (laukiamas laikas > t_r + Wr)", "[engine][round2][b_rule]") {

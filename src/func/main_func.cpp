@@ -107,6 +107,10 @@ int main(int argc, char** argv) {
     common(l, o);
     inputs(l, o);
     writers(l, o);
+    l->add_option("--start", o.start,
+                  "immediate — išėjimai sukuriami iškart, iki įėjimo — spragos pagal --on-loss (numatyta) | wait-all — laukti visų "
+                  "įėjimų (--input-wait-ms), tada kurti išėjimus")
+        ->check(CLI::IsMember({"immediate", "wait-all"}));
     l->add_option("--inject-every", o.inject_every);
     l->add_option("--deadline-ms", o.deadline_ms);
     l->add_option("--read-offset-us", o.read_offset_us);

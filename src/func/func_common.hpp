@@ -70,6 +70,10 @@ struct Opts {
     // ne ilgiau kaip hold_ms, tada juoda) | black (juodas grain'as iškart). leave — tik testams (nieko necommit'inti).
     std::string on_loss = "invalid";
     std::uint32_t hold_ms = 1000;
+    // Paleidimas (planas §6 D4, K-T7, V18): immediate — išėjimai sukuriami iškart, įėjimai prisijungia vėliau (iki tol
+    // spragos pagal on_loss, gap_startup — ne praradimas); wait-all — laukti visų įėjimų prieš kuriant išėjimus. Parinktis
+    // — tik logo (composite išėjimo rastras priklauso nuo sluoksnių įėjimų, enc MXL išėjimų neturi: abu — wait-all).
+    std::string start = "immediate";
     // gen
     std::uint32_t complexity = 2;
     bool audio = false;

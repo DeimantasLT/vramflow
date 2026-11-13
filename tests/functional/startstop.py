@@ -5,11 +5,16 @@
 
 fstart_order    — logo ir verify paleisti 20 s (> buvusios 15 s ribos) PRIEŠ gen: abu laukia (eilutė „laukiu flow“), po gen
                   starto dirba normaliai: logo be praradimų, verify 0 teisingumo klaidų, abu exit 0.
+                  V18 (--start immediate, numatyta): logo išėjimo flow'ai atsiranda per ≤ 1 s nuo logo starto (prieš gen); iki gen
+                  — gap_startup > 0 (spragos pagal --on-loss), praradimų 0 (missing_fields == 0, gap_invalid == 0). Logo
+                  --duration skaičiuojama nuo starto, todėl PRE + D + 6. fstart_order[wait-all:C] — ankstesnė elgsena: iki
+                  gen išėjimo flow'ų nėra, gap_startup == 0.
 fstart_restart  — gen nužudomas (kill -9) ir po 5 s paleidžiamas vėl: logo gyvas, reattached == 1, spraga suskaičiuota ir
                   KIEKVIENAS jos indeksas commit'intas INVALID (V17 K3: gap_invalid == missing_fields > 0; anksčiau — tik
                   missing_fields > 0, išėjime indeksų nebuvo), verify missing == 0, kitų praradimų 0, išėjimas vėl juda;
                   verify 0 teisingumo klaidų.
-fstart_wait     — `--input-wait-ms 1500` be gamintojo → exit 4, aiškus tekstas (riba, parinktis, flow ID);
+fstart_wait     — `--input-wait-ms 1500` be gamintojo → exit 4 per ≤ 2 s (V18; anksčiau < 10 s), aiškus tekstas (riba, parinktis,
+                  flow ID) — ir su --start immediate (numatyta), kai išėjimai jau sukurti;
                   `--input-wait-ms 0` (neribotai) po 17 s vis dar laukia, SIGTERM → tvarkingai exit 0.
 fstart_owner    — antras gen tame pačiame domene su tuo pačiu --flow-base → exit != 0, tekste pirmojo run_id; pirmasis
                   nepaliestas (flow head juda).
@@ -59,35 +64,53 @@ def logo_losses(s):
 def fstart_order(out):
     res = []
     N, D, PRE = 2, 10, 20
-    for tag, impl, storage in variants():
-        tid = f"fstart_order[{tag}]"
-        sub = f"fstart-order-{tag}"
+    runs = [(tag, impl, storage, "immediate") for tag, impl, storage in variants()]
+    runs += [(tag, impl, storage, "wait-all") for tag, impl, storage in variants() if tag == "C"]
+    for tag, impl, storage, start in runs:
+        imm = start == "immediate"
+        tid = f"fstart_order[{tag}]" if imm else f"fstart_order[wait-all:{tag}]"
+        sub = f"fstart-order-{tag}" + ("" if imm else "-waitall")
         d = F.fresh_domain(sub)
         v = F.vcommon(impl, storage)
         lg = vf = g = None
         alive = False
+        out_ids = [F.role_flow_id(2, n) for n in range(N)]
+        t_out = early = None
         try:
-            lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", D + 6, "--warmup", 2, *v)
+            t0 = time.monotonic()
+            # immediate: --duration skaičiuojama nuo starto (variklis tiksi iškart) — PRE + D + 6; wait-all — nuo įėjimų
+            lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", (PRE + D + 6) if imm else D + 6, "--warmup", 2,
+                         "--start", start, *v)
+            if F.wait_flows(d, out_ids, 3.0):
+                t_out = round(time.monotonic() - t0, 2)
             vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", D, "--warmup", 2,
                          *F.vimpl(impl, storage))
-            time.sleep(PRE)
+            time.sleep(max(0.0, PRE - (time.monotonic() - t0)))
             alive = lg.p.poll() is None and vf.p.poll() is None
+            early = all((pathlib.Path(d) / f"{i}.mxl-flow" / "flow_def.json").exists() for i in out_ids)  # prieš gen
             g = F.FProc(out, sub, "gen", d, "--flows", N, "--duration", D + PRE + 30, *v)
             rv = vf.wait(timeout=D + 60)
-            rl = lg.wait(timeout=D + 60)
+            rl = lg.wait(timeout=PRE + D + 60)
         finally:
             for pr in (vf, lg, g):
                 if pr is not None:
                     pr.term()
         sl, sv = F.vsummary(lg, "logo"), F.vsummary(vf, "verify-logo")
-        lost = sum(logo_losses(sl).values())
-        okf = [f.get("fields_ok", 0) for f in (sl or {}).get("flows") or []]
+        fl = (sl or {}).get("flows") or []
+        lost = sum(logo_losses(sl).values()) + sum(f.get("missing_fields", 0) + f.get("gap_invalid", 0) for f in fl)
+        okf = [f.get("fields_ok", 0) for f in fl]
+        gs = [f.get("gap_startup", 0) for f in fl]
         pv = (sv or {}).get("proc") or {}
         waited = "laukiu flow" in err_text(lg)
-        ok = (alive and waited and rl == 0 and rv == 0 and lost == 0 and len(okf) == N and min(okf) >= 0.9 * D * 50
-              and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0)
-        res.append(F.result(tid, "PASS" if ok else "FAIL",
-                            why=f"gyvi po {PRE} s={alive} 'laukiu flow'={waited} logo exit={rl} praradimai={lost} fields_ok={okf} "
+        common_ok = (alive and waited and rl == 0 and rv == 0 and lost == 0 and len(okf) == N and min(okf) >= 0.9 * D * 50
+                     and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0)
+        if imm:  # V18: išėjimai per ≤ 1 s (prieš gen), paleidimo spragos suskaičiuotos (≈ PRE · 50), ne praradimas
+            mode_ok = t_out is not None and t_out <= 1.0 and early and len(gs) == N and min(gs) >= (PRE - 2) * 50
+        else:  # wait-all: iki gen išėjimų nėra
+            mode_ok = t_out is None and not early and all(x == 0 for x in gs)
+        res.append(F.result(tid, "PASS" if common_ok and mode_ok else "FAIL",
+                            why=f"--start {start}: išėjimo flow'ai po {t_out} s (prieš gen: {early}) gap_startup={gs} | gyvi po {PRE} s={alive} "
+                                f"'laukiu flow'={waited} logo exit={rl} praradimai={lost} fields_ok={okf} "
                                 f"verify exit={rv} verification_errors={pv.get('verification_errors')} samples={pv.get('samples_total')}",
                             logo=sl, verify=sv))
     return res
@@ -161,9 +184,11 @@ def fstart_wait(out):
     dt = time.monotonic() - t0
     fatal = (F.vsummary(p, "logo") or {}).get("fatal", "")
     fid = F.role_flow_id(1, 0)
-    ok = rc == 4 and 1.4 <= dt < 10 and "1500 ms" in fatal and "--input-wait-ms" in fatal and fid in fatal
+    ok = rc == 4 and 1.4 <= dt <= 2.0 and "1500 ms" in fatal and "--input-wait-ms" in fatal and fid in fatal  # V18: ≤ 2 s
     res.append(F.result("fstart_wait[finite]", "PASS" if ok else "FAIL", why=f"exit={rc} per {dt:.1f} s fatal={fatal!r}"))
-    q = F.FProc(out, "fstart-wait/unlimited", "logo", d, "--flows", 1, "--duration", 5, "--input-wait-ms", 0, *v)
+    # V18: --start immediate — variklis tiksi nuo starto, --duration skaičiuojama nuo jo; „vis dar laukia po 17 s“ tikrinama
+    # tarnybos režime (be --duration), kaip veiks operatorius (anksčiau — --duration 5, kuri prasidėdavo tik prisijungus)
+    q = F.FProc(out, "fstart-wait/unlimited", "logo", d, "--flows", 1, "--input-wait-ms", 0, *v)
     time.sleep(17)
     alive = q.p.poll() is None
     t1 = time.monotonic()

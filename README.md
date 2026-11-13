@@ -401,12 +401,21 @@ graphics, `06` compositor) and `N…` is the flow number in hex (graphics: `flow
 
 ### Start order, waits and restarts
 
-Functions can be started in any order. A function that reads flows (`logo`, `composite`, `verify`, `enc`) waits for its
-inputs and prints `laukiu flow <id>, N s` to stderr every 5 s while it waits.
+Functions can be started in any order. While an input has never appeared, a reader prints `laukiu flow <id>, N s` to
+stderr every 5 s.
+
+- `logo` starts **immediately** by default (`--start immediate`): it creates its output flows at once (format from
+  `--format`, storage from `--impl` / `--storage`), the engine ticks, and every output index is committed according to
+  `--on-loss` until the input appears (default: INVALID grains). These start-up gaps are counted per flow as
+  `gap_startup` and are not losses. An input that appears with another storage than expected is rejected like a format
+  change (`--on-format-change`). `--start wait-all` keeps the old behaviour: wait for all inputs, then create the outputs.
+- `composite`, `enc` and `verify` wait for their inputs before they start (`composite`: the output raster depends on the
+  layer inputs; `enc` has no MXL outputs).
 
 | Option (readers) | Meaning |
 |---|---|
-| `--input-wait-ms N` | `0` (default): wait for the inputs without a limit. `N > 0`: give up after `N` ms with exit code `4` and a message that names the missing flows and the limit |
+| `--start immediate\|wait-all` | `logo` only, see above; default `immediate` |
+| `--input-wait-ms N` | `0` (default): wait for the inputs without a limit. `N > 0`: give up after `N` ms with exit code `4` and a message that names the missing flows and the limit (also with `--start immediate`, where the outputs already exist) |
 | `--on-format-change exit\|wait` | An input came back with another format or storage: `exit` (default) stops with exit code `6` and names both formats; `wait` keeps waiting until it comes back with the original one |
 
 - A reader attaches only to a flow that has a live writer and already produces grains. Old files left by a killed

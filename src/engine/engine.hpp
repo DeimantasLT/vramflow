@@ -45,7 +45,9 @@ struct UnitSpec {
 // eilės tam pačiam išėjimui — sugenda TIK tas vienetas (fail_unit: jo išėjimai atlaisvinami, kiti N − 1 tęsia); kai sugenda
 // visi vienetai — fatalu (exit 2). Sugedęs vienetas atkuriamas su atidėjimu (EngineConfig::retry_*): OutputPort::reopen
 // atkūrimo gijoje, sėkmė — vienetas vėl dalyvauja nuo kito tick'o.
-enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError };
+// GapStartup — paleidimo spraga (--start immediate, V18): būtinas įėjimas dar niekada neprisijungė; išėjimas commit'inamas pagal
+// politiką (OutCounters::gap_startup), bet tai ne praradimas (funkcijos jo neskaičiuoja missing_fields).
+enum class Outcome : std::uint8_t { Ready, GapBlocked, GapLate, GapNoContent, GapClock, Lapped, Skipped, OutputError, GapStartup };
 const char* to_string(Outcome);
 
 struct UnitTick {

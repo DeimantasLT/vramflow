@@ -235,6 +235,7 @@ struct CompositeFn final : engine::TickFunction {
                 times.unit_done(ut.index, now_tai(), false);
                 break;
             case engine::Outcome::GapNoContent: break;
+            case engine::Outcome::GapStartup: break;  // composite įėjimų laukia prieš variklį (wait-all) — neturėtų būti
             case engine::Outcome::GapLate:
                 if (inv) f.loss("in_invalid", ti);
                 else if (tl) f.loss("too_late", ti);
@@ -401,7 +402,10 @@ int run_composite(const Opts& o) {
     engine::SystemClock clk;
     EngineStats es(o, "composite");
     engine::StatsHub& hub = es.hub;
-    engine::TickEngine eng(engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000), clk, hub, stop);
+    // Startas — wait-all (V18): išėjimo rastras priklauso nuo sluoksnių įėjimų formato, todėl įėjimų laukta prieš kuriant išėjimus
+    engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);
+    ecfg.start = engine::StartMode::WaitAll;
+    engine::TickEngine eng(ecfg, clk, hub, stop);
     for (std::uint32_t n = 0; n < N && !rc; ++n) {
         engine::UnitSpec u;
         u.name = flow_id(kRoleComp, o.flow_base + n);
