@@ -929,5 +929,28 @@ def fiso_teeth(out):
     return res
 
 
-TESTS = {"fiso_teeth": fiso_teeth, "fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite,
-         "fiso_enc": fiso_enc, "fiso_enc_audio": fiso_enc_audio}
+# CPU rinkiniai (peržiūra 2026-11-13 p. 7b): FISO_CPUSETS=split — gamintojai (gen, gfxgen) ir tikrinama funkcija su verify
+# atskiruose branduoliuose (taskset; WSL2 — 12 loginių CPU): FISO_CPU_PRODUCERS (numatyta 0-3), FISO_CPU_FUT (4-11). Tuščia —
+# be susiejimo. Taikoma tik izoliacijos testų metu. fiso_teeth — numatyta split: 16 paleidimų fiso_teeth[enc-C] PASS 11/16 be
+# susiejimo, 15/16 su juo (sveikas gen nebekonkuruoja su x264 dėl CPU gedimo sekundėmis, Δup nebeprisideda); FISO_CPUSETS=off — be.
+SPLIT = {"producers": os.environ.get("FISO_CPU_PRODUCERS", "0-3"), "fut": os.environ.get("FISO_CPU_FUT", "4-11")}
+
+
+def with_cpusets(fn, default=""):
+    def run(out):
+        mode = os.environ.get("FISO_CPUSETS", default)
+        saved = dict(F.CPUSETS)
+        if mode == "split":
+            F.CPUSETS.update({"gen": SPLIT["producers"], "gfxgen": SPLIT["producers"], "logo": SPLIT["fut"], "enc": SPLIT["fut"],
+                              "composite": SPLIT["fut"], "verify": SPLIT["fut"]})
+        try:
+            return fn(out)
+        finally:
+            F.CPUSETS.clear()
+            F.CPUSETS.update(saved)
+    return run
+
+
+TESTS = {k: with_cpusets(v, "split" if k == "fiso_teeth" else "") for k, v in {
+    "fiso_teeth": fiso_teeth, "fiso_kill": fiso_kill, "fiso_stall": fiso_stall, "fiso_composite": fiso_composite,
+    "fiso_enc": fiso_enc, "fiso_enc_audio": fiso_enc_audio}.items()}

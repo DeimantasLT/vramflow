@@ -319,6 +319,11 @@ def role_flow_id(role, n):
     return "4d584c47-%04d-4000-8000-%012x" % (role, n)
 
 
+# CPU rinkiniai pagal subkomandą (taskset -c): {"gen": "0-3", "enc": "4-11", …}; tuščia — be susiejimo. Nustato testų
+# moduliai (izoliacijos vartai: gamintojai ir tikrinama funkcija — atskiruose branduoliuose, peržiūra 2026-11-13 p. 7b).
+CPUSETS = {}
+
+
 class FProc:
     """vramflow-func subkomanda kaip procesas (stderr į failą, summary-<role>.json out kataloge)."""
 
@@ -330,7 +335,9 @@ class FProc:
         args = [str(a) for a in args]
         if sub in DEADLINE_SUBS and "--deadline-ms" not in args:
             args += ["--deadline-ms", str(FUNC_DEADLINE_MS)]
-        self.p = subprocess.Popen([FUNC_BIN, sub, "--domain", str(domain), "--out", str(self.out), *args],
+        cpus = CPUSETS.get(sub)
+        pre = ["taskset", "-c", cpus] if cpus else []  # taskset exec'ina programą: tas pats pid (signalai, wait)
+        self.p = subprocess.Popen([*pre, FUNC_BIN, sub, "--domain", str(domain), "--out", str(self.out), *args],
                                   stdout=subprocess.DEVNULL, stderr=open(self.err_path, "w"), env=ENV)
 
     def wait(self, timeout=None):
