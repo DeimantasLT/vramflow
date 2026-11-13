@@ -75,6 +75,14 @@ void inputs(CLI::App* c, Opts& o) {
     c->add_option("--on-format-change", o.on_format_change, "įėjimas grįžo kitu formatu: exit (exit 6, numatyta) | wait")
         ->check(CLI::IsMember({"exit", "wait"}));
 }
+// MXL video rašytojai (gen, logo, composite, dec): spragų politika K3 (production-grade §6 K3, planas §6 D4).
+void writers(CLI::App* c, Opts& o) {
+    c->add_option("--on-loss", o.on_loss,
+                  "indeksas be turinio: invalid — INVALID grain'as (numatyta; turinys neišgalvojamas) | freeze — paskutinis geras "
+                  "to paties pariteto grain'as ne ilgiau kaip --hold-ms, tada juoda | black — juodas grain'as iškart")
+        ->check(CLI::IsMember({"invalid", "freeze", "black", "leave"}));  // leave — tik testams (nieko necommit'inti)
+    c->add_option("--hold-ms", o.hold_ms, "freeze: kiek ms kartoti paskutinį gerą grain'ą (numatyta 1000)")->check(CLI::Range(0u, 3600000u));
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -84,6 +92,7 @@ int main(int argc, char** argv) {
     Opts o;
     auto* g = app.add_subcommand("gen", "N × v210 (--format, numatytasis 1080i50) (+ audio) generatorius");
     common(g, o);
+    writers(g, o);
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
     g->add_option("--audio-late-ms", o.audio_late_ms,
@@ -97,6 +106,7 @@ int main(int argc, char** argv) {
     auto* l = app.add_subcommand("logo", "logotipo įkepimas MXL → MXL GPU");
     common(l, o);
     inputs(l, o);
+    writers(l, o);
     l->add_option("--inject-every", o.inject_every);
     l->add_option("--deadline-ms", o.deadline_ms);
     l->add_option("--read-offset-us", o.read_offset_us);
@@ -104,6 +114,7 @@ int main(int argc, char** argv) {
     auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
     common(cp, o);
     inputs(cp, o);
+    writers(cp, o);
     cp->add_option("--layers", o.layers, "grafikos sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
     cp->add_option("--layer-xy", o.layer_xy, "X,Y (kadro koordinatės) kiekvienam sluoksniui, kartoti K kartų; X lyginis, interlaced Y lyginis");
     cp->add_option("--opacity", o.opacity, "sluoksnio nepermatomumas 0…1 (K kartų; numatytasis 1)");
@@ -152,6 +163,7 @@ int main(int argc, char** argv) {
     e->add_option("--test-drop-after", o.test_drop_after_s)->group("");
     auto* d = app.add_subcommand("dec", "H.264 TS per UDP → NVDEC → MXL");
     common(d, o);
+    writers(d, o);
     d->add_option("--port-base", o.port_base);
     d->add_option("--playout-frames", o.playout_frames);
     d->add_option("--input-silence-ms", o.input_silence_ms, "įėjimas tylus ilgiau nei tiek ms → jungiamasi iš naujo (numatyta 2000)")

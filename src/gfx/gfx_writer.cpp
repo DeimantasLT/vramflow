@@ -552,7 +552,18 @@ bool vfgfx_writer_s::pace_copy(std::uint64_t i, void*& dst_out, const void*& src
     activate(i, i);
     pace_next = i + 1;  // nuo šiol submit_at indeksui i — per vėlu (turinys pasirinktas)
     if (!has) {
+        // K3 (production-grade §6 K3, planas §6 D4): rašytojas commit'ina KIEKVIENĄ indeksą — be kadro INVALID grain'as
+        // (turinys neliečiamas, validSlices = totalSlices); skaitytojas iškart gauna OK + INVALID, ne TOO_EARLY iki kito.
+        const mxlStatus st = out.commit_invalid(i);
+        if (st != MXL_STATUS_OK) {
+            bump(&gi::PacingStats::errors);
+            set_pace_error("INVALID grain " + std::to_string(i) + " status " + std::to_string(st));
+            return false;
+        }
+        last_index.store(i);
         bump(&gi::PacingStats::no_frame);
+        clear_pace_error();
+        if (hooks.on_gap) hooks.on_gap(i);
         return false;
     }
     mxlStatus st = MXL_STATUS_OK;
@@ -831,7 +842,7 @@ void PaceGroup::run() {
         // Tick'as c atidaromas T(c) + offset_ns (expect = offset, ro = 0, viena riba). offset — briaunos poslinkis
         // (expect_ns), ne ro: variklio pirmas tick'as = due_index(dabar − expect), todėl ir |offset| > P / 2 pradeda nuo
         // pirmo nepraėjusio indekso (su ro = +60 ms variklis pradėtų 2 indeksais vėliau). Šaltinio vienetas be išėjimų —
-        // variklis jo nelaiko ir spragų nerašo (spragų politika ritmui — V17). Variklio praleisti tick'ai (T11) tik
+        // variklis jo nelaiko; spragas (INVALID iki pirmo kadro, K3) commit'ina pats rašytojas (pace_copy). Variklio praleisti tick'ai (T11) tik
         // pažadina vėliau: vėlavimo taisyklę kiekvienam rašytojui taiko tick() (pace_advance).
         eng::EngineConfig cfg = eng::EngineConfig::legacy({rate.numerator, rate.denominator}, 0, 0);
         cfg.cuts.expect_ns = offset;

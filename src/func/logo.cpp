@@ -327,9 +327,13 @@ int run_logo(const Opts& o_in) {
     std::vector<engine::MxlVideoOutput> ports_out;
     ports_in.reserve(o.flows);
     ports_out.reserve(o.flows);
+    // K3 spragos (--on-loss): freeze / black kopija — host memcpy arba D2D (G); juodas grain'as paruošiamas dabar
+    GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
+        if (!gap_fill.prepare(out[n].raster, err)) { st.fatal = err; rc = 2; }
     for (std::uint32_t n = 0; n < o.flows; ++n) {
         ports_in.emplace_back(in[n], inst);
-        ports_out.emplace_back(out[n], engine::host_copy(), nullptr, nullptr);
+        ports_out.emplace_back(out[n], gap_fill.copy(), gap_fill.flush(), gap_fill.black(out[n].raster));
     }
     // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports_out, out, inst, [&](std::size_t n) {

@@ -47,9 +47,21 @@
  *      * vfgfx_submit(w, frame) means "this from now on": `frame` becomes the current content from the next grain the
  *        thread processes and every scheduled (vfgfx_submit_at) frame is cancelled;
  *      * vfgfx_submit_at(w, first_index, frame) makes `frame` current from grain `first_index` on (frame accurate).
- *    Until the first frame exists no grains are committed. While pacing runs, the thread is the only user of the MXL
- *    writer and vfgfx_write fails with VFGFX_ERR_STATE. vfgfx_submit / vfgfx_submit_at are also allowed before
- *    vfgfx_start_pacing (the frames are then ready when pacing starts).
+ *    A paced writer commits EVERY index (gap policy "invalid", see GAPS below): until the first frame exists each grain
+ *    is committed with MXL_GRAIN_FLAG_INVALID (no content is invented). While pacing runs, the thread is the only user
+ *    of the MXL writer and vfgfx_write fails with VFGFX_ERR_STATE. vfgfx_submit / vfgfx_submit_at are also allowed
+ *    before vfgfx_start_pacing (the frames are then ready when pacing starts, and no INVALID grain is written).
+ *
+ * GAPS (paced mode; behaviour change in 0.2: before, nothing was committed until the first frame)
+ *  - Index without a frame (before the first vfgfx_submit / vfgfx_submit_at becomes current): the thread opens the grain,
+ *    sets MXL_GRAIN_FLAG_INVALID and validSlices = totalSlices and commits it at the index's commit time, without
+ *    touching the payload. A reader blocked on that index wakes up at once with MXL_STATUS_OK + the INVALID flag (it does
+ *    not wait for the next commit). Counted in stats.no_frame; NOT in stats.committed / vfgfx_committed (content grains
+ *    only); stats.last_committed_index includes them (a later vfgfx_write must use a higher index).
+ *  - Once a frame is current, every grain repeats it until another frame replaces it — static graphics, not a gap.
+ *  - Indices skipped because the thread woke up late (stats.late_skips) are not filled: MXL marks them invalid itself
+ *    when the next index is opened. The policy is fixed ("invalid"); freeze / black are policies of the media
+ *    functions (vramflow-func --on-loss), not of this library.
  *
  * GRAIN INDICES AND TIMING (paced mode)
  *  - Index i is committed at its commit time T(i) + offset_ns, where T(i) = vfgfx_index_time_ns(w, i) is the TAI time of
@@ -235,7 +247,7 @@ typedef struct vfgfx_frame {
 typedef struct vfgfx_stats {
     uint32_t struct_size;          /* in: sizeof(vfgfx_stats) */
     uint32_t flags;                /* in: must be 0 */
-    uint64_t committed;            /* grains committed, both modes (== vfgfx_committed) */
+    uint64_t committed;            /* grains committed with content, both modes (== vfgfx_committed; INVALID: no_frame) */
     uint64_t written;              /* of which by vfgfx_write */
     uint64_t paced;                /* of which by the pacing thread */
     uint64_t submitted;            /* frames accepted by vfgfx_submit */
@@ -243,11 +255,11 @@ typedef struct vfgfx_stats {
     uint64_t scheduled_late;       /* scheduled frames that became current after their first_index */
     uint64_t scheduled_replaced;   /* scheduled frames that never became current (replaced or cancelled) */
     uint64_t late_skips;           /* grains skipped because the pacing thread was late */
-    uint64_t no_frame;             /* grain periods without any frame (nothing committed) */
+    uint64_t no_frame;             /* grain periods without any frame: committed as INVALID grains (see GAPS) */
     uint64_t clock_backward;       /* backward clock steps seen by the pacing thread */
     uint64_t pacing_errors;        /* pacing thread open/copy/commit failures and exceptions */
     uint64_t caller_errors;        /* failed calls on this writer */
-    uint64_t last_committed_index; /* index of the most recent commit, VFGFX_INDEX_NONE if none */
+    uint64_t last_committed_index; /* index of the most recent commit (content or INVALID), VFGFX_INDEX_NONE if none */
     uint64_t next_pacing_index;    /* smallest first_index vfgfx_submit_at accepts right now */
     uint32_t pacing;               /* 1 while paced mode is active (between start and stop) */
     uint32_t queue_depth;          /* vfgfx_submit_at frames pending */
@@ -331,7 +343,7 @@ int vfgfx_cancel_scheduled(vfgfx_writer w);
 uint64_t vfgfx_current_index(vfgfx_writer w);
 /* TAI time (ns) of grain `index` at the flow grain rate (mxlIndexToTimestamp); 0 for NULL. */
 uint64_t vfgfx_index_time_ns(vfgfx_writer w, uint64_t index);
-/* Grains committed so far (both modes); 0 for NULL. */
+/* Grains committed with content so far (both modes; paced INVALID grains are stats.no_frame); 0 for NULL. */
 uint64_t vfgfx_committed(vfgfx_writer w);
 /* Fills *out; out->struct_size and out->flags are set by the caller (VFGFX_STATS_INIT / vfgfx_stats_init()). */
 int vfgfx_get_stats(vfgfx_writer w, vfgfx_stats* out);

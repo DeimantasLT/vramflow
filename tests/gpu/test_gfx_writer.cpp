@@ -190,6 +190,13 @@ struct Checker {
         }
         return want.size() == buf.size() && std::memcmp(buf.data(), want.data(), buf.size()) == 0;
     }
+    // true — grain'as commit'intas kaip INVALID (OK + MXL_GRAIN_FLAG_INVALID, validSlices == totalSlices).
+    bool invalid(std::uint64_t idx) {
+        mxlGrainInfo info{};
+        const std::uint32_t* ptr = nullptr;
+        return in.get(idx, 0, info, ptr) == MXL_STATUS_OK && (info.flags & MXL_GRAIN_FLAG_INVALID) != 0 &&
+               info.validSlices == info.totalSlices;
+    }
 };
 
 struct Recorder {
@@ -418,7 +425,8 @@ TEST_CASE("gfx_writer: klaidų kodai (INVALID_ARG, GEOMETRY, flow aprašas)", "[
     vfgfx_writer_destroy(w);
 }
 
-TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit 50 tick'ų = 50 commit'ų, indeksai iš eilės == ref [PF-4]",
+// V17 (K3, K-T9): iki pirmo submit ritmo gija commit'ina INVALID grain'us (anksčiau — nieko: „be submit grain'ų nėra“).
+TEST_CASE("gfx_writer: ritmo režimas — iki submit INVALID grain'ai, po submit 50 tick'ų = 50 commit'ų, indeksai iš eilės == ref [PF-4]",
           "[gfx_writer][mxl][pf4][virtual]") {
     const bool cuda_store = GENERATE(false, true);
     if (cuda_store && !have_gpu()) SKIP("nėra CUDA įrenginio");
@@ -442,14 +450,32 @@ TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit 50
         bool present = false;
         if (!chk.matches(i, want.load()[i & 1], &present)) ++(present ? bad : missing);
     };
+    // INVALID grain'ai (K3): kiekvienas tikrinamas iškart ritmo gijoje — OK + MXL_GRAIN_FLAG_INVALID
+    Recorder gaps;
+    std::atomic<int> not_invalid{0};
+    hk.on_gap = [&](std::uint64_t i) {
+        gaps.add(i);
+        if (!chk.invalid(i)) ++not_invalid;
+    };
     REQUIRE(gi::set_pacing_hooks(w, hk) == 0);
 
     REQUIRE(vfgfx_start_pacing(w, 0) == 0);
     CHECK(vfgfx_start_pacing(w, 0) == 2004);  // jau paleista
     vp.run(25);
-    CHECK(vfgfx_committed(w) == 0);  // [PF-4]: iki pirmo submit grain'ų nėra
+    CHECK(vfgfx_committed(w) == 0);  // turinio grain'ų dar nėra
     CHECK(rec.size() == 0);
     CHECK(gi::pacing_stats(w).no_frame == 25);
+    // [PF-4] → K3: iki pirmo submit kiekvienas indeksas commit'inamas kaip INVALID (anksčiau — nieko)
+    const auto inv = gaps.snapshot();
+    CHECK(inv.size() == 25);
+    expect_strictly_consecutive(inv);
+    CHECK(not_invalid == 0);
+    vfgfx_stats s0 = VFGFX_STATS_INIT;
+    REQUIRE(vfgfx_get_stats(w, &s0) == 0);
+    CHECK(s0.committed == 0);
+    CHECK(s0.no_frame == 25);
+    REQUIRE(!inv.empty());
+    CHECK(s0.last_committed_index == inv.back());  // paskutinis commit'as — INVALID grain'as
 
     REQUIRE(vfgfx_submit(w, &a.f) == 0);
     vp.run(50);
@@ -466,6 +492,8 @@ TEST_CASE("gfx_writer: ritmo režimas — be submit grain'ų nėra, po submit 50
     const auto all = rec.snapshot();
     expect_strictly_consecutive(all);
     CHECK(all.size() == 70);
+    REQUIRE(!all.empty());
+    CHECK(all.front() == inv.back() + 1);  // turinys tęsia INVALID grain'ų seką be tarpo
     CHECK(bad == 0);
     CHECK(missing == 0);
     const auto st = gi::pacing_stats(w);

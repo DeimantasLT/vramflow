@@ -521,7 +521,11 @@ int run_dec(const Opts& o) {
     if (inter) ecfg.skip_align = 2;  // pradėti ir po praleidimo tęsti nuo viršutinio lauko
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(o.flows);
-    for (auto& v : out) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    // K3 (--on-loss): underrun (no_content) — spraga pagal politiką; freeze / black kopija — host memcpy arba D2D (G)
+    GapFill gap_fill(gap_policy(o.on_loss), !cpu && o.storage != "host");
+    for (auto& v : out)
+        if (!rc && !gap_fill.prepare(v.raster, st.fatal)) rc = 2;
+    for (auto& v : out) ports.emplace_back(v, gap_fill.copy(), gap_fill.flush(), gap_fill.black(v.raster));
     // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports, out, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);

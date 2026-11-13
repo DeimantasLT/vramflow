@@ -1,6 +1,9 @@
 # Bendras „tick“ variklis (VRAMFlow) — įgyvendinimo planas
 
-> **Būsena:** planas, **laukia autoriaus patvirtinimo**. Kodas nekeistas, niekas nekompiliuota ir nepaleista (tuo metu kitas
+> **Įgyvendinimo būsena (2026-11-13):** 0–3 etapai ir V19, V21 — įgyvendinti; **V17** (spragų politika K3: `--on-loss`,
+> `--hold-ms`, ritmo gija iki pirmo `submit` — INVALID) — įgyvendinta; V18, V20 — žr. §9 eilutes. Žemiau — pirminis planas.
+>
+> **Būsena (pirminė):** planas, **laukia autoriaus patvirtinimo**. Kodas nekeistas, niekas nekompiliuota ir nepaleista (tuo metu kitas
 > agentas taisė kompiliatoriaus įspėjimus; GPU neliesta). Teiginiai apie VRAMFlow kodą — iš skaitymo `git show HEAD:<kelias>`,
 > HEAD = `98b92c1`. Teiginiai apie MXL — iš `/root/src/mxl-pr653` @ `6dddc91d92f5` ir kiekvienas pažymėtas
 > **[patikrinta: failas:eilutė]** arba **[prielaida]**. Skaičiai, kurių niekas nematavo, pažymėti **[iš kodo, nevykdyta]**.

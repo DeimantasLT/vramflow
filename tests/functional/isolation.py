@@ -80,12 +80,18 @@ VERIFY_S = 22
 ENC_PORT = int(os.environ.get("FISO_ENC_PORT", "25000"))
 # Funkcijos santraukos srautų (flow'ų) skaitikliai, kuriuos registruojame (praradimai ir būsena).
 FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skips", "lapped", "too_late", "in_invalid", "read_errors",
-           "missing_fields", "detached", "flow_invalid", "reopened", "reattached", "stalls", "lateness_max_us")
+           "missing_fields", "detached", "flow_invalid", "reopened", "reattached", "stalls", "lateness_max_us", "gap_invalid",
+           "gap_frozen", "gap_black", "gap_startup")
 ENC_KEYS = ("frames_encoded", "late_frames", "late_skips_frames", "warmup_skips_frames", "clock_skips_frames", "missing_frames",
             "lapped", "too_late", "in_invalid", "frames_dropped_queue", "encode_errors", "mux_errors", "reattached",
             "audio_underrun_frames", "audio_silence_samples", "packets_audio", "lateness_max_us")
 VER_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "too_late", "read_errors", "reattached", "in_reattached",
             "marker_bad", "verify_skipped", "check_dropped")
+# Paveikto flow'o spragų turinio patikra (verify --flows 1 --every 1; V17 K3): kaip klasifikuoti išėjimo grain'ai be įėjimo.
+GAP_KEYS = ("samples", "present", "missing", "invalid", "mismatch_fields", "outside_diff_fields", "marker_bad", "verify_skipped",
+            "sample_lapped", "gap_repeat", "gap_black", "gap_other", "gap_repeat_first", "gap_repeat_last", "gap_black_first",
+            "gap_black_last", "last_good_index")
+HOLD_FIELDS = 50  # --hold-ms 1000 (numatyta) prie 50 laukų/s
 
 
 def variants():
@@ -292,15 +298,19 @@ def gens(out, sub, d, v, victim, *extra):
 
 # --- logo ----------------------------------------------------------------------------------------------------------------
 
-def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
+def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", policy=None):
+    """policy (V17): None — numatyta (--on-loss invalid); "freeze" / "black" — logo su --on-loss, paveiktam flow'ui atskiras
+    verify --every 1 (vg) klasifikuoja kiekvieną spragos grain'ą (gap_repeat / gap_black / gap_other)."""
     sub = f"fiso-logo-{tag}-{fault}-{pos}{suffix}"
     victim = victim_at(pos)
     d = F.fresh_domain(sub)
     v = F.vcommon(impl, storage)
     ga = gens(out, sub, d, v, victim)
     gb = F.FProc(out, f"{sub}/genB", "gen", d, "--flows", 1, "--flow-base", victim, "--duration", RUN_S + 60, *v)
-    lg = vf = vp = None
-    rl = rv = rp = None
+    if policy:
+        extra = (*extra, "--on-loss", policy)
+    lg = vf = vp = vg = None
+    rl = rv = rp = rg = None
     t_fault = None
     try:
         if not F.wait_flows(d, [F.role_flow_id(1, n) for n in range(N)]):
@@ -312,6 +322,9 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
             return {"err": "logo išėjimo flow'ai neatsirado"}
         vf = F.FProc(out, sub, "verify", d, "--mode", "logo", "--flows", N, "--every", 5, "--duration", VERIFY_S, "--warmup", 1,
                      *F.vimpl(impl, storage))
+        if policy:
+            vg = F.FProc(out, f"{sub}/gap", "verify", d, "--mode", "logo", "--flows", 1, "--flow-base", victim, "--every", 1,
+                         "--duration", VERIFY_S, "--warmup", 1, *F.vimpl(impl, storage))
         if fault == "stall":
             # po SIGCONT: paveiktas flow'as POST_S s — be praradimų (1 s atsigavimui). Paleidžiamas dabar (ne ties SIGCONT): jo
             # CUDA kontekstas (G) kuriamas prieš langą, ne gedimo lange (kito proceso GPU įvykis — ne tikrinamos funkcijos).
@@ -323,9 +336,11 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
         if vp is not None:
             rp = vp.wait(timeout=POST_S + 60)
         rv = vf.wait(timeout=VERIFY_S + 60)
+        if vg is not None:
+            rg = vg.wait(timeout=VERIFY_S + 60)
         rl = lg.wait(timeout=LOGO_RUN_S + 60)
     finally:
-        stop_all([vp, vf, lg, gb, *ga])
+        stop_all([vg, vp, vf, lg, gb, *ga])
     sl, sv = F.vsummary(lg, "logo"), F.vsummary(vf, "verify-logo")
     if sl is None or sv is None:
         return {"err": f"nėra santraukų (logo={sl is not None}, verify={sv is not None})"}
@@ -338,6 +353,12 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix=""):
     if vp is not None:
         sp = F.vsummary(vp, "verify-logo")
         rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
+    rec["policy"] = policy or "invalid"
+    rec["verify_last_index"] = sv.get("last_index")
+    if vg is not None:
+        sg = F.vsummary(vg, "verify-logo")
+        rec["gapv"] = {"exit": rg, "last_index": (sg or {}).get("last_index"),
+                       **({k: ((sg.get("flows") or [{}])[0]).get(k) for k in GAP_KEYS} if sg else {"err": "nėra gap santraukos"})}
     return with_budget(rec, sl)
 
 
@@ -394,6 +415,8 @@ def run_composite(out, tag, impl, storage, fault, pos="last"):
            "verify": split_summary(sv, VER_KEYS, victim), "verify_proc": (sv.get("proc") or {}), "fatal": sc.get("fatal"),
            "upstream": up, "fn_flows": [flow_view(sc, FN_KEYS, [n]) for n in hv],
            "verify_flows": [flow_view(sv, VER_KEYS, [n]) for n in hv]}
+    rec["policy"] = "invalid"  # V17: numatyta --on-loss (gap_policy_bad tikrina paveiktą flow'ą kaip logo)
+    rec["verify_last_index"] = sv.get("last_index")
     return with_budget(rec, sc, ux["late_skips"] + ux["late_commits"])
 
 
@@ -590,6 +613,8 @@ def logo_gate(fault, r):
     bad += p99_bad(r, "out_lateness")
     if not fa.get("missing_fields", 0):
         bad.append("paveikto missing_fields == 0")
+    if fault == "kill":
+        bad += gap_policy_bad(r)
     if fault == "stall":
         if fa.get("stalls", 0) < 1:
             bad.append(f"paveikto stalls={fa.get('stalls', 0)} < 1")
@@ -597,6 +622,66 @@ def logo_gate(fault, r):
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
                 post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):
             bad.append(f"po SIGCONT {POST_S} s: {post}")
+    return bad
+
+
+def gap_policy_bad(r):
+    """V17 (K3) paveiktam flow'ui po kill -9: rašytojas commit'ina KIEKVIENĄ spragos indeksą pagal --on-loss.
+    invalid — verify invalid == spragos indeksų skaičius jo lange ± 2 (nuo pirmo indekso po mirties iki verify paskutinio),
+              missing == 0; logo gap_invalid > 0.
+    freeze  — (verify --every 1) invalid == 0, missing == 0; spragos grain'ai == paskutinis geras to paties pariteto nuo g + 1
+              iki g + 50 (+1, jei kadras baigiamas: --hold-ms 1000), tada juodi nuo lyginio indekso iki galo; gap_other == 0.
+    black   — invalid == 0, missing == 0; juodi nuo g + 1 iki galo; gap_repeat == 0, gap_other == 0."""
+    bad = []
+    pol = r.get("policy", "invalid")
+    fa = r["fn"]["affected"]
+    va = r["verify"]["affected"]
+    if va.get("missing", 0):
+        bad.append(f"paveikto verify missing={va['missing']} (K3: kiekvienas indeksas commit'inamas)")
+    if pol == "invalid":
+        ft, last = r.get("fault_tai"), r.get("verify_last_index")
+        if ft is None or last is None:
+            return bad + ["nėra gedimo laiko / verify paskutinio indekso"]
+        want = last - ft // FIELD_NS  # indeksai po paskutinio gamintojo grain'o (T(i) ≤ mirtis) iki verify pabaigos
+        if abs(va.get("invalid", 0) - want) > 2:
+            bad.append(f"paveikto verify invalid={va.get('invalid', 0)} ≠ spragos indeksų {want} ± 2")
+        if not fa.get("gap_invalid", 0) or fa.get("gap_frozen", 0) or fa.get("gap_black", 0):
+            bad.append(f"paveikto logo gap_invalid={fa.get('gap_invalid', 0)} gap_frozen={fa.get('gap_frozen', 0)} "
+                       f"gap_black={fa.get('gap_black', 0)} (laukta tik invalid)")
+        return bad
+    if va.get("invalid", 0):
+        bad.append(f"paveikto verify invalid={va['invalid']} (su {pol} turi būti 0)")
+    g = r.get("gapv") or {}
+    if g.get("err") or g.get("exit") not in (0, 4):
+        return bad + [f"spragų verify: {g}"]
+    for k in ("missing", "invalid", "mismatch_fields", "outside_diff_fields", "gap_other", "verify_skipped", "sample_lapped"):
+        if g.get(k):
+            bad.append(f"spragų verify {k}={g[k]}")
+    lg_ = g.get("last_good_index")
+    bf, bl, nb = g.get("gap_black_first"), g.get("gap_black_last"), g.get("gap_black") or 0
+    if lg_ is None or bf is None or bl is None:
+        return bad + [f"spragų verify be geros / juodos atkarpos: {g}"]
+    if nb != bl - bf + 1 or bl != g.get("last_index"):
+        bad.append(f"juodi ne ištisai iki galo: {nb} grain'ų [{bf}, {bl}], verify paskutinis {g.get('last_index')}")
+    if pol == "freeze":
+        rf, rl_, nr = g.get("gap_repeat_first"), g.get("gap_repeat_last"), g.get("gap_repeat") or 0
+        if rf is None or rl_ is None:
+            return bad + [f"freeze be kartojimų: {g}"]
+        if rf != lg_ + 1 or nr != rl_ - rf + 1:
+            bad.append(f"kartojimai ne nuo g + 1 ištisai: g={lg_} [{rf}, {rl_}] n={nr}")
+        if rl_ - lg_ not in (HOLD_FIELDS, HOLD_FIELDS + 1):
+            bad.append(f"kartota {rl_ - lg_} laukų po paskutinio gero (laukta {HOLD_FIELDS} arba {HOLD_FIELDS + 1} — --hold-ms 1000)")
+        if bf != rl_ + 1 or bf % 2:
+            bad.append(f"juoda ne iškart po kartojimų kadro riba: kartota iki {rl_}, juoda nuo {bf}")
+        if not fa.get("gap_frozen", 0) or not fa.get("gap_black", 0) or fa.get("gap_invalid", 0):
+            bad.append(f"logo gap_frozen={fa.get('gap_frozen', 0)} gap_black={fa.get('gap_black', 0)} gap_invalid={fa.get('gap_invalid', 0)}")
+    else:
+        if g.get("gap_repeat"):
+            bad.append(f"black: gap_repeat={g['gap_repeat']}")
+        if bf != lg_ + 1:
+            bad.append(f"black: juoda ne iškart (g={lg_}, juoda nuo {bf})")
+        if not fa.get("gap_black", 0) or fa.get("gap_frozen", 0) or fa.get("gap_invalid", 0):
+            bad.append(f"logo gap_black={fa.get('gap_black', 0)} gap_frozen={fa.get('gap_frozen', 0)} gap_invalid={fa.get('gap_invalid', 0)}")
     return bad
 
 
@@ -689,8 +774,23 @@ def probe(out, name, runner, faults):
     return res
 
 
+POLICY_POS = os.environ.get("FISO_POLICY_POS", "middle")  # freeze / black — viena vieta kiekvienam variantui
+
+
 def fiso_kill(out):
-    return probe(out, "fiso_kill", run_logo, ["kill"])
+    """kill -9 (numatyta --on-loss invalid: visos vietos) ir V17 politikos freeze / black (POLICY_POS vietoje)."""
+    res = probe(out, "fiso_kill", run_logo, ["kill"])
+    for pol in ("freeze", "black"):
+        for tag, impl, storage, _ in variants():
+            tid = f"fiso_kill[{tag}:{POLICY_POS}:{pol}]"
+            r = run_logo(out, tag, impl, storage, "kill", POLICY_POS, suffix=f"-{pol}", policy=pol)
+            if r.get("err"):
+                res.append(F.result(tid, "FAIL", why=describe(r)))
+                continue
+            bad = logo_gate("kill", r)
+            res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") +
+                                f"{describe(r)} | spragų verify: {r.get('gapv')}", after=r))
+    return res
 
 
 def fiso_stall(out):

@@ -5,6 +5,7 @@
 // parinktys → EngineConfig (viena vieta) ir variklio skaitikliai → santraukos raktai (tie patys kaip prieš migraciją).
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "engine/engine.hpp"
@@ -16,13 +17,49 @@
 namespace mxlv::func {
 
 // Variklio ribos funkcijai:
-//   Legacy    — šiandieninis ciklas: viena riba ties T + --deadline-ms, apklausa 0,5 ms, be pertraukiklio, leave, wait-all;
+//   Legacy    — šiandieninis ciklas: viena riba ties T + --deadline-ms, apklausa 0,5 ms, be pertraukiklio, wait-all;
 //   Isolation — planas V10: Wr = P/4, M = 3, Late histerezė 8, futex (ašinis) laukimas; D = --deadline-ms (apkarpoma iki
-//               2P − G), leave, wait-all (spragų politika ir startas keičiami vėliau — V17, V18).
+//               2P − G), wait-all (startas keičiamas V18).
+// Abiem: spragų politika — --on-loss / --hold-ms (V17, K3; numatyta invalid).
 enum class EngineTiming { Legacy, Isolation };
 
-// read_offset_ns — ro (logo: --read-offset-us; gen: 0). Trukmė, warmup, --rt-priority, --cpu-affinity — iš parinkčių.
+// read_offset_ns — ro (logo: --read-offset-us; gen: 0). Trukmė, warmup, --rt-priority, --cpu-affinity, spragų politika
+// (--on-loss, --hold-ms; K3) — iš parinkčių, abiem ribų režimais.
 engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t read_offset_ns);
+
+// --on-loss reikšmė → politika (invalid | freeze | black | leave; nežinoma — invalid, CLI ją jau atmeta).
+engine::GapPolicy gap_policy(const std::string& s);
+
+// K3 spragų užpildymas išėjimams (planas §6 D4): Repeat / Black kopija pagal išėjimo saugyklą — host: memcpy; cuda-linear:
+// D2D į savo stream'ą ir vienas sync prieš commit (MxlVideoOutput flush). Juodi grain'ai paruošiami iš anksto (prepare —
+// prieš variklio run(), tick'e nealokuojama) ir tik freeze / black politikai: invalid papildomos atminties nekainuoja.
+// Naudojimas: prepare(v.raster) → ports.emplace_back(v, gf.copy(), gf.flush(), gf.black(v.raster)).
+// cuda — išėjimai cuda-linear; tada konstruktorius kviečiamas po cudaSetDevice (stream'as ir buferiai — tame įrenginyje).
+class GapFill {
+public:
+    GapFill(engine::GapPolicy p, bool cuda);
+    ~GapFill();
+    GapFill(const GapFill&) = delete;
+    GapFill& operator=(const GapFill&) = delete;
+
+    bool prepare(const vramflow::gfx::Raster& r, std::string& err);  // false — CUDA klaida (err)
+    engine::GrainCopy copy() const;
+    std::function<bool()> flush() const;                      // host — tuščias (kopija sinchroninė)
+    const void* black(const vramflow::gfx::Raster& r) const;  // nullptr — politikai juodo nereikia / neparuošta
+    std::uint64_t black_bytes() const { return black_bytes_; }  // paruoštų juodų grain'ų atmintis (VRAM, kai cuda-linear)
+
+private:
+    struct Black {
+        vramflow::gfx::Raster r;
+        void* p = nullptr;
+        std::vector<std::uint8_t> host;
+    };
+    engine::GapPolicy policy_;
+    bool cuda_;
+    void* stream_ = nullptr;  // cudaStream_t (antraštė be CUDA)
+    std::vector<Black> black_;
+    std::uint64_t black_bytes_ = 0;
+};
 
 // „0,2-3“ → {0, 2, 3}; false — netinkamas sąrašas (tuščias — tinkamas, nieko).
 bool parse_cpu_list(const std::string& s, std::vector<int>& out);

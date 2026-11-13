@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "func/engine_glue.hpp"
 
+#include <cuda_runtime_api.h>
 #include <mxl/time.h>
 
 #include <cstdio>
@@ -23,9 +24,10 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
         c.stall_after = 3;
         c.late_clear_run = 8;
         c.wait = engine::WaitMode::Pivot;
-        c.on_loss = engine::GapPolicy::Leave;
         c.start = engine::StartMode::WaitAll;
     }
+    c.on_loss = gap_policy(o.on_loss);  // K3: abiem ribų režimais (gen, dec, gfxgen — Legacy; logo, composite, enc — Isolation)
+    c.hold_ns = static_cast<std::int64_t>(o.hold_ms) * 1'000'000;
     std::string warn;
     if (engine::clamp_deadline(c.cuts, warn)) std::fprintf(stderr, "[vramflow] %s\n", warn.c_str());
     c.duration_s = o.duration_s;
@@ -34,6 +36,84 @@ engine::EngineConfig engine_config(const Opts& o, EngineTiming t, std::int64_t r
     c.rt_priority = o.rt_priority;
     parse_cpu_list(o.cpu_affinity, c.cpu_affinity);  // patikrinta CLI
     return c;
+}
+
+engine::GapPolicy gap_policy(const std::string& s) {
+    if (s == "freeze") return engine::GapPolicy::Freeze;
+    if (s == "black") return engine::GapPolicy::Black;
+    if (s == "leave") return engine::GapPolicy::Leave;
+    return engine::GapPolicy::Invalid;
+}
+
+GapFill::GapFill(engine::GapPolicy p, bool cuda) : policy_(p), cuda_(cuda) {
+    if (!cuda_) return;
+    cudaStream_t s = nullptr;
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess) stream_ = s;
+    else cudaGetLastError();  // be stream'o kopija nepavyks (copy grąžina false → commit_errors), ne tyliai
+}
+
+GapFill::~GapFill() {
+    for (Black& b : black_)
+        if (cuda_ && b.p) cudaFree(b.p);
+    if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
+}
+
+bool GapFill::prepare(const vramflow::gfx::Raster& r, std::string& err) {
+    if (policy_ != engine::GapPolicy::Freeze && policy_ != engine::GapPolicy::Black) return true;  // invalid / leave — nereikia
+    if (black(r)) return true;
+    Black b;
+    b.r = r;
+    b.host = engine::black_grain(r);
+    if (cuda_) {
+        if (!stream_) {
+            err = "GapFill: cudaStreamCreate nepavyko";
+            return false;
+        }
+        const cudaError_t e1 = cudaMalloc(&b.p, b.host.size());
+        const cudaError_t e2 = e1 == cudaSuccess ? cudaMemcpy(b.p, b.host.data(), b.host.size(), cudaMemcpyHostToDevice) : e1;
+        if (e2 != cudaSuccess) {
+            cudaGetLastError();
+            if (b.p) cudaFree(b.p);
+            err = std::string("GapFill: juodo grain'o VRAM buferis: ") + cudaGetErrorString(e2);
+            return false;
+        }
+        b.host.clear();
+        b.host.shrink_to_fit();
+        black_bytes_ += vramflow::gfx::grain_bytes(r);
+    } else {
+        b.p = b.host.data();
+        black_bytes_ += b.host.size();
+    }
+    black_.push_back(std::move(b));
+    if (!cuda_) black_.back().p = black_.back().host.data();  // vektorius perkeltas — rodyklė iš naujo
+    return true;
+}
+
+engine::GrainCopy GapFill::copy() const {
+    if (!cuda_) return engine::host_copy();
+    cudaStream_t s = static_cast<cudaStream_t>(stream_);
+    return [s](void* dst, const void* src, std::size_t n) {
+        if (!s) return false;
+        if (cudaMemcpyAsync(dst, src, n, cudaMemcpyDeviceToDevice, s) == cudaSuccess) return true;
+        cudaGetLastError();
+        return false;
+    };
+}
+
+std::function<bool()> GapFill::flush() const {
+    if (!cuda_) return {};
+    cudaStream_t s = static_cast<cudaStream_t>(stream_);
+    return [s] {
+        if (s && cudaStreamSynchronize(s) == cudaSuccess) return true;
+        cudaGetLastError();
+        return false;
+    };
+}
+
+const void* GapFill::black(const vramflow::gfx::Raster& r) const {
+    for (const Black& b : black_)
+        if (b.r == r) return b.p;
+    return nullptr;
 }
 
 bool parse_cpu_list(const std::string& s, std::vector<int>& out) {
@@ -179,6 +259,14 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
         put(st.flows[n].c, fr ? "late_skips_frames" : "late_skips", u.late_skips);
         put(st.flows[n].c, fr ? "warmup_skips_frames" : "warmup_skips", u.warmup_skips);
         put(st.flows[n].c, fr ? "clock_skips_frames" : "clock_skips", u.clock_skips);
+        if (fr) continue;  // enc — be MXL išėjimų (spragų politika taikoma tik MXL rašytojams)
+        // K3: kiek spragų commit'inta kokiu veiksmu (išėjimo skaitikliai; vienas išėjimas vienetui). gap_startup — paleidimo
+        // spragos (įėjimas dar niekada neprisijungė, --start immediate) — ne praradimas.
+        const engine::OutCounters& oc = hub.out(eng.out_id(n, 0));
+        put(st.flows[n].c, "gap_invalid", oc.gap_invalid);
+        put(st.flows[n].c, "gap_frozen", oc.gap_frozen);
+        put(st.flows[n].c, "gap_black", oc.gap_black);
+        put(st.flows[n].c, "gap_startup", oc.gap_startup);
     }
 }
 

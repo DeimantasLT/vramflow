@@ -230,7 +230,11 @@ int run_gen(const Opts& o) {
     // end_unit. Laikas — legacy (gen niekada nelaukia įėjimų; ro = 0 — commit'as ties T(i), kaip prieš migraciją).
     std::vector<engine::MxlVideoOutput> ports;
     ports.reserve(vout.size());
-    for (auto& v : vout) ports.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    // K3 (--on-loss): gen visada turi turinį — politika lieka vientisumui (variklio praleidimai nepildomi, K-T6)
+    GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
+    for (auto& v : vout)
+        if (!rc && !gap_fill.prepare(v.raster, st.fatal)) rc = 2;
+    for (auto& v : vout) ports.emplace_back(v, gap_fill.copy(), gap_fill.flush(), gap_fill.black(v.raster));
     // Sugedęs vienetas — jo video flow'as atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports, vout, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);

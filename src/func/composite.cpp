@@ -383,7 +383,11 @@ int run_composite(const Opts& o) {
     ports_in.reserve(in.size());
     ports_out.reserve(N);
     for (auto& slot : in) ports_in.emplace_back(slot, inst);
-    for (auto& v : out) ports_out.emplace_back(v, engine::host_copy(), nullptr, nullptr);
+    // K3 spragos (--on-loss): freeze / black kopija — host memcpy arba D2D (G); juodi grain'ai (kiekvienam rastrui) — dabar
+    GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
+    for (auto& v : out)
+        if (!rc && !gap_fill.prepare(v.raster, err)) { st.fatal = err; rc = 2; }
+    for (auto& v : out) ports_out.emplace_back(v, gap_fill.copy(), gap_fill.flush(), gap_fill.black(v.raster));
     // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports_out, out, inst, [&](std::size_t n) {
         if (!cpu) cudaSetDevice(dev);

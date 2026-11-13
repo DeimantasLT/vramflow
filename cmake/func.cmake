@@ -31,14 +31,16 @@ if(MXLV_BUILD_TESTS)
   catch_discover_tests(vramflow-flows-tests)
 
   # Gyvos stebėsenos JSON eilutės ir exit kodo politika (B1): StatsLines + engine_glue be likusios funkcijos.
-  add_executable(vramflow-glue-tests tests/func/test_stats_lines.cpp src/func/engine_glue.cpp src/func/stats_lines.cpp
-                 src/mxlio/common_io.cpp)
+  # V17: spragų politika (parinktys, GapFill host / cuda-linear, žemupio pabudimas nuo spragos) — tests/func/test_gap_policy.cpp.
+  add_executable(vramflow-glue-tests tests/func/test_stats_lines.cpp tests/func/test_gap_policy.cpp src/func/engine_glue.cpp
+                 src/func/stats_lines.cpp src/mxlio/common_io.cpp)
   vramflow_warnings(vramflow-glue-tests)
   target_include_directories(vramflow-glue-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(vramflow-glue-tests PRIVATE mxlv_engine_mxl mxlv_runtime mxlv_flows mxlv_common mxl::mxl
                         CUDA::cudart_static Threads::Threads Catch2::Catch2WithMain)
   set_target_properties(vramflow-glue-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
-  catch_discover_tests(vramflow-glue-tests)
+  catch_discover_tests(vramflow-glue-tests TEST_SPEC "~[realtime]")
+  catch_discover_tests(vramflow-glue-tests TEST_SPEC "[realtime]" PROPERTIES TIMEOUT 60 LABELS realtime RESOURCE_LOCK realtime)
 endif()
 
 if(MXLV_BUILD_TESTS)

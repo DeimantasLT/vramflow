@@ -24,6 +24,8 @@ struct PacingHooks {
     std::function<std::uint64_t()> now;
     // Kviečiamas ritmo gijoje po sėkmingo commit'o.
     std::function<void(std::uint64_t index)> on_commit;
+    // Kviečiamas ritmo gijoje po INVALID grain'o commit'o (indeksas be kadro — iki pirmo submit; K3).
+    std::function<void(std::uint64_t index)> on_gap;
     // Jei grąžina true, ritmo gijos commit'as laikomas nepavykusiu (klaidos kelio testams).
     std::function<bool()> fail_commit;
     // vfgfx_submit_at: kviečiamas po kadro konvertavimo, prieš įdedant į eilę (lenktynių su ritmo gija testams).

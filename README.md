@@ -229,6 +229,10 @@ Rules worth knowing:
   `MXL_GRAIN_FLAG_INVALID` instead of skipping it; do not invent a picture.
 - A grain flagged `MXL_GRAIN_FLAG_INVALID` reads as OK; check `info.flags` and `info.index` (MXL does not check that
   the index you got is the one you asked for).
+- **An INVALID grain means "no content for this index", not an error of the flow.** A reader that is itself a writer
+  applies its own gap policy to its output for that index (VRAMFlow functions: `--on-loss`, see section 6) and goes on;
+  it never copies the stale payload of an INVALID grain. A reader blocked on an index wakes up as soon as the INVALID
+  grain is committed — it does not wait for the next grain.
 
 ### 5.2 Graphics from any program: `libvramflow-gfx`
 
@@ -283,9 +287,14 @@ enum values keep it, so a program built against epoch 1 keeps working with later
 Link with `-lvramflow-gfx -lmxl`. Thanks to the C ABI the library also works from other languages
 (see `tests/gfx_ctypes_smoke.py`).
 
+A paced writer commits every index: until the first `vfgfx_submit` / `vfgfx_submit_at` frame is current, each grain is
+committed with `MXL_GRAIN_FLAG_INVALID` (counted in `stats.no_frame`, not in `stats.committed`); from the first frame on,
+the current frame repeats until it is replaced. This is a behaviour change of release 0.2 (before, nothing was committed
+until the first frame); see *GAPS* in `gfx.h`.
+
 A graphics flow behaves like any other flow. If a source stops or restarts, the compositor does not invent a picture:
-that output grain is not committed (readers see a gap, as with a stopped video writer), and output continues when the
-source returns.
+it commits that output index according to its `--on-loss` policy (default: an INVALID grain), and output content
+continues when the source returns.
 
 ### 5.3 Example: an OGraf graphic over video
 
@@ -323,6 +332,19 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 | `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
+
+Options of the MXL video writers (`gen`, `logo`, `composite`, `dec`) — every index is committed (gap policy K3):
+
+| Option | Meaning |
+|---|---|
+| `--on-loss invalid\|freeze\|black` | An index without content (input gone or late, decoder underrun): `invalid` (default) commits an INVALID grain — nothing is invented, a reader wakes up at once; `freeze` repeats the last good grain of the same field parity for at most `--hold-ms`, then black; `black` commits a black grain at once (`v210a`: transparent). Without any good grain yet, `freeze` is black. Interlaced: with `freeze` / `black` content returns only on a frame boundary (even index) |
+| `--hold-ms N` | `freeze`: how long to repeat, default 1000 |
+
+Per flow, the summary counts the committed gaps by action: `gap_invalid`, `gap_frozen`, `gap_black` (and `gap_startup`
+for start-up gaps, which are not losses). Indices the engine itself skipped because it woke up late (`late_skips`) are
+not filled: MXL marks them invalid when the next index is opened. Cost per gap (1080i50 grain, 2.76 MB): `invalid`
+≈ 0.2 µs; `freeze` / `black` one copy — host `memcpy` ≈ 80–100 µs, GPU D2D ≈ 27 µs (`freeze` and `black` also keep one
+black grain per raster in the flow's memory).
 
 ### Commands
 
@@ -392,8 +414,8 @@ inputs and prints `laukiu flow <id>, N s` to stderr every 5 s while it waits.
 - If a producer disappears (killed, or its flow replaced), the reader notices within about one grain, keeps running and
   counts every index it could not produce as `missing_fields` (`missing_frames` in `enc`; `missing` in `verify`). When
   the producer comes back with the same flow ID, the reader attaches again by itself (`reattached` per flow; `reopened`
-  in `composite`) and continues. Indices of the gap are not written to its own output yet (a reader downstream sees a gap);
-  marking them as INVALID grains is planned with the gap policy (plan item P5).
+  in `composite`) and continues. Every index of the gap is still committed to its own output according to `--on-loss`
+  (default: INVALID grains, counted as `gap_invalid`), so a reader downstream never waits on a missing index.
 - A restarted producer removes the stale flows of its killed predecessor (`mxlGarbageCollectFlows`) before it creates its
   own, so a restart with the same flow IDs works. A flow that still has a live writer is never removed.
 - `SIGINT` / `SIGTERM` while waiting for inputs ends the function cleanly with exit code `0`.

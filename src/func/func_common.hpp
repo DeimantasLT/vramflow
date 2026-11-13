@@ -65,6 +65,11 @@ struct Opts {
     std::string run_id;
     std::int64_t input_wait_ms = 0;
     std::string on_format_change = "exit";
+    // Spragų politika (production-grade §6 K3, planas §6 D4): rašytojas commit'ina KIEKVIENĄ indeksą; be turinio —
+    // invalid (MXL_GRAIN_FLAG_INVALID, turinys neišgalvojamas; numatyta) | freeze (paskutinis geras to paties pariteto grain'as
+    // ne ilgiau kaip hold_ms, tada juoda) | black (juodas grain'as iškart). leave — tik testams (nieko necommit'inti).
+    std::string on_loss = "invalid";
+    std::uint32_t hold_ms = 1000;
     // gen
     std::uint32_t complexity = 2;
     bool audio = false;

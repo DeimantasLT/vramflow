@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <atomic>
 #include <condition_variable>
@@ -366,6 +367,36 @@ int run_verify(const Opts& o_in) {
     std::uint64_t i = warm_idx;
     // logotipo stačiakampis grupėmis (už jo išėjimas turi sutapti su įėjimu)
     const int g0 = o.logo_x / 6, g1 = (o.logo_x + logo.w + 5) / 6;
+    // K3 spragos (logo): paskutinis etalonui atitikęs išėjimo grain'as kiekvienam paritetui (buferiai sukeičiami, ne
+    // kopijuojami). Kai įėjimo grain'o nėra, o išėjimas yra (ne INVALID), jis klasifikuojamas: == paskutinis geras to paties
+    // pariteto (gap_repeat — freeze), juodas (gap_black — Y 64, Cb / Cr 512 visose aktyviose grupėse) ar kita (gap_other —
+    // išgalvotas turinys). Pilnam vaizdui reikia --every 1 (kitaip „paskutinis geras“ — paskutinė imtis).
+    std::vector<std::array<std::vector<std::uint32_t>, 2>> good(o.flows);
+    std::vector<std::array<std::uint64_t, 2>> good_idx(o.flows, {~0ull, ~0ull});
+    auto is_black = [&](const std::vector<std::uint32_t>& g) {
+        const std::size_t lines = gwords / static_cast<std::size_t>(words);
+        for (std::size_t j = 0; j < lines; ++j)
+            for (int q = 0; 6 * q + 6 <= dim.w; ++q) {
+                media::Group a;
+                media::unpack_group(g.data() + j * static_cast<std::size_t>(words) + 4 * q, a);
+                for (int c = 0; c < 6; ++c)
+                    if (a.y[c] != 64) return false;
+                for (int c = 0; c < 3; ++c)
+                    if (a.cb[c] != 512 || a.cr[c] != 512) return false;
+            }
+        return true;
+    };
+    // Pirmą kartą klasifikuojant spragą — ir paskutinis geras indeksas prieš ją (last_good_index; raktas atsiranda tik su
+    // spragomis, kad be jų santraukos raktų aibė nepakistų).
+    auto mark = [&](FlowStats& f, std::uint32_t n, const char* first, const char* last, std::uint64_t i) {
+        if (!f.c.count("last_good_index")) {
+            const std::uint64_t a = good_idx[n][0], b = good_idx[n][1];
+            const std::uint64_t g = a == ~0ull ? b : b == ~0ull ? a : std::max(a, b);
+            if (g != ~0ull) f.c["last_good_index"] = g;
+        }
+        if (!f.c.count(first)) f.c[first] = i;
+        f.c[last] = i;
+    };
 
     while (!stop.load() && now_tai() < end_tai) {
         // laukiam, kol laukas i bus seniai commit'intas (lag), bet dar ring'e (lag < gc-2)
@@ -392,6 +423,18 @@ int run_verify(const Opts& o_in) {
                 mxlGrainInfo ii{};
                 if (in[n].get(i, 0, ii, ip) != MXL_STATUS_OK || (ii.flags & MXL_GRAIN_FLAG_INVALID) || !copy_field(in[n].in(), ip, hi, gwords)) {
                     f.inc("sample_in_unavailable");
+                    // įėjimo nėra, išėjimas yra: spragos turinys pagal politiką (freeze / black) — ar ne išgalvotas
+                    const int par = inter ? static_cast<int>(i & 1) : 0;
+                    if (good_idx[n][par] != ~0ull && ho == good[n][par]) {
+                        f.inc("gap_repeat");
+                        mark(f, n, "gap_repeat_first", "gap_repeat_last", i);
+                    } else if (is_black(ho)) {
+                        f.inc("gap_black");
+                        mark(f, n, "gap_black_first", "gap_black_last", i);
+                    } else {
+                        f.inc("gap_other");
+                        mark(f, n, "gap_other_first", "gap_other_last", i);
+                    }
                     continue;
                 }
             }
@@ -486,6 +529,11 @@ int run_verify(const Opts& o_in) {
             if (outside) { f.inc("outside_diff_fields"); f.inc("outside_diff_words", outside); }
             const std::uint32_t mk = media::ref::decode_marker(ho.data(), words);
             if (mk != media::marker_word(i, o.flow_base + n)) f.inc("marker_bad");
+            if (logo_mode && !bad && !outside) {  // geras turinys — spragų klasifikacijai (sukeitimas, be kopijos)
+                const int par = inter ? static_cast<int>(i & 1) : 0;
+                std::swap(good[n][par], ho);
+                good_idx[n][par] = i;
+            }
         }
         if (st.first_index == ~0ull) st.first_index = i;
         st.last_index = i;

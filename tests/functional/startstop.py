@@ -5,8 +5,10 @@
 
 fstart_order    — logo ir verify paleisti 20 s (> buvusios 15 s ribos) PRIEŠ gen: abu laukia (eilutė „laukiu flow“), po gen
                   starto dirba normaliai: logo be praradimų, verify 0 teisingumo klaidų, abu exit 0.
-fstart_restart  — gen nužudomas (kill -9) ir po 5 s paleidžiamas vėl: logo gyvas, reattached == 1, spraga suskaičiuota
-                  (missing_fields > 0), kitų praradimų 0, išėjimas vėl juda; verify 0 teisingumo klaidų.
+fstart_restart  — gen nužudomas (kill -9) ir po 5 s paleidžiamas vėl: logo gyvas, reattached == 1, spraga suskaičiuota ir
+                  KIEKVIENAS jos indeksas commit'intas INVALID (V17 K3: gap_invalid == missing_fields > 0; anksčiau — tik
+                  missing_fields > 0, išėjime indeksų nebuvo), verify missing == 0, kitų praradimų 0, išėjimas vėl juda;
+                  verify 0 teisingumo klaidų.
 fstart_wait     — `--input-wait-ms 1500` be gamintojo → exit 4, aiškus tekstas (riba, parinktis, flow ID);
                   `--input-wait-ms 0` (neribotai) po 17 s vis dar laukia, SIGTERM → tvarkingai exit 0.
 fstart_owner    — antras gen tame pačiame domene su tuo pačiu --flow-base → exit != 0, tekste pirmojo run_id; pirmasis
@@ -132,13 +134,17 @@ def fstart_restart(out):
         fl = (sl or {}).get("flows") or [{}]
         reatt = [f.get("reattached", 0) for f in fl]
         missing = [f.get("missing_fields", 0) for f in fl]
+        gap_inv = [f.get("gap_invalid", 0) for f in fl]
+        fvs = (sv or {}).get("flows") or [{}]
+        v_missing = sum(f.get("missing", 0) for f in fvs)
         lost = logo_losses(sl)
         pv = (sv or {}).get("proc") or {}
         advancing = h1 is not None and h2 is not None and h2 - h1 >= 80  # 2 s = 100 laukų
         ok = (alive and rl in (0, 4) and sl is not None and all(r == 1 for r in reatt) and all(m > 0 for m in missing)
-              and sum(lost.values()) == 0 and advancing and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0)
+              and gap_inv == missing and v_missing == 0 and sum(lost.values()) == 0 and advancing and pv.get("verification_errors", 1) == 0 and pv.get("samples_total", 0) > 0)
         res.append(F.result(tid, "PASS" if ok else "FAIL",
-                            why=f"gyvi per outage={alive} logo exit={rl} reattached={reatt} missing_fields={missing} kiti={lost} "
+                            why=f"gyvi per outage={alive} logo exit={rl} reattached={reatt} missing_fields={missing} gap_invalid={gap_inv} "
+                                f"verify missing={v_missing} kiti={lost} "
                                 f"head po paleidimo {h1}->{h2} verify exit={rv} verification_errors={pv.get('verification_errors')} "
                                 f"capacity_errors={pv.get('capacity_errors')} samples={pv.get('samples_total')}",
                             logo=sl, verify=sv))
