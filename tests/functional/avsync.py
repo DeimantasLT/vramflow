@@ -210,8 +210,12 @@ def median_lateness(flow):
 def favsync_late_audio(out):
     """Garsas kiekvieną kadrą vėluoja 20 ms (gen --audio-late-ms 20: kadro garsas baigiamas ties T + P, kaip realaus laiko
     rašytojo), N = 4 srautai, vėluoja tik srauto 0 garsas. Reikalavimai: srautas 0 — 0 tylių kadrų (audio_underrun_frames == 0,
-    audio_silence_samples == 0), A/V poslinkis ≤ 1 AAC kadras, srauto vėlavimas ≥ 20 ms (scenarijus tikras); kiti srautai —
-    vėlavimas nepakitęs: jų sekundžių maksimumų mediana ≤ kontrolinio paleidimo (be vėlavimo) + 1 ms; abu exit 0."""
+    audio_silence_samples == 0), A/V poslinkis ≤ 1 AAC kadras, srauto vėlavimas ≥ 20 ms (scenarijus tikras); abu exit 0.
+    Kiti srautai (pakeista V24, briaunos sutartis, K-T10 „viena fazė varikliui“, rizika R11): vėluojančio garso žyma
+    (commit-bound-ns = 20 ms + gen riba) pakelia VISO enc variklio fazę E, todėl kitų srautų vėlavimas padidėja aiškiai ir
+    paskelbtai — tikrinama, kad jų mediana ≤ enc skelbiamos ribos (commit_bound_us) ir kad E == garso žyma; anksčiau (atskira
+    enc garso taisyklė) — „mediana ≤ kontrolinio + 1 ms“. Fazių grupės viename variklyje grąžintų ankstesnį elgesį — autoriaus
+    sprendimas."""
     res = []
     D = 20
     for k, (tag, impl, storage, enc) in enumerate(variants()):
@@ -239,11 +243,18 @@ def favsync_late_audio(out):
         if m0 is None or m0 < 20.0:
             bad.append(f"srauto 0 vėlavimo mediana {m0} ms < 20 (garsas nevėlavo?)")
         others = []
+        lp = late["enc"].get("proc") or {}
+        bound_ms = lp.get("commit_bound_us", 0) / 1000
+        if lp.get("expect_us", 0) < 20_000:
+            bad.append(f"enc fazė E={lp.get('expect_us')} µs < 20 ms (vėluojančio garso žyma neperskaityta?)")
         for n in range(1, min(len(fl), len(fc))):
             a, b = median_lateness(fl[n]), median_lateness(fc[n])
             others.append((n, a, b))
-            if a is None or b is None or a > b + 1.0:
-                bad.append(f"srauto {n} vėlavimo mediana {a} ms > kontrolinio {b} + 1 ms")
+            if a is None or b is None or a > bound_ms:
+                bad.append(f"srauto {n} vėlavimo mediana {a} ms > enc skelbiamos ribos {bound_ms} ms")
+            for key in ("audio_underrun_frames", "audio_silence_samples", "late_frames", "missing_frames"):
+                if fl[n].get(key, 0):
+                    bad.append(f"srautas {n} {key}={fl[n].get(key)}")
         res.append(F.result(tid, "FAIL" if bad else "PASS",
                             why=f"{'; '.join(bad) or 'be tylos, A/V ≤ 1 AAC kadras, kiti nepaveikti'} | srautas 0: "
                                 f"underrun={f0.get('audio_underrun_frames', 0)} silence={f0.get('audio_silence_samples', 0)} "
