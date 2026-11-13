@@ -391,6 +391,7 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
         rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
     rec["policy"] = policy or "invalid"
     rec["deadline_us"] = (sl.get("proc") or {}).get("deadline_us")
+    rec["expect_us"] = (sl.get("proc") or {}).get("expect_us", 0)  # V24: fazė E (aukštupio gen skelbiama riba)
     rec["verify_last_index"] = sv.get("last_index")
     if vg is not None:
         sg = F.vsummary(vg, "verify-logo")
@@ -690,14 +691,16 @@ def logo_gate(fault, r):
     if fault == "stall":
         if fa.get("stalls", 0) < 1:
             bad.append(f"paveikto stalls={fa.get('stalls', 0)} < 1")
-        # V20: su numatytosiomis (be --deadline-ms) užstrigusio įėjimo spraga commit'inama ties B = T + D, D = 3·P/4 = 15 ms;
-        # kol įėjimas Late (iki Stalled, M = 3) — bent 3 tokios spragos, kiekviena 15 ms ± 1 ms po T(i)
+        # V20: su numatytosiomis (be --deadline-ms) užstrigusio įėjimo spraga commit'inama ties B = T + E + D, D = 3·P/4 = 15 ms;
+        # kol įėjimas Late (iki Stalled, M = 3) — bent 3 tokios spragos. V24 (pakeistas lūkestis): riba skaičiuojama nuo T + E,
+        # E — gen skelbiama commit'o riba (8 ms), todėl spragos ties E + D = 23 ms (anksčiau — 15 ms po T(i))
         if r.get("deadline_us") != DEADLINE_US:
             bad.append(f"logo deadline_us={r.get('deadline_us')} ≠ {DEADLINE_US} (numatytoji 3·P/4)")
+        cut = DEADLINE_US + (r.get("expect_us") or 0)
         lo, hi, nl_ = fa.get("gap_late_commit_min_us"), fa.get("gap_late_commit_max_us"), fa.get("gap_late_commits", 0)
-        if nl_ < 3 or lo is None or hi is None or lo < DEADLINE_US - DEADLINE_TOL_US or hi > DEADLINE_US + DEADLINE_WAKE_US:
+        if nl_ < 3 or lo is None or hi is None or lo < cut - DEADLINE_TOL_US or hi > cut + DEADLINE_WAKE_US:
             bad.append(f"paveikto spragų commit'ai ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
-                       f"[{DEADLINE_US - DEADLINE_TOL_US}, {DEADLINE_US + DEADLINE_WAKE_US}] µs (D − 1 ms … D + pabudimo riba)")
+                       f"[{cut - DEADLINE_TOL_US}, {cut + DEADLINE_WAKE_US}] µs (E + D − 1 ms … E + D + pabudimo riba)")
         post = r.get("post") or {}
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
                 post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):
