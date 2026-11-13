@@ -90,6 +90,8 @@ private:
     Index last_ = kNoIndex;
     std::uint32_t n_ = 0;
     std::uint64_t attaches_ = 0;
+    std::uint64_t detach_head_ = 0;  // MXL head (mėginiai) atjungimo metu; re-attach — tik jam pajudėjus (lastWriteTime nėra)
+    bool detached_ = false;
 };
 
 // Kopija į grain'o slot'ą: host — memcpy; cuda-linear — D2D į funkcijos stream'ą (tada flush — to stream'o sync).

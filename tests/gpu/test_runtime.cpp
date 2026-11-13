@@ -463,3 +463,102 @@ TEST_CASE("input_slot: vėluojantis, bet gyvas gamintojas neatjungiamas", "[runt
     slot.release();
     p.stop();
 }
+
+// Peržiūra 2026-11-13 p. 5 — klaidingas re-attach. mxlIsFlowActive pats ima flock(LOCK_EX | LOCK_NB) flow duomenų failui, todėl
+// kitas procesas / gija, tuo pat metu tikrinantis tą patį NEGYVĄ flow'ą, atrodo kaip „gyvas writer'is“; slot'as tada
+// prisijungdavo prie pasenusio flow'o (tikrino tik head ≠ 0) ir skaičiuodavo reattached. Du skaitytojai (atskiros gijos)
+// tikrina vieną negyvą flow'ą 30 s, trečia gija nuolat kviečia mxlIsFlowActive (kaip kiti skaitytojai tuo pačiu ritmu):
+// 0 klaidingų re-attach; tikras gamintojo paleidimas iš naujo — lygiai 1 kiekvienam.
+TEST_CASE("input_slot: du skaitytojai tikrina negyvą flow'ą 30 s — 0 klaidingų re-attach; tikras paleidimas — 1",
+          "[runtime][mxl][reattach]") {
+    Domain d(20);
+    const std::string id = flow_id(kRoleGen, 20);
+    // Gamintojas — atskiras procesas, nužudomas SIGKILL (kaip tikras gedimas: flow failai lieka, flock atlaisvinamas)
+    int fds[2];
+    REQUIRE(::pipe(fds) == 0);
+    const pid_t pid = ::fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        mxlInstance ci = mxlCreateInstance(d.dir.c_str(), "");
+        Producer cp;
+        const char ok = ci && cp.start(ci, 20, vramflow::kFmt1080i50) ? 'y' : 'n';
+        (void)!::write(fds[1], &ok, 1);
+        for (;;) {
+            cp.commit_now();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    }
+    char okc = 0;
+    const bool child_ok = ::read(fds[0], &okc, 1) == 1 && okc == 'y';
+    ::close(fds[0]);
+    ::close(fds[1]);
+    if (!child_ok) {
+        ::kill(pid, SIGKILL);
+        ::waitpid(pid, nullptr, 0);
+    }
+    REQUIRE(child_ok);
+    InputSlot a(id, &vramflow::kFmt1080i50, FormatChange::Exit), b(id, &vramflow::kFmt1080i50, FormatChange::Exit);
+    // kiekvienas skaitytojas — savo instancija (kaip atskiri procesai); flock konfliktuoja tarp skirtingų open() aprašų
+    mxlInstance ib = mxlCreateInstance(d.dir.c_str(), ""), ih = mxlCreateInstance(d.dir.c_str(), "");
+    REQUIRE(ib != nullptr);
+    REQUIRE(ih != nullptr);
+    REQUIRE(poll_while(a, d.inst, InputSlot::State::Waiting, 1000) == InputSlot::State::Attached);
+    REQUIRE(poll_while(b, ib, InputSlot::State::Waiting, 1000) == InputSlot::State::Attached);
+    ::kill(pid, SIGKILL);
+    ::waitpid(pid, nullptr, 0);
+    REQUIRE(poll_while(a, d.inst, InputSlot::State::Attached, 1000) == InputSlot::State::Detached);
+    REQUIRE(poll_while(b, ib, InputSlot::State::Attached, 1000) == InputSlot::State::Detached);
+    std::atomic<bool> quit{false};
+    std::atomic<std::uint64_t> probes{0}, false_active{0};
+    auto reader = [&](InputSlot& s, mxlInstance inst) {
+        const mxlRational r = mxl_rate(vramflow::kFmt1080i50.grain_rate());
+        while (!quit.load()) {
+            if (s.poll(inst, mxlGetTime()) == InputSlot::State::Attached) {  // kaip variklio tick'as: get dabartiniam indeksui
+                mxlGrainInfo info{};
+                const std::uint32_t* ptr = nullptr;
+                (void)s.get(mxlGetCurrentIndex(&r) + 1, 0, info, ptr);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    };
+    std::thread ta(reader, std::ref(a), d.inst), tb(reader, std::ref(b), ib);
+    // Du nuolatiniai tikrintojai (kaip kiti skaitytojai tuo pačiu ritmu): vienas kito flock'ą mato kaip „gyvą writer'į“
+    mxlInstance ih2 = mxlCreateInstance(d.dir.c_str(), "");
+    REQUIRE(ih2 != nullptr);
+    auto hammer_fn = [&](mxlInstance hi) {
+        while (!quit.load()) {
+            bool active = false;
+            if (mxlIsFlowActive(hi, id.c_str(), &active) == MXL_STATUS_OK && active) false_active.fetch_add(1);  // writer'io nėra
+            probes.fetch_add(1);
+        }
+    };
+    std::thread hammer(hammer_fn, ih), hammer2(hammer_fn, ih2);
+    std::this_thread::sleep_for(std::chrono::seconds(30));
+    quit = true;
+    ta.join();
+    tb.join();
+    hammer.join();
+    hammer2.join();
+    // Priežasties įrodymas: negyvas flow'as kartais atrodo „aktyvus“ — kai jį tuo pat metu tikrina kitas skaitytojas (flock)
+    std::printf("MEASURE mxlIsFlowActive: %llu tikrinimų negyvam flow'ui, iš jų 'active' %llu\n",
+                static_cast<unsigned long long>(probes.load()), static_cast<unsigned long long>(false_active.load()));
+    CHECK(false_active.load() > 0);
+    CHECK(probes.load() > 1000);
+    CHECK(a.reattached() == 0);
+    CHECK(b.reattached() == 0);
+    CHECK(a.state() == InputSlot::State::Detached);
+    CHECK(b.state() == InputSlot::State::Detached);
+    // tikras gamintojo paleidimas iš naujo tuo pačiu ID — lygiai vienas re-attach kiekvienam
+    Producer p2;
+    REQUIRE(p2.start(d.inst, 20, vramflow::kFmt1080i50));
+    CHECK(poll_while(a, d.inst, InputSlot::State::Detached, 1000, &p2) == InputSlot::State::Attached);
+    CHECK(poll_while(b, ib, InputSlot::State::Detached, 1000, &p2) == InputSlot::State::Attached);
+    CHECK(a.reattached() == 1);
+    CHECK(b.reattached() == 1);
+    a.release();
+    b.release();
+    p2.stop();
+    mxlDestroyInstance(ib);
+    mxlDestroyInstance(ih);
+    mxlDestroyInstance(ih2);
+}

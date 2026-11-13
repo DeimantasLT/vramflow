@@ -81,7 +81,7 @@ MxlAudioInput::MxlAudioInput(mxlInstance inst, std::string flow_id, AudioFrames 
 
 MxlAudioInput::MxlAudioInput(MxlAudioInput&& o) noexcept
     : inst_(o.inst_), id_(std::move(o.id_)), fr_(o.fr_), rd_(o.rd_), lb_(std::move(o.lb_)), rb_(std::move(o.rb_)), last_(o.last_),
-      n_(o.n_), attaches_(o.attaches_) {
+      n_(o.n_), attaches_(o.attaches_), detach_head_(o.detach_head_), detached_(o.detached_) {
     o.rd_ = nullptr;
 }
 
@@ -94,6 +94,17 @@ bool MxlAudioInput::attach_poll(std::uint64_t) {
     if (mxlCreateFlowReader(inst_, id_.c_str(), "", &rd_) != MXL_STATUS_OK) {
         rd_ = nullptr;
         return false;
+    }
+    // Po atjungimo (peržiūra 2026-11-13 p. 5): mxlIsFlowActive „gyvas“ gali būti kito skaitytojo flock — prisijungiama tik
+    // jei head nuo atjungimo pajudėjo (tęstinio flow'o lastWriteTime MXL neatnaujina)
+    if (detached_) {
+        mxlFlowRuntimeInfo rt{};
+        if (mxlFlowReaderGetRuntimeInfo(rd_, &rt) != MXL_STATUS_OK || rt.headIndex == MXL_UNDEFINED_INDEX || rt.headIndex <= detach_head_) {
+            mxlReleaseFlowReader(inst_, rd_);
+            rd_ = nullptr;
+            return false;
+        }
+        detached_ = false;
     }
     ++attaches_;
     return true;
@@ -159,7 +170,12 @@ bool MxlAudioInput::writer_alive() {
 }
 
 void MxlAudioInput::detach() {
-    if (rd_ != nullptr) mxlReleaseFlowReader(inst_, rd_);
+    if (rd_ != nullptr) {
+        mxlFlowRuntimeInfo rt{};
+        detach_head_ = mxlFlowReaderGetRuntimeInfo(rd_, &rt) == MXL_STATUS_OK && rt.headIndex != MXL_UNDEFINED_INDEX ? rt.headIndex : 0;
+        detached_ = true;
+        mxlReleaseFlowReader(inst_, rd_);
+    }
     rd_ = nullptr;
 }
 

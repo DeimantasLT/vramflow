@@ -54,6 +54,8 @@ InputSlot& InputSlot::operator=(InputSlot&& o) noexcept {
     next_alive_ = o.next_alive_;
     early_since_ = o.early_since_;
     reattached_ = o.reattached_;
+    detach_head_ = o.detach_head_;
+    detach_tai_ = o.detach_tai_;
     reason_ = std::move(o.reason_);
     o.in_.r = nullptr;
     o.state_ = State::Waiting;
@@ -68,6 +70,10 @@ void InputSlot::release() {
 }
 
 void InputSlot::detach() {
+    // Re-attach sąlygai: head ir momentas atjungimo metu (flow perkurtas — head neskaitomas: 0, tada lemia lastWriteTime)
+    const std::uint64_t h = in_.r ? in_.head() : MXL_UNDEFINED_INDEX;
+    detach_head_ = h == MXL_UNDEFINED_INDEX ? 0 : h;
+    detach_tai_ = mxlGetTime();
     release();
     early_since_ = 0;
     state_ = State::Detached;
@@ -110,6 +116,16 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
     if (h == MXL_UNDEFINED_INDEX || h == 0) {
         fresh.release(inst);
         return state_;
+    }
+    // Po atjungimo — tik jei flow'as nuo tada rašomas (head pajudėjo arba lastWriteTime šviežias): kitaip „gyvas“ buvo tik
+    // kito skaitytojo flock (mxlIsFlowActive), o flow'as — pasenęs.
+    if (state_ == State::Detached) {
+        mxlFlowRuntimeInfo rt{};
+        const bool info = mxlFlowReaderGetRuntimeInfo(fresh.r, &rt) == MXL_STATUS_OK;
+        if (!(h > detach_head_ || (info && rt.lastWriteTime > detach_tai_))) {
+            fresh.release(inst);
+            return state_;
+        }
     }
     in_ = std::move(fresh);
     if (!have_want_) {

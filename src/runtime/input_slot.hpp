@@ -6,6 +6,10 @@
 // Būsenos: Waiting (dar niekada neprijungtas), Attached, Detached (buvo prijungtas, gamintojas dingo), Mismatch (grįžo kitu
 // formatu / saugykla ir politika Exit — galutinė). Prisijungiama tik prie flow, kuris turi gyvą writer'į (mxlIsFlowActive) ir
 // jau gamina (head žinomas): pasenęs nužudyto gamintojo flow ignoruojamas.
+// Iš naujo (po Detached) — tik jei nuo atjungimo flow'as iš tikrųjų rašomas: head pajudėjo už atjungimo head'ą ARBA
+// lastWriteTime vėlesnis už atjungimo momentą (peržiūra 2026-11-13 p. 5). mxlIsFlowActive pats ima flock(LOCK_EX | LOCK_NB):
+// kitas procesas, tuo pat metu tikrinantis tą patį NEGYVĄ flow'ą, atrodo kaip „gyvas writer'is“ — be šios sąlygos slot'as
+// prisijungdavo prie pasenusio flow'o ir skaičiuodavo klaidingą re-attach.
 //
 // Gamintojo dingimas aptinkamas dviem keliais: MXL_ERR_FLOW_INVALID (flow perkurtas / ištrintas) ir gyvumo patikra, kai
 // grain'o nėra (TOO_EARLY) jau ilgiau kaip kAliveNs iš eilės (writer'is nužudytas, flow failai liko), tada ne dažniau kaip
@@ -87,6 +91,7 @@ private:
     std::uint64_t next_alive_ = 0;
     std::uint64_t early_since_ = 0;  // nuo kada grain'o nėra (TOO_EARLY iš eilės); 0 — paskutinis skaitymas pavyko
     std::uint64_t reattached_ = 0;
+    std::uint64_t detach_head_ = 0, detach_tai_ = 0;  // paskutinio atjungimo head ir momentas (re-attach sąlygai)
     std::string reason_;
 };
 
