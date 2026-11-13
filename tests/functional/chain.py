@@ -176,6 +176,12 @@ def fchain5_kill(out):
             bad.append(f"enc savi praradimai {el}")
         if rows["enc"]["exit"] != 0:
             bad.append(f"enc exit {rows['enc']['exit']}")
+        # D5: video spragos kadrų garsas (atskiras, gyvas garso šaltinis) koduojamas — audio_only_frames ≈ spragos kadrai
+        ef = rows["enc"]["flow"]
+        gap_frames = rows["composite"]["flow"].get("gap_upstream", 0) // 2
+        if ef.get("audio_only_frames", 0) < gap_frames - 2 or ef.get("audio_underrun_gap_frames", 0):
+            bad.append(f"enc spragų kadrų garsas: audio_only_frames {ef.get('audio_only_frames', 0)} < {gap_frames} - 2 arba "
+                       f"audio_underrun_gap_frames {ef.get('audio_underrun_gap_frames', 0)}")
         info = " | ".join(f"{k}: {({kk: v['flow'].get(kk) for kk in ('missing_fields', 'gap_upstream', 'gap_invalid', 'fields_ok', 'frames_encoded', 'gap_frames', 'audio_only_frames') if v['flow'].get(kk)})}"
                           for k, v in rows.items() if k != "gen")
         res.append(F.result(tid, "FAIL" if bad else "PASS", why=("; ".join(bad) or "ok") + " | " + info,

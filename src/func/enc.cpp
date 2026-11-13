@@ -537,11 +537,15 @@ int run_enc(const Opts& o) {
         s.cv.notify_one();
         st.flows[n].inc("audio_only_frames");
     };
+    // Peržiūra D5: kadro, kurio video — spraga, garsas imamas spragos sprendimo metu, t. y. ne anksčiau kaip T + E (variklio
+    // fazė, V24): E ≥ garso įėjimo expect_ns (žyma arba P), todėl pagal sutartį garsas jau yra. Tikrai trūkstamas — skaičiuojamas
+    // audio_underrun_gap_frames (ne šios funkcijos praradimas: kadras ir taip be video; tyla — darbininko laiko juosta).
     auto audio_of_dropped = [&](std::uint32_t n, engine::Index i_bot) {
         if (ports_audio.empty()) return;
         Item item;
         item.frame = static_cast<std::int64_t>(i_bot / gpf);
         if (take_audio(n, i_bot, item, nullptr)) push_audio_only(n, std::move(item));
+        else st.flows[n].inc("audio_underrun_gap_frames");
     };
 
     // Bendras tick variklis (planas V12): N sink vienetų — video įėjimas (grains = laukų kadre, stride = gpf, tick'as
