@@ -110,7 +110,12 @@ FN_KEYS = ("fields_ok", "late_fields", "late_skips", "warmup_skips", "clock_skip
            "gap_frozen", "gap_black", "gap_startup", "gap_late_commits", "gap_late_commit_min_us", "gap_late_commit_max_us",
            "layer_absent")
 DEADLINE_US = 15_000  # V20 (K-T2): numatytoji --deadline-ms = 3·P/4 prie 50 Hz
-DEADLINE_TOL_US = 1_000
+DEADLINE_TOL_US = 1_000  # anksčiau nei D − 1 ms — klaida (spraga per anksti)
+# Garantija (peržiūra 2026-11-13 p. 7a): spraga commit'inama ne vėliau kaip riba D + išmatuota pabudimo riba. Matavimas
+# (tests/func/test_gap_policy.cpp [gapcommit], 2072 spragos ties D = 15 ms, WSL2): commit − T(i) p50 15,28 / p99 16,29 /
+# maks. 16,65 ms; futex laukimo pabudimas po prašyto laiko p50 0,25 / p99 1,21 / maks. 1,44 ms; apdorojimas iki commit'o p50
+# 0,025 / p99 0,05 ms (maks. 1,2 ms — juodo turinio rašymas pirmame rate). Papildomas laikas — ne apdorojimas, o pabudimas.
+DEADLINE_WAKE_US = 2_000
 ENC_KEYS = ("frames_encoded", "late_frames", "late_skips_frames", "warmup_skips_frames", "clock_skips_frames", "missing_frames",
             "lapped", "too_late", "in_invalid", "frames_dropped_queue", "encode_errors", "mux_errors", "reattached",
             "audio_underrun_frames", "audio_silence_samples", "packets_audio", "lateness_max_us")
@@ -687,9 +692,9 @@ def logo_gate(fault, r):
         if r.get("deadline_us") != DEADLINE_US:
             bad.append(f"logo deadline_us={r.get('deadline_us')} ≠ {DEADLINE_US} (numatytoji 3·P/4)")
         lo, hi, nl_ = fa.get("gap_late_commit_min_us"), fa.get("gap_late_commit_max_us"), fa.get("gap_late_commits", 0)
-        if nl_ < 3 or lo is None or hi is None or lo < DEADLINE_US - DEADLINE_TOL_US or hi > DEADLINE_US + DEADLINE_TOL_US:
+        if nl_ < 3 or lo is None or hi is None or lo < DEADLINE_US - DEADLINE_TOL_US or hi > DEADLINE_US + DEADLINE_WAKE_US:
             bad.append(f"paveikto spragų commit'ai ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
-                       f"{DEADLINE_US} ± {DEADLINE_TOL_US} µs")
+                       f"[{DEADLINE_US - DEADLINE_TOL_US}, {DEADLINE_US + DEADLINE_WAKE_US}] µs (D − 1 ms … D + pabudimo riba)")
         post = r.get("post") or {}
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
                 post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):

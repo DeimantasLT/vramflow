@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -32,6 +33,7 @@
 #include "func/flows.hpp"
 #include "mxlio/cuda_uuid.hpp"
 #include "mxlio/slots.hpp"
+#include "runtime/input_slot.hpp"
 
 using namespace mxlv;
 using namespace mxlv::engine;
@@ -406,4 +408,133 @@ TEST_CASE("gap_policy: matavimas — vienos spragos kaina (1080i50 grain'as)", "
         }
         o.release(d.inst);
     }
+}
+
+namespace {
+// Įėjimo prievadas, užrašantis kiekvieno blokuojančio laukimo (wait) grąžinimo momentą — kur dingsta laikas tarp ribos ir
+// spragos commit'o (futex pabudimas vs apdorojimas iki commit'o).
+class RecordingInput final : public InputPort {
+public:
+    struct Wait {
+        Index j;
+        std::uint64_t asked_until, returned;
+        Probe p;
+    };
+    explicit RecordingInput(InputPort& in) : in_(in) { waits.reserve(1 << 18); }
+    std::vector<Wait> waits;
+    bool attach_poll(std::uint64_t now) override { return in_.attach_poll(now); }
+    bool mismatch(std::string& why) const override { return in_.mismatch(why); }
+    Index head() override { return in_.head(); }
+    std::uint64_t last_write_tai() override { return in_.last_write_tai(); }
+    Probe probe(Index j, GrainRef& out) override { return in_.probe(j, out); }
+    Probe wait(Index j, std::uint64_t timeout_ns, GrainRef& out) override {
+        const std::uint64_t t0 = mxlGetTime();
+        const Probe p = in_.wait(j, timeout_ns, out);
+        if (waits.size() < waits.capacity()) waits.push_back({j, t0 + timeout_ns, mxlGetTime(), p});
+        return p;
+    }
+    bool writer_alive() override { return in_.writer_alive(); }
+    bool lapped(Index j, Index now_idx) override { return in_.lapped(j, now_idx); }
+    void detach() override { in_.detach(); }
+    void retarget(const FlowRef& f) override { in_.retarget(f); }
+
+private:
+    InputPort& in_;
+};
+
+class GapTimes final : public TickFunction {
+public:
+    std::vector<std::pair<Index, std::uint64_t>> gaps;  // (indeksas, end_unit momentas — iškart po spragos commit'o)
+    GapTimes() { gaps.reserve(1 << 14); }
+    bool process(const Batch&, TickContext&) override { return true; }
+    void end_unit(const UnitTick& ut, Outcome oc, TickContext&) override {
+        if (oc == Outcome::GapLate) gaps.emplace_back(ut.index, mxlGetTime());
+    }
+};
+
+std::string pct(std::vector<std::int64_t> v) {
+    if (v.empty()) return "n = 0";
+    std::sort(v.begin(), v.end());
+    char b[160];
+    std::snprintf(b, sizeof b, "p50 %.3f ms, p99 %.3f ms, max %.3f ms, min %.3f ms (n = %zu)", static_cast<double>(v[v.size() / 2]) / 1e6,
+                  static_cast<double>(v[v.size() * 99 / 100]) / 1e6, static_cast<double>(v.back()) / 1e6, static_cast<double>(v.front()) / 1e6,
+                  v.size());
+    return b;
+}
+}  // namespace
+
+// Peržiūra 2026-11-13 p. 7a: spragos commit'as ties riba (D = 3·P/4 = 15 ms, numatytosios ribos kaip logo). Rašytojas gyvas:
+// lyginiai grain'ai ties T + 1 ms, nelyginiai — ties T + 18 ms (po ribos), todėl kiekvienas nelyginis indeksas — riba praėjo,
+// spraga commit'inama (GapLate), o įėjimas niekada neužstringa (miss_run nusinulina). VRAMFLOW_GAP_MEASURE_N (numatyta 2000)
+// spragų. Spausdinama: commit − T(i); futex laukimo pabudimas − prašytas laikas (overshoot); commit − pabudimas (apdorojimas).
+TEST_CASE("gap_policy: matavimas — spragos commit'o laikas ties riba (2000 spragų)", "[.][measure][gapcommit]") {
+    const char* env = std::getenv("VRAMFLOW_GAP_MEASURE_N");
+    const std::size_t want = env ? static_cast<std::size_t>(std::strtoul(env, nullptr, 10)) : 2000;
+    Domain d(30);
+    VideoOut src, dst;
+    std::string err;
+    REQUIRE(src.create(d.inst, func::video_def(func::kRoleGen, 30, 1, k1080i), "", err, k1080i));
+    REQUIRE(dst.create(d.inst, func::video_def(func::kRoleLogo, 30, 1, k1080i), "", err, k1080i));
+    std::atomic<bool> wstop{false};
+    std::thread writer([&] {
+        const mxlRational r{50, 1};
+        std::uint64_t i = mxlGetCurrentIndex(&r) + 1;
+        while (!wstop.load()) {
+            const std::uint64_t at = mxlIndexToTimestamp(&r, i) + ((i & 1) ? 18'000'000ull : 1'000'000ull);
+            while (mxlGetTime() < at && !wstop.load()) mxlSleepUntil(at);
+            mxlStatus st{};
+            if (src.open(i, st)) src.commit();
+            ++i;
+        }
+    });
+    runtime::InputSlot slot(func::flow_id(func::kRoleGen, 30), &k1080i, runtime::FormatChange::Exit);
+    MxlVideoInput min(slot, d.inst);
+    RecordingInput rin(min);
+    GapFill gf(GapPolicy::Invalid, false);
+    REQUIRE(gf.prepare(dst.raster, err));
+    MxlVideoOutput port(dst, gf.copy(), gf.flush(), gf.black(dst.raster));
+    SystemClock clk;
+    StatsHub hub;
+    std::atomic<bool> stop{false};
+    EngineConfig cfg;
+    cfg.cuts = default_cuts({50, 1});
+    cfg.warmup_s = 0;
+    cfg.duration_s = static_cast<double>(want) / 25.0 + 3;  // kas antras indeksas — spraga
+    cfg.on_loss = GapPolicy::Invalid;
+    TickEngine eng(cfg, clk, hub, stop);
+    UnitSpec u;
+    u.name = "logo-like";
+    u.in.push_back(InputSpec{&rin, {}, 1, Need::Required, InMode::Exact});
+    u.out.push_back(&port);
+    std::uint32_t id = 0;
+    REQUIRE(eng.add_unit(u, id, err));
+    GapTimes fn;
+    const RunResult res = eng.run(fn);
+    wstop = true;
+    writer.join();
+    CHECK(res.reason == EndReason::Duration);
+    const mxlRational r{50, 1};
+    std::vector<std::int64_t> commit, overshoot, work;
+    std::size_t w = 0;
+    for (const auto& [i, t] : fn.gaps) {
+        const std::int64_t ti = static_cast<std::int64_t>(mxlIndexToTimestamp(&r, i));
+        commit.push_back(static_cast<std::int64_t>(t) - ti);
+        // paskutinis šio indekso laukimas, grįžęs be grain'o (riba)
+        const RecordingInput::Wait* last = nullptr;
+        while (w < rin.waits.size() && rin.waits[w].j <= i) {
+            if (rin.waits[w].j == i && rin.waits[w].p == Probe::NotYet) last = &rin.waits[w];
+            ++w;
+        }
+        if (last == nullptr) continue;
+        overshoot.push_back(static_cast<std::int64_t>(last->returned) - static_cast<std::int64_t>(last->asked_until));
+        work.push_back(static_cast<std::int64_t>(t) - static_cast<std::int64_t>(last->returned));
+    }
+    std::printf("MEASURE gap commit − T(i): %s\n", pct(commit).c_str());
+    std::printf("MEASURE futex pabudimas − prašytas laikas: %s\n", pct(overshoot).c_str());
+    std::printf("MEASURE commit − pabudimas (apdorojimas): %s\n", pct(work).c_str());
+    std::printf("MEASURE juodo turinio rašymų (pirmas ratas): %llu\n", static_cast<unsigned long long>(dst.black_writes));
+    CHECK(fn.gaps.size() >= want * 9 / 10);
+    slot.release();
+    src.release(d.inst);
+    dst.release(d.inst);
 }
