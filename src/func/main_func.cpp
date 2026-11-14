@@ -219,6 +219,10 @@ int main(int argc, char** argv) {
         ->check(CLI::Range(100u, 600000u));
     ig->add_option("--max-comp-ppm", o.max_comp_ppm, "garso dreifo kompensacijos riba, ppm (K6: 1000 = ±0,1 %; numatyta)")
         ->check(CLI::Range(10.0, 20000.0));
+    ig->add_option("--hls-max-target-s", o.hls_max_target_s, "HLS: didžiausias leidžiamas #EXT-X-TARGETDURATION, s (numatyta 30; daugiau — šaltinis atmetamas)")
+        ->check(CLI::Range(1.0, 600.0));
+    ig->add_option("--max-audio-ring-mb", o.max_audio_ring_mb, "garso žiedo riba šaltiniui, MB (numatyta 256; daugiau — šaltinis atmetamas)")
+        ->check(CLI::Range(1u, 4096u));
     ig->add_option("--test-decode-delay-ms", o.test_decode_delay_ms)->group("");  // perkrovos testui
     std::uint32_t clip_frames = 250;
     std::uint64_t clip_first = 1000;

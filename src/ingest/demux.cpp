@@ -13,35 +13,104 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 namespace mxlv::ingest {
 
-bool is_hls_url(const std::string& url) {
-    const auto q = url.find('?');
-    const std::string p = url.substr(0, q);
-    return p.size() >= 5 && p.compare(p.size() - 5, 5, ".m3u8") == 0;
+namespace {
+
+// Grojaraščio tekstas per avio — TIK http / https (protocol_whitelist; įdėti tcp / tls — HTTP transportas), skaitymo riba
+// rw_timeout 10 s (prisijungus iš naujo atidarymo ribos nėra — sustojęs serveris kitaip laikytų šaltinį amžinai).
+// sniff — pirmiausia tik ≤ 4 KiB: ne M3U8 (pvz. tiesioginis MPEG-TS per HTTP) — toliau neskaitoma. false — klaida (err).
+bool fetch_playlist(const std::string& url, AVIOInterruptCB* cb, std::size_t max_bytes, bool sniff, std::string& text, std::string& err) {
+    AVDictionary* d = nullptr;
+    av_dict_set(&d, "protocol_whitelist", "http,https,tcp,tls", 0);
+    av_dict_set(&d, "rw_timeout", "10000000", 0);
+    AVIOContext* io = nullptr;
+    const int e = avio_open2(&io, url.c_str(), AVIO_FLAG_READ, cb, &d);
+    av_dict_free(&d);
+    if (e < 0) {
+        err = "grojaraščio atidaryti nepavyko: " + averr(e) + ": " + redact_url(url);
+        return false;
+    }
+    text.clear();
+    char buf[4096];
+    bool checked = !sniff;
+    for (int n; (n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof buf)) > 0;) {
+        text.append(buf, static_cast<std::size_t>(n));
+        if (!checked) {
+            checked = true;
+            if (!parse_playlist(text.substr(0, 4096)).m3u) break;  // ne grojaraštis — tiek pakanka
+        }
+        if (text.size() > max_bytes) {
+            avio_closep(&io);
+            err = "grojaraštis didesnis nei " + std::to_string(max_bytes >> 10) + " KiB: " + redact_url(url);
+            return false;
+        }
+    }
+    avio_closep(&io);
+    return true;
 }
 
-std::int64_t hls_target_duration_ns(const std::string& url, AVIOInterruptCB* cb) {
-    AVIOContext* io = nullptr;
-    if (avio_open2(&io, url.c_str(), AVIO_FLAG_READ, cb, nullptr) < 0) return 0;
+bool check_refs(const std::string& base, const std::vector<std::string>& refs, std::string& err) {
+    std::string r;
+    for (const std::string& x : refs)
+        if (!resolve_playlist_url(base, x, r, err)) return false;
+    return true;
+}
+
+}  // namespace
+
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, std::string& err) {
+    hls = false;
+    target_ns = 0;
     std::string text;
-    char buf[4096];
-    for (int n; (n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof buf)) > 0 && text.size() < (1u << 20);)
-        text.append(buf, static_cast<std::size_t>(n));
-    avio_closep(&io);
-    const auto t = text.find("#EXT-X-TARGETDURATION:");
-    if (t != std::string::npos) return static_cast<std::int64_t>(std::atof(text.c_str() + t + 22) * 1e9);
-    // master grojaraštis: pirmas variantas (santykinis URL — šalia master)
-    const auto s = text.find("#EXT-X-STREAM-INF");
-    if (s == std::string::npos) return 0;
-    const auto l0 = text.find('\n', s);
-    if (l0 == std::string::npos) return 0;
-    std::string v = text.substr(l0 + 1, text.find('\n', l0 + 1) - l0 - 1);
-    while (!v.empty() && (v.back() == '\r' || v.back() == ' ')) v.pop_back();
-    if (v.empty()) return 0;
-    if (v.find("://") == std::string::npos) v = url.substr(0, url.rfind('/') + 1) + v;
-    return v == url ? 0 : hls_target_duration_ns(v, cb);
+    if (!fetch_playlist(url, cb, lim.max_bytes, true, text, err)) return false;
+    const PlaylistInfo top = parse_playlist(text);
+    if (!top.m3u) return true;  // ne HLS (turinys nuspręstas, ne URL galūnė — B8)
+    hls = true;
+    double target = top.target_s;
+    if (top.master) {
+        // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
+        // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
+        if (top.variants.size() + 1 > lim.max_playlists) {
+            err = "master grojaraštyje " + std::to_string(top.variants.size()) + " variantų > " + std::to_string(lim.max_playlists - 1);
+            return false;
+        }
+        std::vector<std::string> seen{url};
+        for (const std::string& v : top.variants) {
+            std::string vu;
+            if (!resolve_playlist_url(url, v, vu, err)) return false;
+            if (vu == url) {
+                err = "įdėtas master grojaraštis (variantas rodo į save): " + redact_url(vu);
+                return false;
+            }
+            if (std::find(seen.begin(), seen.end(), vu) != seen.end()) continue;
+            seen.push_back(vu);
+            std::string vt;
+            if (!fetch_playlist(vu, cb, lim.max_bytes, false, vt, err)) return false;
+            const PlaylistInfo pv = parse_playlist(vt);
+            if (!pv.m3u) {
+                err = "variantas ne M3U8 grojaraštis: " + redact_url(vu);
+                return false;
+            }
+            if (pv.master) {
+                err = "įdėtas master grojaraštis (gylis > 1: master → media): " + redact_url(vu);
+                return false;
+            }
+            if (!check_refs(vu, pv.refs, err)) return false;
+            target = std::max(target, pv.target_s);
+        }
+    }
+    if (!check_refs(url, top.refs, err)) return false;  // media segmentai arba master EXT-X-SESSION-KEY
+    if (target > lim.max_target_s) {
+        char b[160];
+        std::snprintf(b, sizeof b, "#EXT-X-TARGETDURATION %.0f s > riba %.0f s (--hls-max-target-s)", target, lim.max_target_s);
+        err = b;
+        return false;
+    }
+    target_ns = target > 0 ? static_cast<std::int64_t>(target * 1e9) : 0;
+    return true;
 }
 
 bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_t open_timeout_ns, std::string& err) {
@@ -51,9 +120,25 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     intr_.stop = &stop;
     intr_.silence_ns = std::uint64_t{s.silence_ms} * 1'000'000;
     intr_.deadline_tai = open_timeout_ns > 0 ? tai_now() + static_cast<std::uint64_t>(open_timeout_ns) : 0;
+    const std::string shown = redact_url(s.url);  // žurnalams ir klaidoms — be paslapčių (A1)
+    if (!source_url_allowed(s.url, err)) return false;
     if (const std::string pe = protocol_error(s.url); !pe.empty()) {
         err = pe;
         return false;
+    }
+    const std::string scheme = url_scheme(s.url);
+    // HLS atpažįstamas pagal turinį (#EXTM3U), ne pagal .m3u8 galūnę (B8); grojaraštis patikrinamas prieš libav (A1)
+    bool hls = false;
+    hls_target_ns_ = 0;
+    if (scheme == "http" || scheme == "https") {
+        AVIOInterruptCB cb{interrupt_cb, &intr_};
+        HlsLimits lim;
+        lim.max_target_s = s.hls_max_target_s;
+        std::string why;
+        if (!hls_precheck(s.url, &cb, lim, hls, hls_target_ns_, why)) {
+            err = shown + ": HLS: " + (intr_.timed_out ? "nėra duomenų per --input-wait-s" : intr_.silent ? "įėjimas tylus" : why);
+            return false;
+        }
     }
     std::string url = s.url;
     // UDP (kaip dec): didelis FIFO ir socket buferis, perpildymas ne fatalus; tylą ir sustabdymą sprendžia kabliukas
@@ -61,6 +146,16 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         url += std::string(url.find('?') == std::string::npos ? "?" : "&") + "fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608";
     ic_ = avformat_alloc_context();
     attach_interrupt(ic_, &intr_);
+    shown_ = shown;
+    guard_http_ = hls;
+    opens_in_win_ = 0;
+    open_win0_ = 0;
+    opens_total_ = 0;
+    orig_io_open_ = ic_->io_open;
+    ic_->opaque = this;
+    ic_->io_open = [](AVFormatContext* c, AVIOContext** pb, const char* u, int fl, AVDictionary** op) {
+        return static_cast<Demux*>(c->opaque)->guarded_open(c, pb, u, fl, op);
+    };
     // Zondavimo metu perskaityti paketai NEgrąžinami vėliau: jie jau sekundės senumo, o atvykimo laikas žymimas skaitant —
     // SourceClock fiksavimas (atvykimas + latencija − PTS) būtų pasislinkęs tiek, kiek truko zondavimas
     ic_->flags |= AVFMT_FLAG_NOBUFFER;
@@ -68,7 +163,9 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // Trumpas zondavimas: TS H.264 / AAC parametrai žinomi per < 0,5 s (numatytasis 5 MB būtų ~4 s ir pliūpsnis po to)
     av_dict_set(&o, "probesize", "2000000", 0);
     av_dict_set(&o, "analyzeduration", "1000000", 0);
-    const bool hls = is_hls_url(s.url);
+    // Baltieji sąrašai (A1): paveldi visi įdėti atidarymai (HLS segmentai ir jų demuxeriai, RTP → UDP, HTTP → TCP / TLS)
+    av_dict_set(&o, "protocol_whitelist", protocol_whitelist_for(scheme).c_str(), 0);
+    av_dict_set(&o, "format_whitelist", format_whitelist_for(scheme).c_str(), 0);
     if (hls) {
         av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
         av_dict_set(&o, "http_persistent", "0", 0);
@@ -77,7 +174,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     av_dict_free(&o);
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
-        err = s.url + ": " + what + ": " + why;
+        err = shown + ": " + what + ": " + why;
         close();
         return false;
     };
@@ -102,7 +199,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     if (vs_ < 0) vs_ = -1;
     if (as_ < 0) as_ = -1;
     if (vs_ < 0 && as_ < 0) {
-        err = s.url + ": nėra nei video, nei garso srauto";
+        err = shown + ": nėra nei video, nei garso srauto";
         close();
         return false;
     }
@@ -120,7 +217,6 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     for (unsigned k = 0; k < ic_->nb_streams; ++k)
         if (static_cast<int>(k) != vs_ && static_cast<int>(k) != as_) ic_->streams[k]->discard = AVDISCARD_ALL;
     field_order_ = info_.video ? key_field_order() : AV_FIELD_UNKNOWN;
-    hls_target_ns_ = hls ? hls_target_duration_ns(s.url, &ic_->interrupt_callback) : 0;
     // HLS: paketai ateina segmentais, tarp jų — tyla iki segmento trukmės ir grojaraščio atnaujinimo; tylos riba — ne mažiau
     // kaip 3 segmentai (kitaip kiekvienas tarpas tarp segmentų atrodytų kaip nutrūkęs šaltinis)
     if (hls_target_ns_ > 0)
@@ -224,12 +320,68 @@ bool Demux::video_format(vramflow::VideoFormat& out, std::string& why) const {
     return true;
 }
 
+int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, int flags, AVDictionary** opts) {
+    const std::string u = url ? url : "";
+    if (guard_http_) {
+        std::string inner = u;
+        if (url_scheme(inner) == "crypto+http" || url_scheme(inner) == "crypto+https") inner = inner.substr(7);  // AES-128 segmentas
+        if (const std::string sc = url_scheme(inner); sc != "http" && sc != "https") {
+            ++refused_opens_;
+            std::fprintf(stderr, "[ingest] %s: HLS: atidarymas atmestas — schema „%s“ neleidžiama (tik http / https): %s\n", shown_.c_str(),
+                         sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
+            return AVERROR(EPERM);
+        }
+        const std::uint64_t now = tai_now();
+        if (now - open_win0_ >= 1'000'000'000ull) {
+            open_win0_ = now;
+            opens_in_win_ = 0;
+        }
+        if (++opens_in_win_ > kMaxOpensPerSec) {
+            if (!intr_.abort.exchange(true))
+                std::fprintf(stderr, "[ingest] %s: HLS: > %d grojaraščių / segmentų atidarymų per sekundę — kilpa (įdėtas master grojaraštis?), sesija "
+                                     "nutraukiama\n", shown_.c_str(), kMaxOpensPerSec);
+            return AVERROR_EXIT;
+        }
+    }
+    int r = orig_io_open_(s, pb, url, flags, opts);
+    if (r < 0 || !guard_http_) return r;
+    // Turinio peržiūra (pirmi ≤ 4 KiB, grąžinama atgal buferio ribose): master grojaraštis leidžiamas tik pirmam sesijos atidarymui
+    // (viršutinis URL). Perkraunamas media grojaraštis, tapęs master, libav HLS demuxeriui duoda „tuščius“ grojaraščius, ir jis
+    // griūva (išmatuota: SIGSEGV, visas procesas) — todėl atmetama ANKSČIAU, nei libav jį perskaito, ir sesija nutraukiama.
+    const bool first_open = opens_total_++ == 0;
+    unsigned char head[4096];
+    const int n = avio_read(*pb, head, sizeof head);
+    if (n > 0 && !first_open) {
+        const PlaylistInfo pi = parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n)));
+        if (pi.m3u && pi.master) {
+            ff_close(s, pb);
+            if (!intr_.abort.exchange(true))
+                std::fprintf(stderr, "[ingest] %s: HLS: įdėtas master grojaraštis vidury sesijos (%s) — atmesta, sesija nutraukiama\n", shown_.c_str(),
+                             redact_url(u).c_str());
+            return AVERROR(EPERM);
+        }
+    }
+    if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
+    if (n < 0 && n != AVERROR_EOF) return 0;  // klaidą pamatys skaitytojas
+    // peržiūra netilpo buferyje — atidaroma iš naujo
+    ff_close(s, pb);
+    return orig_io_open_(s, pb, url, flags, opts);
+}
+
+void Demux::ff_close(AVFormatContext* s, AVIOContext** pb) {
+    if (s->io_close2) s->io_close2(s, *pb);
+    else avio_close(*pb);
+    *pb = nullptr;
+}
+
 int Demux::read(AVPacket* pkt, Kind& kind, std::string& why) {
     for (;;) {
         const int e = av_read_frame(ic_, pkt);
         if (e == AVERROR(EAGAIN)) continue;
         if (e < 0) {
-            why = intr_.silent ? "įėjimas tylus > " + std::to_string(silence_ms_) + " ms" : "read_frame: " + averr(e);
+            why = intr_.abort.load() ? "HLS grojaraščių kilpa — sesija nutraukta"
+                  : intr_.silent     ? "įėjimas tylus > " + std::to_string(silence_ms_) + " ms"
+                                     : "read_frame: " + averr(e);
             return e;
         }
         intr_.packet();

@@ -20,7 +20,9 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
+#include <libavutil/log.h>
 }
+#include <cstdarg>
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
@@ -45,6 +47,7 @@ extern "C" {
 #include "ingest/av_input.hpp"
 #include "ingest/demux.hpp"
 #include "ingest/feed_gate.hpp"
+#include "ingest/url_policy.hpp"
 #include "ingest/video_decode.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
@@ -182,6 +185,18 @@ struct Shared {
     ig::AudioSyncConfig async;
     const std::atomic<bool>& stop;
 };
+
+// libav žurnalas be paslapčių (A1): HLS / HTTP / SRT moduliai į žurnalą rašo URL (segmentų žetonai, passphrase) — kiekviena eilutė
+// suformatuojama ir išvaloma redact_urls_in. Lygis — kaip numatytojo (av_log_get_level).
+void redacting_av_log(void* avcl, int level, const char* fmt, va_list vl) {
+    if (level > av_log_get_level()) return;
+    static thread_local int prefix = 1;
+    char line[2048];
+    av_log_format_line2(avcl, level, fmt, vl, line, sizeof line, &prefix);
+    std::fputs(ig::redact_urls_in(line).c_str(), stderr);
+}
+
+void install_redacting_av_log() { av_log_set_callback(redacting_av_log); }
 
 AVCodecParameters* par_copy(const AVCodecParameters* p) {
     if (!p) return nullptr;
@@ -675,6 +690,7 @@ int run_ingest(const Opts& o_in) {
     st.set_seconds(o.seconds_kept);
     auto& stop = stop_flag();
     auto finish = [&](int rc) {
+        st.fatal = ig::redact_urls_in(st.fatal);  // santraukoje — be paslapčių (A1; antra apsauga, pranešimai jau su išvalytais URL)
         st.exit_code = rc;
         write_summary(o, "ingest", st);
         std::fprintf(stderr, "[ingest] baigta, exit %d %s\n", rc, st.fatal.c_str());
@@ -684,6 +700,13 @@ int run_ingest(const Opts& o_in) {
         st.fatal = "nenurodytas nė vienas --input";
         return finish(1);
     }
+    // A1: operatoriaus URL schema — tik dokumentuotos (naudojimo klaida, prieš bet kokį tinklo veiksmą)
+    for (const std::string& u : o.inputs)
+        if (std::string why; !ig::source_url_allowed(u, why)) {
+            st.fatal = "--input: " + why;
+            return finish(1);
+        }
+    install_redacting_av_log();
     ig::Decoder decoder{};
     if (!ig::parse_decoder(o.decoder, decoder)) {
         st.fatal = "--decoder: " + o.decoder;
@@ -734,8 +757,9 @@ int run_ingest(const Opts& o_in) {
         auto& s = src[k];
         s = std::make_unique<Source>();
         s->idx = static_cast<int>(k);
-        s->name = "šaltinis " + std::to_string(k) + " (" + o.inputs[k] + ")";
+        s->name = "šaltinis " + std::to_string(k) + " (" + ig::redact_url(o.inputs[k]) + ")";  // vardas eina į visus žurnalus
         s->spec.url = o.inputs[k];
+        s->spec.hls_max_target_s = o.hls_max_target_s;
         s->spec.format = o.format;
         s->spec.audio = o.ingest_audio;
         s->spec.audio_channels = o.audio_channels;
@@ -748,7 +772,7 @@ int run_ingest(const Opts& o_in) {
         std::string err;
         if (!s->demux.open(s->spec, stop, open_ns, err)) {
             if (failed_probe.load()) return;  // nutraukta dėl kito šaltinio klaidos
-            return stop.load() ? fail(kStoppedWaiting, "sustabdyta laukiant " + o.inputs[k]) : fail(2, err);
+            return stop.load() ? fail(kStoppedWaiting, "sustabdyta laukiant " + ig::redact_url(o.inputs[k])) : fail(2, err);
         }
         const ig::StreamInfo& in = s->demux.info();
         s->video = in.video;
@@ -786,7 +810,13 @@ int run_ingest(const Opts& o_in) {
         s->vpar0 = par_copy(in.vpar);
         s->apar0 = par_copy(in.apar);
         const double ring_s = static_cast<double>(s->latency_ns + sh.gate.lead_ns + 3'000'000'000LL) / 1e9;
-        s->ring.init(o.audio_channels, static_cast<std::size_t>(ring_s * 48000.0));
+        const auto ring_n = static_cast<std::size_t>(ring_s * 48000.0);
+        // A1: žiedo dydis nuo latencijos (HLS — 3 segmentai) — riba baitais, kad grojaraštis negalėtų išpūsti atminties
+        if (const std::uint64_t rb = ig::audio_ring_bytes(o.audio_channels, ring_n); rb > std::uint64_t{o.max_audio_ring_mb} << 20)
+            return fail(2, s->name + ": garso žiedas " + std::to_string(rb >> 20) + " MB > riba " + std::to_string(o.max_audio_ring_mb) +
+                               " MB (--max-audio-ring-mb; latencija " + std::to_string(s->latency_ns / 1'000'000) + " ms, kanalai " +
+                               std::to_string(o.audio_channels) + ")");
+        s->ring.init(o.audio_channels, ring_n);
         std::fprintf(stderr, "[ingest] %s: %s%s, latencija %.0f ms\n", s->name.c_str(),
                      s->video ? vramflow::format_name(s->fmt).c_str() : "be video", s->audio ? " + garsas" : ", be garso",
                      static_cast<double>(s->latency_ns) / 1e6);

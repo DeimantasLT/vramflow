@@ -336,6 +336,257 @@ def free_port():
         return s.getsockname()[1]
 
 
+class PlaylistServer:
+    """Loopback HTTP (127.0.0.1, laisvas prievadas): virtualūs keliai (routes — bytes, keičiami testo metu) ir statiniai failai iš
+    katalogo; hits — užklausų skaičius keliui."""
+
+    def __init__(self, directory=None):
+        import http.server
+        import threading
+        self.routes, self.hits = {}, {}
+        srv = self
+
+        class H(http.server.SimpleHTTPRequestHandler):
+            def __init__(h, *a, **kw):
+                super().__init__(*a, directory=str(directory or REPO / "nonexistent"), **kw)
+
+            def log_message(h, *a):
+                pass
+
+            def do_GET(h):
+                path = h.path.split("?")[0]
+                srv.hits[path] = srv.hits.get(path, 0) + 1
+                body = srv.routes.get(path)
+                if body is None:
+                    return super().do_GET()
+                h.send_response(200)
+                h.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                h.send_header("Content-Length", str(len(body)))
+                h.end_headers()
+                h.wfile.write(body)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.httpd.server_address[1]
+        self.t = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.t.start()
+
+    def url(self, p):
+        return f"http://127.0.0.1:{self.port}{p}"
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class FifoCanary:
+    """Vardinis kanalas: atidarymas skaitymui (bet kuo) atblokuoja rašytoją — opened() == True. Failas niekada neturi turinio."""
+
+    def __init__(self, path):
+        import threading
+        self.path = str(path)
+        if os.path.exists(self.path):
+            os.unlink(self.path)
+        os.mkfifo(self.path)
+        self.releasing = False
+        self.hit = False
+
+        def w():
+            with open(self.path, "wb"):
+                self.hit = not self.releasing
+
+        self.t = threading.Thread(target=w, daemon=True)
+        self.t.start()
+
+    def opened(self):
+        return self.hit
+
+    def close(self):
+        if self.t.is_alive():
+            self.releasing = True
+            fd = os.open(self.path, os.O_RDONLY | os.O_NONBLOCK)
+            self.t.join(timeout=5)
+            os.close(fd)
+        os.unlink(self.path)
+
+
+class TcpCanary:
+    """Loopback TCP klausytojas: connections — kiek kartų prisijungta."""
+
+    def __init__(self):
+        import threading
+        self.s = socket.socket()
+        self.s.bind(("127.0.0.1", 0))
+        self.s.listen(8)
+        self.s.settimeout(0.2)
+        self.port = self.s.getsockname()[1]
+        self.connections = 0
+        self.run = True
+
+        def acc():
+            while self.run:
+                try:
+                    c, _ = self.s.accept()
+                    self.connections += 1
+                    c.close()
+                except OSError:
+                    pass
+
+        self.t = threading.Thread(target=acc, daemon=True)
+        self.t.start()
+
+    def close(self):
+        self.run = False
+        self.t.join(timeout=5)
+        self.s.close()
+
+
+def ingest_hls_security(out):
+    """A1 (round 9): grojaraščio pateikti URL — tik http / https; įdėti master grojaraščiai (A→B→A) ir milžiniškas
+    #EXT-X-TARGETDURATION atmetami su aiškia klaida (procesas baigiasi tvarkingai, ne signalu). file:// kanarėlė (FIFO) niekada
+    neatidaroma, loopback TCP klausytojas — niekada neprisijungiamas."""
+    res = []
+    work = pathlib.Path(out) / "ingest_hls_security"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    fifo = FifoCanary(work / "canary.m3u8")
+    tcp = TcpCanary()
+    srv = PlaylistServer()
+    media = lambda refs, td=2: ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:0\n" % td +
+                                "".join(f"#EXTINF:2.0,\n{r}\n" for r in refs)).encode()
+    master = lambda *vs: ("#EXTM3U\n" + "".join(f"#EXT-X-STREAM-INF:BANDWIDTH=1000000\n{v}\n" for v in vs)).encode()
+    srv.routes.update({
+        "/good.m3u8": media(["seg0.ts"]),
+        "/file_variant.m3u8": master(f"file://{fifo.path}", "good.m3u8"),
+        "/file_segment.m3u8": media([f"file://{fifo.path}"]),
+        "/key_file.m3u8": ("#EXTM3U\n#EXT-X-TARGETDURATION:2\n" + f"#EXT-X-KEY:METHOD=AES-128,URI=\"file://{fifo.path}\"\n#EXTINF:2.0,\nseg0.ts\n").encode(),
+        "/tcp_segment.m3u8": media([f"tcp://127.0.0.1:{tcp.port}"]),
+        "/a.m3u8": master("b.m3u8"),
+        "/b.m3u8": master("a.m3u8"),
+        "/huge.m3u8": media(["seg0.ts"], td=100000),
+    })
+    cases = (("file_variant", "neleidžiama"), ("file_segment", "neleidžiama"), ("key_file", "neleidžiama"), ("tcp_segment", "neleidžiama"),
+             ("a", "įdėtas master"), ("huge", "TARGETDURATION"))
+    try:
+        for name, want in cases:
+            tid = f"ingest_hls_security[{name}]"
+            d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
+            t0 = time.monotonic()
+            p = F.FProc(out, tid, "ingest", d, "--input", srv.url(f"/{name}.m3u8"), "--input-wait-s", 8, *F.vcommon("gpu", "cuda-linear"))
+            rc = p.wait(timeout=40)
+            if rc is None:
+                p.term()
+            dt = time.monotonic() - t0
+            fatal = (F.vsummary(p, "ingest") or {}).get("fatal", "")
+            problems = []
+            if rc is None or rc <= 0:
+                problems.append(f"exit {rc} (laukta tvarkinga klaida > 0, ne signalas / kabojimas)")
+            if want not in fatal:
+                problems.append(f"fatal be „{want}“")
+            if fifo.opened():
+                problems.append("file:// kanarėlė ATIDARYTA")
+            if tcp.connections:
+                problems.append(f"TCP kanarėlė prisijungta {tcp.connections} k.")
+            if flows_in(d):
+                problems.append(f"flow'ai domene {flows_in(d)}")
+            res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | exit {rc} per {dt:.1f} s, fatal {fatal[:220]!r}"))
+    finally:
+        srv.close()
+        tcp.close()
+        fifo.close()
+    return res
+
+
+def ingest_hls_recursion_live(out):
+    """A1: du šaltiniai (UDP + HLS); HLS grojaraštis vidury darbo tampa rekursyvus (A→B→A), segmentuotojas sustoja. Procesas
+    gyvena iki galo (ne signalas), UDP šaltinis — be praradimų (A/V, ≥ 99,8 %, 0 pavėluotų), HLS šaltinis bando iš naujo ir
+    praneša apie įdėtą master grojaraštį."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_hls_recursion_live", "FAIL", why=why)]
+    tid = "ingest_hls_recursion_live"
+    T, SWAP = 40, 12
+    work = pathlib.Path(out) / tid / "hls"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    port = BASE_PORT + 40
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-i", str(CLIPS / "av_1080i50.ts"), "-c", "copy",
+                            "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work / "seg.log", "w"))
+    srv = PlaylistServer(work)
+    d = F.fresh_domain(tid)
+    ing = vf = snd = None
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+        ing = F.FProc(out, tid, "ingest", d, "--input", f"udp://127.0.0.1:{port}", "--input", srv.url("/live.m3u8"), "--duration", T + 14,
+                      "--warmup", 6, *F.vcommon("gpu", "cuda-linear"))
+        snd = Sender.ts(out, f"{tid}/snd", CLIPS / "av_1080i50.ts", port)
+        vf = F.FProc(out, tid, "verify", d, "--mode", "ingest", "--flows", 1, "--flow-base", 0, "--duration", T + 6, "--warmup", 6,
+                     "--lag-fields", 3, "--audio", 1, "--input-wait-ms", 30000, "--impl", "gpu", "--storage", "cuda-linear")
+        time.sleep(6 + SWAP)
+        srv.routes["/live.m3u8"] = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nloop.m3u8\n"
+        srv.routes["/loop.m3u8"] = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n"
+        seg.terminate()
+        vf.wait(timeout=T + 90)
+        ri = ing.wait(timeout=T + 90)
+    finally:
+        for pr in (vf, ing):
+            if pr is not None:
+                pr.term()
+        if snd is not None:
+            snd.stop()
+        if seg.poll() is None:
+            seg.terminate()
+        seg.wait()
+        srv.close()
+    si, sv = F.vsummary(ing, "ingest"), F.vsummary(vf, "verify-ingest")
+    err = ing.err_path.read_text(errors="replace") if ing is not None and ing.err_path.exists() else ""
+    problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    if "įdėtas master" not in err:
+        problems.append("HLS šaltinis nepranešė apie įdėtą master grojaraštį")
+    if flow(si, 1).get("input_reconnects", 0) < 1:
+        problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
+    line = next((ln for ln in err.splitlines() if "įdėtas master" in ln), "")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | {line.strip()[:200]} | " + summary_line(si, sv, a, r))]
+
+
+def ingest_secrets_redacted(out):
+    """A1: SRT su passphrase — srautas veikia (A/V, ≥ 99,8 %), o slaptažodžio nėra nei stderr, nei santraukoje, nei --stats-file."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_secrets_redacted", "FAIL", why=why)]
+    tid = "ingest_secrets_redacted"
+    protos = subprocess.run(["ffmpeg", "-hide_banner", "-protocols"], capture_output=True, text=True).stdout.split()
+    if "srt" not in protos:
+        return [F.result(tid, "SKIP", why="sisteminis FFmpeg be srt protokolo")]
+    T = dur(30)
+    secret = "Zx9SecretPass42q"
+    port = free_port()
+    url = f"srt://127.0.0.1:{port}"
+    stats = pathlib.Path(out) / tid / "stats.jsonl"
+    stats.parent.mkdir(parents=True, exist_ok=True)
+    if stats.exists():
+        stats.unlink()
+    snd = lambda: Sender(out, f"{tid}/snd", ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-i", str(CLIPS / "av_1080i50.ts"),
+                                             "-c", "copy", "-f", "mpegts", f"{url}?mode=caller&latency=120000&passphrase={secret}&pbkeylen=16"])
+    si, sv, ri, err, _ = run_case(out, tid, [f"{url}?mode=listener&latency=120000&passphrase={secret}&pbkeylen=16"], [snd], T,
+                                  ("--stats-file", stats))
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    leaks = []
+    for f in [pathlib.Path(out) / tid / "ingest.err", pathlib.Path(out) / tid / "summary-ingest.json", stats]:
+        if not f.exists():
+            leaks.append(f"{f.name}: nėra")
+        elif secret in f.read_text(errors="replace"):
+            leaks.append(f.name)
+    if leaks:
+        problems.append(f"slaptažodis matomas / failo nėra: {leaks}")
+    if "passphrase=***" not in err:
+        problems.append("stderr be išvalyto URL (passphrase=***)")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + " | " + summary_line(si, sv, a, r))]
+
+
 def ingest_hls(out):
     if (why := ensure_clips()):
         return [F.result("ingest_hls", "FAIL", why=why)]
@@ -652,4 +903,6 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_drift_accelerated": ingest_drift_accelerated, "ingest_pts_wrap": ingest_pts_wrap, "ingest_hls": ingest_hls, "ingest_srt": ingest_srt, "ingest_rtp": ingest_rtp,
          "ingest_two_formats": ingest_two_formats, "ingest_reconnect": ingest_reconnect, "ingest_overload_skip": ingest_overload_skip,
          "ingest_progressive_chroma": ingest_progressive_chroma, "ingest_bad_url": ingest_bad_url, "ingest_no_video": ingest_no_video,
-         "ingest_format_change": ingest_format_change, "ingest_unsupported": ingest_unsupported}
+         "ingest_format_change": ingest_format_change, "ingest_unsupported": ingest_unsupported,
+         "ingest_hls_security": ingest_hls_security, "ingest_hls_recursion_live": ingest_hls_recursion_live,
+         "ingest_secrets_redacted": ingest_secrets_redacted}

@@ -26,10 +26,12 @@ struct Interrupt {
     std::uint64_t silence_ns = 0;
     std::uint64_t deadline_tai = 0;
     bool silent = false, timed_out = false;
+    std::atomic<bool> abort{false};  // sesija nutraukiama iš vidaus (A1: HLS grojaraščių kilpa vidury sesijos)
     void packet() { last_pkt.store(tai_now(), std::memory_order_relaxed); }
     void reset_session() {
         last_pkt.store(0, std::memory_order_relaxed);
         silent = timed_out = false;
+        abort.store(false, std::memory_order_relaxed);
     }
 };
 int interrupt_cb(void* p);

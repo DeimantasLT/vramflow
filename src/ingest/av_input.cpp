@@ -12,6 +12,8 @@ extern "C" {
 #include <cstdio>
 #include <thread>
 
+#include "ingest/url_policy.hpp"
+
 namespace mxlv::ingest {
 
 std::string averr(int e) {
@@ -25,6 +27,7 @@ std::uint64_t tai_now() { return mxlGetTime(); }
 int interrupt_cb(void* p) {
     auto* x = static_cast<Interrupt*>(p);
     if (x->stop != nullptr && x->stop->load(std::memory_order_relaxed)) return 1;
+    if (x->abort.load(std::memory_order_relaxed)) return 1;
     const std::uint64_t now = tai_now();
     const std::uint64_t last = x->last_pkt.load(std::memory_order_relaxed);
     if (last != 0 && x->silence_ns != 0 && now - last > x->silence_ns) {
@@ -39,14 +42,13 @@ int interrupt_cb(void* p) {
 }
 
 std::string protocol_error(const std::string& url) {
-    const auto colon = url.find("://");
-    if (colon == std::string::npos) return {};  // failas — visada
-    const std::string scheme = url.substr(0, colon);
+    const std::string scheme = url_scheme(url);
+    if (scheme.empty()) return {};  // failas — visada
     void* it = nullptr;
     const char* name = nullptr;
     while ((name = avio_enum_protocols(&it, 0)) != nullptr)
         if (scheme == name) return {};
-    return scheme + " protokolas nepalaikomas šio FFmpeg (libavformat " + LIBAVFORMAT_IDENT + "): " + url;
+    return scheme + " protokolas nepalaikomas šio FFmpeg (libavformat " + LIBAVFORMAT_IDENT + "): " + redact_url(url);
 }
 
 void reconnect_loop(const std::string& name, const std::atomic<bool>& stop, const std::function<bool(std::string& why)>& session,

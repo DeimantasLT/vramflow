@@ -15,6 +15,7 @@ extern "C" {
 
 #include "common/format.hpp"
 #include "ingest/av_input.hpp"
+#include "ingest/url_policy.hpp"
 #include "timing/source_clock.hpp"
 
 namespace mxlv::ingest {
@@ -25,6 +26,7 @@ struct SourceSpec {
     bool audio = true;
     int audio_channels = 2;
     std::uint32_t silence_ms = 2000;  // --input-silence-ms
+    double hls_max_target_s = 30;     // --hls-max-target-s (A1)
 };
 
 enum class Kind : std::uint8_t { Video, Audio };
@@ -76,10 +78,28 @@ private:
     std::int64_t hls_target_ns_ = 0;
     int field_order_ = AV_FIELD_UNKNOWN;  // laukų tvarka iš rakto kadro (key_field_order)
     int key_field_order();
+
+public:
+    // libav io_open sargas (A1; viešas tik dėl C kabliuko): HLS — kiekvienas libav atidarymas (grojaraščiai, segmentai, raktai)
+    // tik http / https; atidarymų daugiau nei kMaxOpensPerSec per sekundę — grojaraščių kilpa (libav HLS demuxeris perkraunamą
+    // media grojaraštį, tapusį master, kaupia be galo ir galiausiai griūva) → sesija nutraukiama, šaltinis jungiasi iš naujo.
+    int guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, int flags, AVDictionary** opts);
+    static constexpr int kMaxOpensPerSec = 50;
+
+private:
+    int (*orig_io_open_)(AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) = nullptr;
+    bool guard_http_ = false;
+    std::uint64_t open_win0_ = 0;
+    int opens_in_win_ = 0;
+    std::uint64_t opens_total_ = 0;  // sesijos libav atidarymai (pirmas — viršutinis URL)
+    static void ff_close(AVFormatContext* s, AVIOContext** pb);
+    std::uint64_t refused_opens_ = 0;
+    std::string shown_;  // šaltinio URL be paslapčių
 };
 
-// HLS grojaraščio #EXT-X-TARGETDURATION (sekundės → ns) per avio; 0 — nerasta. Master grojaraštyje — pirmo varianto.
-std::int64_t hls_target_duration_ns(const std::string& url, AVIOInterruptCB* cb);
-bool is_hls_url(const std::string& url);
+// HTTP(S) šaltinio patikra prieš libav (A1, B8): ar turinys — M3U8 (hls), ir jei taip — master → media (ne giliau, be kilpų),
+// visos nuorodos tik http / https, #EXT-X-TARGETDURATION ≤ lim.max_target_s (target_ns — didžiausias iš variantų; 0 — nėra).
+// false — šaltinis netinkamas (err — aiški priežastis be paslapčių).
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, std::string& err);
 
 }  // namespace mxlv::ingest
