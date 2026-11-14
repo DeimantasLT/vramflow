@@ -43,13 +43,21 @@ constexpr double kTwoCos = 1.9828897227476208;  // 2 cos(2π · 1000 / 48000)
 struct AudioScan {
     bool seen_signal = false;
     std::uint64_t zero_run = 0;
+    std::int64_t since_gap = 0;  // ne tylos mėginių nuo pradžios / paskutinio tylos tarpo
     bool have1 = false, have2 = false;
     float x1 = 0, x2 = 0;
     bool in_pulse = false;
     float best = 0;
     std::int64_t best_pos = 0, last_hot = 0, last_disc = -100000;
     std::vector<std::int64_t> pulses, disc, zero;
+    std::int64_t next_pos = -1;  // kito laukiamo mėginio pozicija; kitokia — verify pats praleido blokų (atsiliko)
     void feed(std::int64_t p, float x) {
+        if (p != next_pos) {  // ne tolydu (verify_skipped): tolydumo būsena iš naujo — tai ne garso trūkis
+            have1 = have2 = false;
+            zero_run = 0;
+            since_gap = 0;
+        }
+        next_pos = p + 1;
         const float a = std::fabs(x);
         if (a > 0.5f) {
             if (!in_pulse || a > best) best_pos = p;
@@ -64,11 +72,17 @@ struct AudioScan {
         if (a < 1e-4f) {
             ++zero_run;
         } else {
-            if (zero_run >= 48 && seen_signal && zero.size() < 10000) zero.push_back(p - static_cast<std::int64_t>(zero_run));
+            if (zero_run >= 48) {
+                if (seen_signal && zero.size() < 10000) zero.push_back(p - static_cast<std::int64_t>(zero_run));
+                since_gap = 0;  // tylos tarpas jau užskaitytas — jo kraštas nėra atskiras trūkis
+            }
             zero_run = 0;
             seen_signal = true;
+            ++since_gap;
         }
-        if (have2 && seen_signal) {
+        // Trūkis tikrinamas tik ištisiniame signale (≥ 10 ms po pradžios ar po tylos tarpo): tylos → tono kraštas (garso pradžia
+        // flow'e) kitaip būtų skaičiuojamas kaip trūkis
+        if (have2 && since_gap > 480) {
             const double r = static_cast<double>(x) - kTwoCos * x1 + x2;
             if (std::fabs(r) > 0.004 && p - last_disc > 100 && disc.size() < 10000) {
                 disc.push_back(p);

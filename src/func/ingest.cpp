@@ -754,6 +754,9 @@ int run_ingest(const Opts& o_in) {
                              static_cast<double>(seg) / 1e9, 3.0 * static_cast<double>(seg) / 1e9);
             s->latency_ns = std::max(s->latency_ns, 3 * seg);
             cc.drift_limit_ns = std::max(cc.drift_limit_ns, seg);
+            // Segmentų atvykimo fazė lėtai slenka (grojaraščio perskaitymo ritmas) — atrodo kaip dreifas, nors laikrodis tas pats;
+            // sekant ją, garsas nuslinkdavo iki 20 ms ir video praslysdavo (išmatuota). HLS: poslinkiai pastovūs, A/V — 0.
+            cc.track_drift = false;
         }
         cc.latency_ns = s->latency_ns;
         cc.align_rate = s->video ? timing::Rational{s->fmt.frame_rate.num, s->fmt.frame_rate.den} : timing::Rational{0, 1};
@@ -771,9 +774,13 @@ int run_ingest(const Opts& o_in) {
         // Demux gija — iškart po zondavimo: paketai žymimi atvykimo metu. Kitaip, kol zonduojami kiti šaltiniai ir kuriami flow'ai,
         // jie kauptųsi UDP buferyje, o pirmas (fiksavimo) paketas būtų pažymėtas pavėluotu atvykimu: poslinkis ir pirmi dreifo
         // langai iškreipti (išmatuota: 60 s A/V nuslinko −1,4 ms dėl klaidingo pradinio dreifo įverčio).
+        // Dekodavimo gijos — taip pat iškart: kol zonduojami kiti šaltiniai, šio kadrai jau dekoduojami laiku (kitaip pirmi kadrai
+        // po paleidimo vėluodavo — late_frames, išmatuota dviejų šaltinių teste).
         Source* sp = s.get();
         src.push_back(std::move(s));
         sp->th_demux = std::thread([sp, &sh] { demux_thread(*sp, sh); });
+        if (sp->video) sp->th_video = std::thread([sp, &sh] { video_thread(*sp, sh); });
+        if (sp->audio) sp->th_audio = std::thread([sp, &sh] { audio_thread(*sp, sh); });
     }
     // Klaida — šaltinių gijos sustabdomos (bendras stop) ir sujungiamos (~Source)
     auto abort_sources = [&] {
@@ -907,13 +914,7 @@ int run_ingest(const Opts& o_in) {
             rc = 2;
         }
     }
-    // 5. Dekodavimo gijos šaltiniui (demux jau veikia nuo zondavimo): video, garsas
-    if (!rc)
-        for (auto& s : src) {
-            Source* p = s.get();
-            if (p->video) p->th_video = std::thread([p, &sh] { video_thread(*p, sh); });
-            if (p->audio) p->th_audio = std::thread([p, &sh] { audio_thread(*p, sh); });
-        }
+    // 5. Šaltinių gijos (demux, video, garsas) jau veikia nuo zondavimo
     IngestFn fn(o, st, src, stride, aout, inst, cpu, stream, pool, warm_tai_after(o.warmup_s), erate);
     bool engine_loss = false;
     std::uint32_t failed = 0;
