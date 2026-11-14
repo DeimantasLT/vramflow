@@ -161,7 +161,11 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
     if (margin_err_ns_ > db) fb = static_cast<double>(margin_err_ns_ - db) / (cfg_.margin_tau_s * 1e9) * 1e6;
     else if (margin_err_ns_ < -db) fb = static_cast<double>(margin_err_ns_ + db) / (cfg_.margin_tau_s * 1e9) * 1e6;
     // drift_ppm — šaltinio laikrodžio nuokrypio įvertis (nuolydis); comp_ppm — taikoma rampa (nuolydis + grįžtamasis ryšys)
-    ppm_ = cfg_.track_drift ? std::clamp(slope_ppm_ + fb, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
+    // Grįžtamasis ryšys rampos nestumia virš 90 % biudžeto (nebent pats nuolydis jau ten): resampleris (AudioSync) turi turėti
+    // atsargos sekti rampą, kitaip garsas atsilieka nuo off_a ir A/V viršija lauką (išmatuota: 0,5 % dreifas — 20,2 ms).
+    const double slope_c = std::clamp(slope_ppm_, -cfg_.max_comp_ppm, cfg_.max_comp_ppm);
+    const double lim = std::max(std::fabs(slope_c), 0.9 * cfg_.max_comp_ppm);
+    ppm_ = cfg_.track_drift ? std::clamp(slope_c + fb, -lim, lim) : 0.0;
     drift_ppm_.store(cfg_.track_drift ? std::clamp(slope_ppm_, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0, std::memory_order_relaxed);
     comp_ppm_.store(ppm_, std::memory_order_relaxed);
     margin_err_pub_.store(margin_err_ns_, std::memory_order_relaxed);
