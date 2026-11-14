@@ -190,9 +190,14 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
     if (stream < 0 || static_cast<std::size_t>(stream) >= streams_.size() || !streams_[static_cast<std::size_t>(stream)].added) return kDrop;
     if (dts_raw == kNoTimestamp) dts_raw = pts_raw;
     if (pts_raw == kNoTimestamp) pts_raw = dts_raw;
-    if (dts_raw == kNoTimestamp) return kDrop;
-
     Stream& s = streams_[static_cast<std::size_t>(stream)];
+    if (dts_raw == kNoTimestamp) {
+        // B1: paketas be laikų (laukais koduoto H.264 antras laukas — libavformat duoda paketą laukui, laikai tik pirmame). Nemetamas
+        // (be jo dekoderis neturi kadro): PTS — „nežinoma“ (kadro laikas — dekoduoto kadro, t. y. pirmo lauko PTS), DTS — paskutinio
+        // šio srauto paketo (tiekimo vartams). Fiksavimui ir dreifo langams nenaudojamas — jie tik pagal paketus su laikais (kadro ribos).
+        if (!s.have_tai || !cur_.ready) return kDrop;
+        return Stamp{kNoTimestamp, s.last_dts_tai, Event::None};
+    }
     const bool lock_kind = s.is_video || !has_video_;  // fiksavimo / dreifo srautas: video, o be video — bet kuris
     if (old_alive_ && arrival_tai_ns > old_deadline_) old_alive_ = false;
 
@@ -231,6 +236,8 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
         const Stamp out{pts_ns + off, dts_ns + off, Event::None};
         s.end_tai = out.dts_tai_ns + dur_ns;
         s.have_end = true;
+        s.last_dts_tai = out.dts_tai_ns;
+        s.have_tai = true;
         return out;
     }
 
@@ -342,6 +349,8 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
     const Stamp out{pts_ns + off, dts_ns + off, ev};
     s.end_tai = out.dts_tai_ns + dur_ns;
     s.have_end = true;
+    s.last_dts_tai = out.dts_tai_ns;
+    s.have_tai = true;
     if (lock_kind) {  // žalia atsarga ns(dts) − a; lango minimumas
         const std::int64_t r = dts_ns - arrival_tai_ns;
         if (!win_open_) {
@@ -367,7 +376,10 @@ void SourceClock::on_clock_step(std::int64_t step_ns) {
     off_v_prev_ += k;
     old_.off_v += k;
     old_.off_a += k;
-    for (Stream& s : streams_) s.end_tai += k;
+    for (Stream& s : streams_) {
+        s.end_tai += k;
+        s.last_dts_tai += k;
+    }
     reset_drift();
     publish();
 }

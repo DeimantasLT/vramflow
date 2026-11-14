@@ -641,6 +641,37 @@ TEST_CASE("source_clock: B5 — B kadrų srautas: vienas slydimas = lygiai viena
     CHECK((sign > 0 ? repeats : drops) == 0);  // greitesnis šaltinis — tik išmetimai; lėtesnis — tik pakartojimai
 }
 
+TEST_CASE("source_clock: B1 — laukais koduotas H.264 (PAFF): antras laukas be PTS / DTS nemetamas", "[timing][source_clock][paff]") {
+    // libavformat PAFF srautui duoda paketą laukui: pirmas laukas — su PTS / DTS ir rakto žyme, antras — be laikų. Antras laukas
+    // turi likti (be jo dekoderis neturi kadro), jo žyma — „nežinoma“ (kadro laikas — iš dekoduoto kadro, t. y. pirmo lauko PTS),
+    // fiksavimas ir dreifo langai — tik pagal laukus su laikais (kadro ribos).
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    // pradžia antru lauku (prisijungta vidury kadro): be laikų ir prieš fiksavimą — metamas (dar nėra kur dėti)
+    CHECK(sc.observe(0, kNoTimestamp, kNoTimestamp, 0, kA0 - 20'000'000).ev == Event::Dropped);
+    std::uint64_t kept = 0, locked_on_first = 0;
+    std::int64_t prev_dts = 0;
+    for (int k = 0; k < 250; ++k) {
+        const std::int64_t a = kA0 + k * kTf;
+        const Stamp f1 = sc.observe(0, k * kFrame, k * kFrame, kFrame / 2, a);
+        REQUIRE(f1.ev != Event::Dropped);
+        if (f1.ev == Event::Locked) ++locked_on_first;
+        CHECK(f1.pts_tai_ns % kTf == 0);  // pirmo lauko PTS — ant kadrų tinklelio
+        const Stamp f2 = sc.observe(0, kNoTimestamp, kNoTimestamp, 0, a + kTf / 2);
+        REQUIRE(f2.ev != Event::Dropped);
+        CHECK(f2.pts_tai_ns == kNoTimestamp);
+        CHECK(f2.dts_tai_ns == f1.dts_tai_ns);  // tiekimo vartams — ankstesnio lauko DTS
+        if (k > 0) CHECK(f1.dts_tai_ns - prev_dts == kTf);
+        prev_dts = f1.dts_tai_ns;
+        ++kept;
+    }
+    CHECK(kept == 250);
+    CHECK(locked_on_first == 1);
+    const ClockStats cs = sc.stats();
+    CHECK(cs.relock_fresh == 0);
+    CHECK(cs.drift_slips == 0);
+}
 
 // P3 (ingest_hls, išmatuota): HLS demuxeris grojaraštį perskaito kas segmento trukmę + apdorojimo laiką, todėl segmento
 // atvykimo fazė lėtai ir tiesiškai slenka (pjūklas su ~minučių periodu) — statistiškai „reikšmingas“ nuolydis, nors laikrodžio

@@ -262,7 +262,8 @@ void demux_thread(Source& s, Shared& c) {
                 it.p.pkt->pts = st.pts_tai_ns;
                 it.p.pkt->dts = st.dts_tai_ns;
                 it.p.pkt->time_base = AVRational{1, 1'000'000'000};
-                it.p.pts_tai_ns = st.pts_tai_ns;
+                // B1: paketas be PTS (PAFF antras laukas) — pkt->pts lieka AV_NOPTS_VALUE (kadro laikas — iš pirmo lauko), vartams — DTS
+                it.p.pts_tai_ns = st.pts_tai_ns == timing::kNoTimestamp ? st.dts_tai_ns : st.pts_tai_ns;
                 it.p.dts_tai_ns = st.dts_tai_ns;
                 it.p.key = (it.p.pkt->flags & AV_PKT_FLAG_KEY) != 0;
                 it.p.kind = k;

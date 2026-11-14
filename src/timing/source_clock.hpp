@@ -28,7 +28,8 @@
 
 namespace mxlv::timing {
 
-// Laiko žyma nežinoma (== AV_NOPTS_VALUE). Trūkstamas DTS imamas iš PTS ir atvirkščiai.
+// Laiko žyma nežinoma (== AV_NOPTS_VALUE). Trūkstamas DTS imamas iš PTS ir atvirkščiai; abiejų nėra (B1: PAFF antras laukas) —
+// po fiksavimo paketas paliekamas su PTS == kNoTimestamp ir paskutinio šio srauto paketo DTS_TAI.
 inline constexpr std::int64_t kNoTimestamp = INT64_MIN;
 
 struct SourceClockConfig {
@@ -95,6 +96,8 @@ private:
         std::uint64_t epoch = 0;  // epocha, kuriai priklausė paskutinis paketas
         std::int64_t last_raw = 0, last_ext = 0;
         std::int64_t end_tai = 0;  // paskutinio paketo dts_tai + trukmė (tęsiniui po nutrūkimo)
+        bool have_tai = false;     // B1: paskutinio pažymėto paketo DTS_TAI (paketams be laikų)
+        std::int64_t last_dts_tai = 0;
     };
     struct Epoch {
         std::uint64_t id = 0;
