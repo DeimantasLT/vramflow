@@ -350,9 +350,10 @@ void video_thread(Source& s, Shared& c) {
     // 8 bitų 4:2:0 kelias, G variante kadrai įkeliami į GPU), su žurnalo eilute ir skaitikliu decoder_fallbacks. Programinis irgi
     // nepavyko — šaltinis sustabdomas matomai (vieneto gedimas, kiti tęsia).
     ig::Decoder cur_dec = c.decoder;
-    const AVCodecParameters* cur_par = s.vpar0;
+    // sesijos parametrų KOPIJA (eilės žymės parametrai atlaisvinami iškart po atidarymo — rodyklė į juos būtų kabanti)
+    std::unique_ptr<AVCodecParameters, void (*)(AVCodecParameters*)> cur_par(nullptr, [](AVCodecParameters* p) { avcodec_parameters_free(&p); });
     auto open = [&](const AVCodecParameters* par) {
-        cur_par = par;
+        cur_par.reset(par_copy(par));
         std::string e1;
         const bool hw_test_fail = c.o.test_hw_decoder_fail && cur_dec != ig::Decoder::Sw;
         if (!hw_test_fail && dec.open(par, cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, e1)) return true;
@@ -432,7 +433,7 @@ void video_thread(Source& s, Shared& c) {
                                    " paketų iš eilės su klaida) — perjungiama į programinį dekoderį");
             ++s.decoder_fallbacks;
             cur_dec = ig::Decoder::Sw;
-            if (!dec.open(cur_par, cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) {
+            if (!dec.open(cur_par.get(), cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) {
                 s.stop_format(s.name + ": programinis dekoderis: " + err);
                 break;
             }
