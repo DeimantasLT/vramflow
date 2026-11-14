@@ -3,7 +3,7 @@
 **MXL media flow'ai GPU atmintyje ir jų apdorojimas ten pat — su tuo pačiu laiku ir elgsena kaip MXL ant CPU.**
 
 Išsamus aprašas su visomis komandomis ir kodo pavyzdžiais — [README.md](README.md) (anglų k.). Čia — trumpai, ta pačia
-tvarka.
+skyrių tvarka; jei kas nors skiriasi, teisingas README.md.
 
 [MXL](https://github.com/dmf-mxl/mxl) leidžia media funkcijoms keistis nesuspaustu vaizdu, garsu ir duomenimis per
 bendrą atmintį (įprastai — RAM). Su `cuda-linear` backend'u iš
@@ -22,14 +22,12 @@ Viskas C++ / CUDA; Python — tik testų ir matavimų skriptai.
 ## 1. Pagrindinės sąvokos
 
 - **Domenas** — katalogas bendroje atmintyje (`/dev/shm/...`); visi jį naudojantys procesai mato vienas kito flow'us.
-- **Flow** — vienas srautas (pvz. vienas video signalas) su UUID ir aprašu.
-- **Grain** — vienas flow'o vienetas; čia — vienas video **laukas** (1080i50 = 50 laukų/s). Indeksas skaičiuojamas iš
-  TAI laiko, todėl visi procesai sutaria, kuris grain'as kuriam momentui.
+- **Flow** — vienas srautas (pvz. vienas video signalas) su UUID ir aprašu (`flow_def.json`).
+- **Grain** — vienas flow'o vienetas: interlaced formatui — **laukas** (1080i50 = 50 laukų/s), progresyviam — kadras.
+  Indeksas skaičiuojamas iš TAI laiko, todėl visi procesai sutaria, kuris grain'as kuriam momentui.
 - **Writer / reader** — writer'is sukuria flow'ą ir commit'ina grain'us, reader'ių gali būti kiek nori.
 - **Saugykla** — `host` (RAM) arba `cuda-linear` (GPU atmintis). API abiem ta pati.
 - **v210 / v210a** — 10 bitų 4:2:2 video; `v210a` turi dar key (alfa) plokštumą.
-
-Trys variantai, renkami dviem parametrais:
 
 | Variantas | `--impl` | `--storage` | Kada |
 |---|---|---|---|
@@ -41,13 +39,14 @@ Visi trys duoda bitų tikslumu vienodą rezultatą (tikrinama prieš vieną nepr
 
 ## 2–3. Reikalavimai ir surinkimas
 
-Ubuntu 24.04 (natyviai arba WSL2), GPU variantams — NVIDIA GPU ir CUDA 13.x; Clang 19, CMake, Ninja, vcpkg, FFmpeg dev
-bibliotekos. Sistemos TAI poslinkis turi būti 37 s. Surinkimas — trys žingsniai, žr. README.md 3 skyrių
+Ubuntu 24.04 (natyviai arba WSL2), GPU variantams — NVIDIA GPU su NVENC / NVDEC ir CUDA 13.x; Clang 19 (arba GCC 13+),
+CMake ≥ 3.28, Ninja, vcpkg, `libavformat-dev libavcodec-dev libavutil-dev`, `ffmpeg`, Python 3 (tik testams). Sistemos TAI
+poslinkis turi būti 37 s (kitaip funkcijos nestartuoja be `--allow-bad-clock`). Surinkimas — README.md 3 skyrius
 (MXL su PR #653 → `10-build-mxl.sh` → `30-build-verify.sh -DMXLV_BUILD_FUNC=ON`).
 
 ## 4. Greita pradžia
 
-README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
+README.md 4 skyriuje — pavyzdžiai, kuriuos galima nukopijuoti:
 
 1. pirmas writer'is ir reader'is RAM'e (`vramflow-verify writer/reader --storage host`);
 2. tas pats GPU atmintyje (`--storage cuda-linear`);
@@ -66,32 +65,68 @@ README.md 4 skyriuje — penki pavyzdžiai, kuriuos galima nukopijuoti:
   (pasirinktinai su kviečiančiojo `cuda_stream`), būsena — `vfgfx_get_stats`. Leidimas 0.2.0, SONAME
   `libvramflow-gfx.so.1` (ABI epocha, simboliai `VFGFX_1`). Pavyzdys README.md 5.2.
 - **Pavyzdys: OGraf grafika ant video** — `examples/ograf/` (README.md 5.3): headless naršyklė su permatomu fonu atvaizduoja
-  [EBU OGraf](https://github.com/ebu/ograf) grafiką, `ograf_feed` per `vfgfx_submit` (ritmo režimas) paverčia ją `v210a`
-  flow'u, `composite` uždeda ant `gen` video. Gyvam renderiui panaudotas jau įdiegtas Windows Edge (~4 kadrai/s);
-  oficialių EBU pavyzdinių grafikų neatsisiųsta; kiti renderiai (pvz. GStreamer `wpesrc`) jungiami per stdin.
-- Grafikos flow'as elgiasi kaip bet kuris kitas: sustojus šaltiniui, kompozitorius nieko neišgalvoja — tas išėjimo
-  grain'as necommit'inamas, šaltiniui grįžus darbas tęsiasi.
+  [EBU OGraf](https://github.com/ebu/ograf) grafiką, `ograf_feed` per `vfgfx_submit` paverčia ją `v210a` flow'u, `composite`
+  uždeda ant `gen` video.
+- Grafikos sluoksnis, kuris dingo, vėluoja ar grįžo kitu formatu, tam kadrui tampa permatomas (`layer_absent`) — programa
+  (bazė) tęsiasi be spragos; sluoksnis laukiamas tik iki pirmo pjūvio a(i) ir vėl naudojamas po `--layer-return-frames`
+  kadrų laiku (numatyta 12).
 
 ## 6. Komandos
 
-`vramflow-func gen | logo | dec | enc | gfxgen | composite | verify` — lentelė su pagrindiniais parametrais README.md
-6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo `summary-<komanda>.json`, išėjimo kodas `0` — viskas
-teisinga.
+`vramflow-func gen | logo | dec | enc | gfxgen | composite | verify | keepwarm` — lentelė su pagrindiniais parametrais
+README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo `summary-<komanda>.json`.
 
-Paleidimo ir sustabdymo taisyklės (plačiau — README.md, „Start order, waits and restarts“ ir „Domain ownership“):
-
-- **Paleidimo tvarka nesvarbi.** Skaitančios funkcijos (`logo`, `composite`, `verify`, `enc`) įėjimų laukia:
-  `--input-wait-ms 0` (numatyta) — neribotai, kas 5 s rašo `laukiu flow …` (ir kodėl esamas flow netinka);
-  `--input-wait-ms N` — ne ilgiau kaip N ms, tada išėjimo kodas `4` su trūkstamų flow'ų sąrašu.
-- **Gamintojas dingo ir grįžo.** Skaitytojas tęsia darbą, spragos indeksus suskaičiuoja (`missing_fields`), grįžus
-  gamintojui prisijungia pats (`reattached`). Grįžo kitu formatu — `--on-format-change exit` (numatyta, kodas `6`) arba
-  `wait`. Spragos indeksai į paties skaitytojo išėjimą kol kas nerašomi (INVALID grain'ai — plano P5 dalis).
-- **Domeno nuoma.** Kiekvienas `vramflow-func` procesas laiko `<domenas>.vramflow/<run-id>.lease` šalia domeno (`flock`,
-  atsilaisvina ir po `kill -9`); `--run-id` — paleidimo vardas. Bandant sukurti flow, kurį jau rašo kitas gyvas
-  paleidimas, klaidoje nurodomas jo run ID. Funkcijos domenų netrina; testų įrankiai (`tests/perf/domain.py`) kiekvienam
-  paleidimui kuria atskirą domeną ir trina jį tik tada, kai nebėra gyvų savininkų.
+- **Tarnyba arba matavimas.** `--duration 0` (numatyta funkcijoms) — veikia iki `SIGINT` / `SIGTERM`; `--duration S > 0` —
+  matavimo paleidimas. Antras signalas — išeinama iškart (eilės neišleidžiamos, flow'ai atlaisvinami).
+- **Formatai** (`--format`, ta pati reikšmė visai grandinei): `1080i50` (numatytasis), `1080i59.94`, `1080p25|50|29.97|59.94`,
+  `720p…`, `2160p…`. Interlaced — grain'as yra laukas (viršutinis pirmas), progresyvus — kadras. Progresyvus 4:2:0 → 4:2:2 —
+  kadro chroma (bitų tikslumu kaip FFmpeg bilinear), interlaced — lauko chroma. Galas į galą tikrinti 1080i50, 1080p25,
+  1080p50 (ir 720p50 `logo`); BFF atmetamas.
+- **Spragų politika** (rašytojai `gen`, `logo`, `composite`, `dec`): commit'inamas **kiekvienas** indeksas. Be turinio —
+  `--on-loss invalid` (numatyta: INVALID grain'as su juodu turiniu, niekas neišgalvojama), `freeze` (paskutinis geras to paties
+  pariteto ne ilgiau kaip `--hold-ms`, tada juoda) arba `black`. Ne šios funkcijos praradimai skaičiuojami atskirai:
+  `gap_startup` (įėjimas dar neprisijungė), `gap_upstream` (įėjimas pats pateikė INVALID), `gap_align` (interlaced — iki kadro
+  ribos).
+- **Paleidimo tvarka nesvarbi.** `logo` numatytai startuoja iškart (`--start immediate`): išėjimai sukuriami tuoj pat, iki
+  įėjimo — spragos pagal `--on-loss` (`gap_startup`, ne praradimas); `--start wait-all` — sena elgsena. `composite`, `enc`,
+  `verify` įėjimų laukia: `--input-wait-ms 0` (numatyta) — neribotai, kas 5 s `laukiu flow …` (ir kodėl esamas flow netinka);
+  `N` — ne ilgiau kaip N ms, tada exit `4` su trūkstamų flow'ų sąrašu.
+- **Gamintojas dingo ir grįžo.** Skaitytojas tęsia, spragos indeksai commit'inami pagal `--on-loss` (`missing_fields`,
+  `gap_invalid`), grįžus gamintojui prisijungia pats (`reattached`). Prisijungimas (reader'is ir `cuda-linear` atvaizdavimas)
+  vyksta pagalbinėje gijoje, ne tick'e — tick'ui jis nieko nekainuoja. Grįžo kitu formatu — `--on-format-change exit`
+  (numatyta, exit `6`) arba `wait`.
+- **Grandinės laikas (briaunos sutartis).** Kiekvienas išėjimas flow aprašo žymoje skelbia, iki kada po `T(i)` grain'as
+  commit'inamas (`urn:x-vramflow:tag:commit-bound-ns`) ir kiek turinys vėluoja nuo kilmės (`…:content-delay-ns`). Skaitytojas
+  tick'ą atidaro `T(i) + E + ro` (E — didžiausia įėjimų riba), todėl niekas nevėluoja „pagal konstrukciją“, o vėlinimas
+  kaupiasi matomai (50 Hz `gen → logo → logo → composite → enc`: 8; 16,5; 25; 33,5; 42 ms). Svetimam rašytojui be žymų —
+  `--input-expect-ms`; skaityti anksčiau — `--input-offset K`; sukaupta delsa turi tilpti į domeno ring'ą (200 ms numatyta).
+- **Domeno nuoma.** Kiekvienas procesas laiko `<domenas>.vramflow/<run-id>.lease` šalia domeno (`flock`, atsilaisvina ir po
+  `kill -9`); `--run-id` — paleidimo vardas. Flow'o, kurį jau rašo kitas gyvas paleidimas, sukurti negalima (exit `2`,
+  klaidoje — savininko run ID). Funkcijos domenų netrina.
 - **Domeno kelias GPU (`cuda-linear`) flow'ams — ne ilgesnis kaip 48 simboliai** (skaitytojo lizdo
   `<domenas>/<flow>.mxl-flow/payload.sock` kelias turi tilpti į 107 simbolius); ilgesnį `vramflow-func` atmeta iškart.
+- **Sąveika su MXL įrankiais.** `mxl-info` skaito visus VRAMFlow flow'us; `mxl-gst-sink` / `mxl-gst-cuda-sink` rodo `gen` ir
+  `logo` išėjimus ir per aukštupio pertrauką laiko paskutinį gerą vaizdą (`--on-loss invalid`).
+
+Exit kodai (variklio funkcijos; griežtas — `--strict-exit on` arba `auto` su `--duration S > 0`, švelnus — tarnyboje):
+
+| Situacija | griežtas | švelnus |
+|---|---:|---:|
+| Tvarkinga pabaiga, nieko neprarasta | 0 | 0 |
+| Kas nors prarasta (spraga, vėlavimas, praleistas indeksas, išėjimo klaida) | 4 | 0 |
+| Sugedo vienas vienetas (kiti tęsia) | 2 | 0 |
+| Sugedo visi vienetai; paleidimo ar vykdymo klaida | 2 | 2 |
+| Netinkamos parinktys | 1 | 1 |
+| Įėjimai neatsirado per `--input-wait-ms` | 4 | 4 |
+| Įėjimas grįžo kitu formatu (`--on-format-change exit`) | 6 | 6 |
+
+`verify` — exit `3`, jei yra teisingumo klaidų.
+
+## 7. Testai ir matavimai
+
+`bash scripts/linux/run-all.sh --soak skip` — viskas (zondai, upstream testai, vienetų / GPU / funkciniai testai, ataskaita);
+talpa — `tests/perf/capacity.py`, CPU prieš GPU — `scripts/linux/71-compare.sh` + `tests/perf/compare_report.py`. Tik
+sintetinė medžiaga.
 
 ## 8. Rezultatai (RTX 4070 Laptop 8 GB, WSL2 — orientaciniai)
 
@@ -103,10 +138,9 @@ Paleidimo ir sustabdymo taisyklės (plačiau — README.md, „Start order, wait
 
 N\* — didžiausias flow'ų skaičius, kai ši ir visos mažesnės pakopos praėjo (0 teisingumo klaidų, praradimai ≤ 0,2 %).
 Pilnoje grandinėje ties N=12 riba — vienintelis NVENC variklis, CUDA branduoliai užimti ~10 %. Visos lentelės:
-[`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md). Grafikos kompozitoriaus talpos
-matavimai (N flow'ų × K sluoksnių):
+[`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
 
-Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pakopa, terminas 30 ms, tas pats N\* (tolerantiškai / griežtai):
+Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pakopa, terminas 30 ms, N\* (tolerantiškai / griežtai):
 
 | Sluoksnių K | C — CPU | H — GPU, RAM flow'ai | G — GPU, GPU flow'ai |
 |---|---|---|---|
@@ -114,18 +148,30 @@ Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pako
 | 2 (logotipas + pilno ekrano) | 8 / 4 | 4 / 0 | 2 / 0 |
 | 4 (logotipas + 3 × pilno ekrano) | 4 / 4 | 4 / 2 | 0 / 0 |
 
-Lentelę skaityti atsargiai: Windows energijos profilis „Whisper“; G bėgimuose GPU dažnio vidurkis tik 210–690 MHz; kiekviena
-pakopa matuota vieną kartą (be pakartojimų); G pakopos kartais nepraeina žemuose N, nors didesni N praeina, todėl N\* G
-atveju pesimistiškas (didžiausias praėjęs N: 32, 32, 16 esant K = 1, 2, 4; K = 4, N = 32 pasiekė 8 GB VRAM ribą). Ar dažnis
-paaiškina nesėkmes — netikrinta hipotezė. Pirmas G matavimas buvo negaliojantis (`gfxgen` klaida, ištaisyta) ir pakartotas.
-Išsamiai: [`docs/rezultatai/2026-11-11-composite.md`](docs/rezultatai/2026-11-11-composite.md).
+Lentelę skaityti atsargiai (energijos profilis „Whisper“, GPU dažnis G bėgimuose 210–690 MHz, kiekviena pakopa — kartą);
+išsamiai: [`docs/rezultatai/2026-11-11-composite.md`](docs/rezultatai/2026-11-11-composite.md).
+
+**GPU dažniai.** Nešiojamo kompiuterio GPU (WSL2 / WDDM) iš P8 į P3 pereina sustabdydamas visų procesų GPU darbą 50–350 ms;
+kol eteris gyvas, laikykite `vramflow-func keepwarm` (64 MB kas 5 ms; +8,5 W) — testų įrankiai jį paleidžia patys. Serveriams
+— užrakinti dažnius (nepatikrinta). Išsamiai:
+[`docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md`](docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md).
+
+## 9–11. Repo, upstream pataisos, ribos
+
+- Struktūra: `include/vramflow/gfx.h` (viešas C API), `src/func/` (komandos), `src/engine/` (bendras tick variklis),
+  `src/timing/` (PTS → TAI), `src/gfx/`, `src/media/` (CUDA, CPU, etalonas), `tests/`, `scripts/linux/` (`scripts/wsl/` —
+  nukreipimai vienam leidimui), `upstream/`, `docs/` (lietuviškai).
+- Upstream: [`upstream/README.md`](upstream/README.md) — U1–U4 PR #653 pataisų juodraščiai (su U1–U3 testai 136/136).
+- Ribos: matuota viename nešiojamame GPU per WSL2; variantas H — tik logotipui, kompozitoriui ir transportui; 2 val. soak ir
+  pilno sanitizer'ių paleidimo media funkcijoms dar nėra; NVENC šiame GPU koduoja progresyviai (x264 — tikras interlaced);
+  VRAM flow'ai — tarp procesų toje pačioje mašinoje ir GPU.
 
 ## Licencija ir autorystė
 
 Apache License 2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE)). Galima naudoti, keisti, platinti ir parduoti, taip pat
 uždaruose produktuose. Platinant kodą ar jo išvestinį darbą, privaloma palikti NOTICE failą su autoriaus vardu.
 Jei šis darbas panaudotas produkte, standarte ar publikacijoje, prašome nurodyti: **„VRAMFlow, autorius Deimantas
-Kiršinas“** su nuoroda į šį repo.
+Kiršinas“** su nuoroda į šį repo. Su FFmpeg (libx264) susietos programos platinamos pagal GPL (žr. NOTICE).
 
 Sukurta padedant DI programavimo asistentams (Claude). Autorius peržiūrėjo dizainą, visus matavimus atliko ant tikros
-įrangos ir atsako už turinį.
+įrangos ir atsako už turinį. MXL — EBU ir Linux Foundation projektas; šis repo nuo jų nepriklauso.

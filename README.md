@@ -471,6 +471,9 @@ stderr every 5 s.
   the producer comes back with the same flow ID, the reader attaches again by itself (`reattached` per flow; `reopened`
   in `composite`) and continues. Every index of the gap is still committed to its own output according to `--on-loss`
   (default: INVALID grains, counted as `gap_invalid`), so a reader downstream never waits on a missing index.
+- Attaching (creating the reader and, for `cuda-linear`, mapping the GPU payload — up to ~18 ms) and releasing a detached
+  reader run on a helper thread of the input, never inside a tick: an input that appears late or returns costs the
+  running outputs nothing; the engine adopts the prepared reader between ticks.
 - A restarted producer removes the stale flows of its killed predecessor (`mxlGarbageCollectFlows`) before it creates its
   own, so a restart with the same flow IDs works. A flow that still has a live writer is never removed.
 - `SIGINT` / `SIGTERM` while waiting for inputs ends the function cleanly with exit code `0`.
