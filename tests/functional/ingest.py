@@ -902,6 +902,55 @@ def ingest_hls_by_content(out):
 
 
 
+def ingest_reconnect_reprobe(out):
+    """B6: po prisijungimo iš naujo pirmas zondavimas nepavyksta (siuntėjas kelias sekundes siunčia tik garsą — video srauto
+    nėra) — tai NE formato pasikeitimas: bandoma iš naujo su atidėjimu, šaltinis grįžta, kai vėl ateina A/V (format_changed == 0,
+    exit ne 6, po grįžimo kadrai dekoduojami ir A/V ≤ 1 laukas)."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_reconnect_reprobe", "FAIL", why=why)]
+    tid, port = "ingest_reconnect_reprobe", BASE_PORT + 46
+    UP1, GAP, BAD, UP2 = 15, 4, 8, 25
+    T = UP1 + GAP + BAD + UP2
+    d = F.fresh_domain(tid)
+    v = F.vcommon("gpu", "cuda-linear")
+    ing = vf = None
+    snd = []
+    try:
+        ing = F.FProc(out, tid, "ingest", d, "--input", f"udp://127.0.0.1:{port}", "--duration", T + 12, "--warmup", 6, *v)
+        snd.append(Sender.ts(out, f"{tid}/snd1", CLIPS / "av_1080i50.ts", port))
+        vf = F.FProc(out, tid, "verify", d, "--mode", "ingest", "--flows", 1, "--duration", T + 6, "--warmup", 6, "--lag-fields", 3, "--audio", 1,
+                     "--input-wait-ms", 30000, "--impl", "gpu", "--storage", "cuda-linear")
+        time.sleep(UP1)
+        snd[-1].stop()
+        time.sleep(GAP)
+        snd.append(Sender.ts(out, f"{tid}/snd2", CLIPS / "audio_only_90.ts", port))
+        time.sleep(BAD)
+        snd[-1].stop()
+        snd.append(Sender.ts(out, f"{tid}/snd3", CLIPS / "av_1080i50.ts", port))
+        vf.wait(timeout=T + 90)
+        ri = ing.wait(timeout=T + 90)
+    finally:
+        for pr in (vf, ing):
+            if pr is not None:
+                pr.term()
+        for s in snd:
+            s.stop()
+    si, sv = F.vsummary(ing, "ingest"), F.vsummary(vf, "verify-ingest")
+    fi = flow(si)
+    err = ing.err_path.read_text(errors="replace") if ing is not None and ing.err_path.exists() else ""
+    a = av_stats(sv)
+    i0 = a["raw"][0][0] if a["raw"] else 0
+    after = [p[1] / 1000.0 for p in a["raw"] if (p[0] - i0) / 50 > UP1 + GAP + BAD + 4]
+    problems = []
+    if fi.get("format_changed", 0) or ri == 6:
+        problems.append(f"format_changed {fi.get('format_changed')}, exit {ri} (zondavimo nesėkmė palaikyta formato pasikeitimu)")
+    if fi.get("input_reconnects", 0) < 2:
+        problems.append(f"input_reconnects {fi.get('input_reconnects')} < 2")
+    if len(after) < (UP2 - 8) * 0.6 or not after or max(abs(x) for x in after) > 20:
+        problems.append(f"po grįžimo A/V porų {len(after)}, maks. {max((abs(x) for x in after), default=None)} ms")
+    line = next((ln for ln in err.splitlines() if "nėra video" in ln or "formatas pasikeitė" in ln), "")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | {line.strip()[:200]} | " +
+                     summary_line(si, sv, a, ratio_ok(flow(sv))))]
 
 
 def ingest_overload_skip(out):
@@ -1080,3 +1129,4 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_secrets_redacted": ingest_secrets_redacted, "ingest_audio_absent_reconnect": ingest_audio_absent_reconnect,
          "ingest_live_stats_fallback": ingest_live_stats_fallback, "ingest_hls_by_content": ingest_hls_by_content}
 TESTS["ingest_drift_default"] = ingest_drift_default
+TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe

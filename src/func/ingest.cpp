@@ -227,13 +227,32 @@ void demux_thread(Source& s, Shared& c) {
                 const ig::StreamInfo& in = s.demux.info();
                 vramflow::VideoFormat f{};
                 std::string fw;
-                if (s.video && (!in.video || !s.demux.video_format(f, fw) || !(f == s.fmt))) {
-                    why = "formatas pasikeitė po prisijungimo iš naujo: " + (in.video ? (fw.empty() ? vramflow::format_name(f) : fw) : "nėra video") +
-                          " (flow " + vramflow::format_name(s.fmt) + ")";
+                // B6: nepavykęs / neišsamus zondavimas (nėra video, nežinomas dydis ar pikselių formatas) — NE formato pasikeitimas:
+                // sesija baigiama, jungiamasi iš naujo su atidėjimu. Formatą apibrėžia rastras ir skenavimas; kadrų dažnis zonduojant
+                // gali būti įvertintas (avg_frame_rate) — jo neatitikimas tik žurnale (kadrų indeksus lemia dekoduotų kadrų PTS).
+                if (s.video && (!in.video || in.vpar->width <= 0 || in.vpar->format < 0)) {
+                    why = std::string("zondavimas po prisijungimo iš naujo neišsamus (") + (in.video ? "nežinomas dydis / formatas" : "nėra video") +
+                          ") — bandoma iš naujo";
+                    s.demux.close();
+                    return false;
+                }
+                if (s.video && !s.demux.video_format(f, fw) && fw.find("dažnis") != std::string::npos) {
+                    f = s.fmt;  // tik dažnis nežinomas — rastras / skenavimas tikrinami žemiau iš parametrų
+                    f.raster.w = in.vpar->width;
+                    f.raster.h = in.vpar->height;
+                    fw.clear();
+                }
+                const bool same_raster = f.raster.w == s.fmt.raster.w && f.raster.h == s.fmt.raster.h && f.raster.interlaced == s.fmt.raster.interlaced;
+                if (s.video && (!fw.empty() || !same_raster)) {
+                    why = "formatas pasikeitė po prisijungimo iš naujo: " + (fw.empty() ? vramflow::format_name(f) : fw) + " (flow " +
+                          vramflow::format_name(s.fmt) + ")";
                     s.stop_format(why);
                     s.demux.close();
                     return true;
                 }
+                if (s.video && (f.frame_rate.num != s.fmt.frame_rate.num || f.frame_rate.den != s.fmt.frame_rate.den))
+                    log_line("ingest", s.name + ": po prisijungimo iš naujo zonduotas kadrų dažnis " + vramflow::format_name(f) + " (flow " +
+                                           vramflow::format_name(s.fmt) + ") — laikomas įverčiu, šaltinis tęsiamas");
                 // nauja sesija: dekoderiai atidaromi iš naujo. Laikrodis — tas pats: siuntėjas pradėjo iš naujo (PTS šuolis) —
                 // nauja epocha ir fiksavimas; gyvo šaltinio PTS tęsiasi — tas pats PTS → TAI atvaizdis (indeksai nepasislenka)
                 if (s.video) s.vq.push(QItem{{}, par_copy(in.vpar)});
