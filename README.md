@@ -508,7 +508,8 @@ stderr every 5 s.
 
 `vramflow-func ingest --domain D --input URL [--input URL …]` — one process, any number of sources. Transports are the
 libavformat protocols of the system FFmpeg: `udp://`, `rtp://` (MPEG-TS payload, PT 33), `srt://` (if FFmpeg has it; otherwise
-the start fails with "srt protokolas nepalaikomas"), `http(s)://…/x.m3u8` (HLS), or a file.
+the start fails with "srt protokolas nepalaikomas"), `http(s)://…` (HLS, recognised by content; or MPEG-TS over HTTP), or a
+local MPEG-TS file.
 
 | Option | Meaning |
 |---|---|
@@ -521,7 +522,21 @@ the start fails with "srt protokolas nepalaikomas"), `http(s)://…/x.m3u8` (HLS
 | `--input-wait-s S` | How long to wait for the first data at start (default: no limit); after that exit `2`, the message names the URL and the reason, and no flow is created |
 | `--input-silence-ms N` | A source silent for longer reconnects with back-off 1, 2, 4 … ≤ 30 s (default 2000; HLS: at least 3 segments) |
 | `--max-comp-ppm X` | Audio drift compensation limit (default 1000 = ±0.1 %, inaudible) |
+| `--hls-max-target-s S` | Largest accepted HLS `#EXT-X-TARGETDURATION` (default 30); a longer one rejects that source with a clear message |
+| `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
 | `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
+
+**Security rules (URLs and playlists).** The `--input` URL is trusted, but its scheme must be `udp`, `rtp`, `srt`, `http`,
+`https` or a local file path; anything else (`file:`, `tcp:`, `concat:`, `data:`, `crypto+…` …) is a usage error (exit `1`).
+Every libavformat open, including nested ones (HLS segments, RTP → UDP, HTTP → TCP/TLS), gets an explicit
+`protocol_whitelist` and `format_whitelist` derived from that scheme (local file: `file` / `mpegts` only). An `http(s)`
+source is checked before libavformat: HLS is recognised by its content (`#EXTM3U`), not by the `.m3u8` suffix; a master
+playlist may point to media playlists only (no nesting, no loops); every URL a playlist names (variants, segments,
+`URI="…"` keys and maps) must resolve to `http`/`https`; playlists are limited to 1 MiB. While the source runs, every open
+libavformat makes is checked again (http/https only), and a master playlist appearing in place of a media playlist ends
+only that session (the source reconnects with back-off; the other sources are not affected). User info and all query
+values (`passphrase=…`, tokens) are replaced by `***` in log lines, error messages, the summary and the stats file,
+including libavformat's own log lines.
 
 **Timing model in plain words.** Every packet is stamped once, when the demuxer reads it: *output time = source timestamp
 + one offset per source*. The offset is fixed by the first video packet so that it is shown `--latency-ms` after it arrived,
@@ -541,8 +556,29 @@ can still make it, so an overloaded decoder loses single GOPs instead of falling
   one of the formats in *Formats*. Field order is read from the first IDR of the stream (libavformat's guess from a
   mid-stream start is not reliable). 4:2:2, 10-bit, BFF and unknown sizes or rates are rejected at start with the format
   named (exit `2`).
-- A resolution change in the middle of a stream (or a reconnect that comes back with another format) stops that source with
-  a clear message and releases its flows; the other sources continue; the process ends with exit code `6`.
+- A resolution change in the middle of a stream (or a reconnect that comes back with another raster or scan) stops that
+  source with a clear message and releases its flows; the other sources continue; the process ends with exit code `6`. A
+  reconnect whose probe is incomplete (no video yet, unknown size) is retried with back-off; a different probed frame rate
+  is only logged (frame indices follow the decoded frames' timestamps).
+- Clock drift: the drift estimate comes from the windowed minima of the arrival margin; outside a dead band (default 50 ms)
+  a slow feedback term (τ = 600 s, at most 90 % of `--max-comp-ppm`) steers the margin back, so a residual error does not
+  accumulate into a relock. Video slips are applied in presentation order (one slip = exactly one frame on B-frame
+  streams). HLS: no slope tracking (segment arrival phase is not the clock), margin feedback with a dead band of one
+  segment.
+- A relock (splice, new lock after an outage, latency change beyond the guard) is logged with its reason and size and
+  counted (`relock_events`, live `relocks`); for a step of half a frame or more, everything of the old timeline not yet
+  shown is dropped for video and audio at the same point, and audio switches with a 5 ms fade.
+- Decoding starts at an IDR, a recovery-point SEI or an I slice (open GOP, periodic intra refresh); discarded packets are
+  counted (`probe_scan_dropped_pkts`, `entry_dropped_pkts`), a stream without an entry point is reported. Field-coded
+  H.264 second fields without timestamps are kept (frame time from the first field). If NVDEC cannot open or stops
+  decoding, the source falls back to the software decoder (`decoder_fallbacks`); an audio stream that is missing or cannot
+  be decoded after a reconnect is written as silence (`audio_absent`) and retried on the next session.
+- Limit: the source clock is locked on the first video packet, not on the PCR. Audio headroom is therefore the latency minus
+  the encoder's video VBV delay; for a stream with a VBV delay close to or above `--latency-ms` (default 1000) raise the
+  latency accordingly.
+- Live statistics: with `--stats-file` every line carries the per-source counters under `flows[n].fn` (`pkts_video`,
+  `frames_decoded`, `late_frames`, `missing_frames`, `decode_errors`, `audio_silent_samples`, `input_reconnects`,
+  `drift_slips`, `relocks`, `decoder_fallbacks`, …).
 - Sources of different rate families (50 Hz and 59.94 Hz) need separate processes; 50 Hz and 25p mix in one process.
 - Per-source counters (summary `flows[k]`): `fields_ok`, `frames_decoded`, `late_frames` (decoded after its time, dropped),
   `missing_frames`, `repeat_frames` / `slip_drop_frames` (frame synchroniser), `skip_to_key`, `drift_slips`, `relock_cont`

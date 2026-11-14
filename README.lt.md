@@ -119,6 +119,15 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   nededamas į dekoderį — praleidžiama iki kito rakto kadro (perkrova nesugriūna). Formatas nustatomas iš srauto prieš kuriant
   flow'us (laukų tvarka — iš pirmo IDR); 4:2:2, 10 bitų, BFF atmetami su įvardytu formatu (exit `2`); formatas pasikeitė vidury
   srauto — tas šaltinis sustabdomas, kiti tęsia, exit `6`. 50 Hz ir 25p šaltiniai — viename procese, 59,94 šeima — atskirame.
+  **Saugumas:** `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
+  libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`; HLS atpažįstamas pagal turinį, master →
+  media (be gylio ir kilpų), visos grojaraščio nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`
+  (numatyta 30), garso žiedas ≤ `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir
+  statistikoje — `***`. **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
+  slydimai — pateikimo tvarka, perfiksavimas — žurnale su priežastimi ir dydžiu, garsas — su 5 ms perėjimu; dekodavimas nuo
+  IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
+  naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
+  video paketą, ne PCR — srautui su VBV vėlinimu ≥ `--latency-ms` latenciją reikia didinti.
 - **Sąveika su MXL įrankiais.** `mxl-info` skaito visus VRAMFlow flow'us; `mxl-gst-sink` / `mxl-gst-cuda-sink` rodo `gen` ir
   `logo` išėjimus ir per aukštupio pertrauką laiko paskutinį gerą vaizdą (`--on-loss invalid`).
 
