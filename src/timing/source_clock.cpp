@@ -100,6 +100,9 @@ void SourceClock::reset_drift() {
     ramp_acc_ = 0;
     ppm_ = 0;
     slope_ppm_ = 0;
+    switch_active_ = false;  // (per)fiksavimas — visi kadrai nuo šiol nauju poslinkiu
+    last_slip_dir_ = 0;
+    max_vpts_ = INT64_MIN;
     margin_err_ns_ = 0;
     drift_ppm_.store(0.0, std::memory_order_relaxed);
     comp_ppm_.store(0.0, std::memory_order_relaxed);
@@ -312,20 +315,30 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
         }
         have_last_media_ = true;
         last_media_ = dts_ns;
-        // Video slydimas sveiku kadru, kad |off_v − off_a| ≤ Tf/2 (K6)
+        // Video slydimas sveiku kadru, kad |off_v − off_a| ≤ Tf/2 (K6). B5: histerezė h (≤ 2 ms) — tik slydimui PRIEŠINGA kryptimi
+        // nei ankstesnis (ten sprendimas plazdėtų: po −Tf skirtumas ≈ −Tf/2, ir menkiausias rampos posūkis grąžintų +Tf); vienos
+        // krypties dreifui riba lieka tiksliai Tf/2. Naujas poslinkis taikomas PATEIKIMO tvarka: kadrams, kurių PTS > didžiausio jau
+        // matyto + Tf/2 (B kadrai, dekodavimo tvarka ateinantys vėliau, bet rodomi anksčiau, lieka su senu) — vienas slydimas = lygiai
+        // vienas išmestas / pakartotas kadras.
+        if (s.is_video && pts_ns > max_vpts_) max_vpts_ = pts_ns;
         if (tf_ > 0 && cur_.v_ready) {
+            const std::int64_t h = std::min<std::int64_t>(2'000'000, tf_ / 20);
+            const std::int64_t before = cur_.off_v;
             bool slipped = false;
-            while (cur_.off_v - cur_.off_a > tf_ / 2) cur_.off_v -= tf_, slipped = true;
-            while (cur_.off_a - cur_.off_v > tf_ / 2) cur_.off_v += tf_, slipped = true;
+            while (cur_.off_v - cur_.off_a > tf_ / 2 + (last_slip_dir_ > 0 ? h : 0)) cur_.off_v -= tf_, slipped = true, last_slip_dir_ = -1;
+            while (cur_.off_a - cur_.off_v > tf_ / 2 + (last_slip_dir_ < 0 ? h : 0)) cur_.off_v += tf_, slipped = true, last_slip_dir_ = +1;
             if (slipped) {
+                switch_active_ = true;
+                off_v_prev_ = before;
+                switch_pts_ = max_vpts_ + tf_ / 2;
                 drift_slips_.fetch_add(1, std::memory_order_relaxed);
                 if (ev == Event::None) ev = Event::Slipped;
             }
         }
     }
 
-    // 6. Žyma
-    const std::int64_t off = s.is_video && cur_.v_ready ? cur_.off_v : cur_.off_a;
+    // 6. Žyma (video: iki slydimo taško pateikimo tvarka — ankstesnis poslinkis, B5)
+    const std::int64_t off = s.is_video && cur_.v_ready ? (switch_active_ && pts_ns < switch_pts_ ? off_v_prev_ : cur_.off_v) : cur_.off_a;
     const Stamp out{pts_ns + off, dts_ns + off, ev};
     s.end_tai = out.dts_tai_ns + dur_ns;
     s.have_end = true;
@@ -351,6 +364,7 @@ void SourceClock::on_clock_step(std::int64_t step_ns) {
     const std::int64_t k = tf_ > 0 ? round_to_multiple(step_ns, tf_) : step_ns;
     cur_.off_v += k;
     cur_.off_a += k;
+    off_v_prev_ += k;
     old_.off_v += k;
     old_.off_a += k;
     for (Stream& s : streams_) s.end_tai += k;

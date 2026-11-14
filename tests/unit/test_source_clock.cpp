@@ -602,6 +602,44 @@ TEST_CASE("source_clock: B3 — be dreifo, drebėjimas — kompensacija lieka pr
     CHECK(std::max(std::abs(r.e_min), std::abs(r.e_max)) <= 60'000'000);
 }
 
+TEST_CASE("source_clock: B5 — B kadrų srautas: vienas slydimas = lygiai vienas kadras (pateikimo tvarka)", "[timing][source_clock][slip]") {
+    // Dekodavimo tvarka I0 P3 B1 B2 P6 B4 B5 …: DTS didėja kas kadrą, PTS = (rodymo nr. + 2) · kadras. Šaltinis 0,5 % greitesnis
+    // (max_comp_ppm 6000), todėl per 120 s — keli slydimai. Rodymo tvarka kadrų indeksų žingsnis turi būti 1, išskyrus lygiai po
+    // vieną išmestą (žingsnis 0) arba pakartotą (žingsnis 2) kadrą kiekvienam slydimui.
+    const int sign = GENERATE(+1, -1);
+    INFO("dreifas " << sign * 5000 << " ppm");
+    SourceClockConfig c = cfg25();
+    c.max_comp_ppm = 6000;
+    SourceClock sc(c);
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    const double rate = 1.0 - sign * 5000e-6;
+    std::vector<std::pair<std::int64_t, std::int64_t>> shown;  // (rodymo nr., kadro indeksas)
+    for (int k = 0; k < 120 * 25 + 1; ++k) {  // I0 + pilnos grupės (P B B) — kitaip paskutinio B trūkumas atrodytų kaip pakartojimas
+        const int g = (k - 1) / 3, p = (k - 1) % 3;
+        const int d = k == 0 ? 0 : (p == 0 ? 3 * (g + 1) : 3 * g + p);  // I0, P3 B1 B2, P6 B4 B5 …
+        const std::int64_t a = kA0 + static_cast<std::int64_t>(static_cast<double>(k) * kTf * rate);
+        const std::int64_t dts = k * kFrame, pts = (d + 2) * kFrame;
+        const Stamp v = sc.observe(0, pts, dts, kFrame, a);
+        REQUIRE(v.ev != Event::Dropped);
+        sc.observe(1, dts, dts, kFrame, a + 1000);
+        shown.emplace_back(d, static_cast<std::int64_t>(index_of(v.pts_tai_ns, k25)));
+    }
+    std::sort(shown.begin(), shown.end());
+    std::uint64_t drops = 0, repeats = 0, bad = 0;
+    for (std::size_t i = 1; i < shown.size(); ++i) {
+        const std::int64_t step = shown[i].second - shown[i - 1].second;
+        if (step == 0) ++drops;
+        else if (step == 2) ++repeats;
+        else if (step != 1) ++bad;
+    }
+    const ClockStats cs = sc.stats();
+    INFO("slydimai " << cs.drift_slips << ", išmesta " << drops << ", pakartota " << repeats << ", kiti " << bad);
+    CHECK(cs.drift_slips >= 2);
+    CHECK(bad == 0);
+    CHECK(drops + repeats == cs.drift_slips);
+    CHECK((sign > 0 ? repeats : drops) == 0);  // greitesnis šaltinis — tik išmetimai; lėtesnis — tik pakartojimai
+}
 
 
 // P3 (ingest_hls, išmatuota): HLS demuxeris grojaraštį perskaito kas segmento trukmę + apdorojimo laiką, todėl segmento

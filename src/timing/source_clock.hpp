@@ -147,6 +147,10 @@ private:
     std::size_t pts_n_ = 0, pts_head_ = 0;
     double ppm_ = 0;
     double slope_ppm_ = 0;          // reikšmingas nuolydis (be grįžtamojo ryšio)
+    // B5: slydimo taškas pateikimo tvarka — video PTS < switch_pts_ dar žymimi off_v_prev_
+    bool switch_active_ = false;
+    int last_slip_dir_ = 0;  // −1 — paskutinis slydimas −Tf, +1 — +Tf, 0 — nebuvo (histerezei)
+    std::int64_t switch_pts_ = 0, off_v_prev_ = 0, max_vpts_ = INT64_MIN;
     std::int64_t margin_err_ns_ = 0;
 
     std::atomic<bool> locked_pub_{false};
