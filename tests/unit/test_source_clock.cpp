@@ -707,3 +707,51 @@ TEST_CASE("source_clock: HLS segmentų fazės slinkimas — track_drift = false"
         CHECK(cs.relock_fresh == 0);
     }
 }
+
+TEST_CASE("source_clock: B4 — HLS 100 ppm 8 val. su segmentų fazės pjūklu — be periodinio perfiksavimo", "[timing][source_clock][hls]") {
+    // ingest HLS konfigūracija (hls_clock_config): nuolydis nesekamas (segmentų fazė slenka — ne laikrodis), bet atsargos
+    // grįžtamasis ryšys už neutralios zonos (= segmentas) seka tikrą dreifą; anksčiau (track_drift = false) 100 ppm · 8 val. = 2,9 s
+    // > drift_limit — perfiksavimas kas ~5,5 val. (garso šuolis, video trūkis).
+    const int sign = GENERATE(+1, -1);
+    INFO("dreifas " << sign * 100 << " ppm");
+    SourceClockConfig base = cfg25();
+    base.latency_ns = 6'000'000'000;
+    const SourceClockConfig c = hls_clock_config(base, 2'000'000'000);
+    SourceClock sc(c);
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    const double rate = 1.0 - sign * 100e-6;
+    std::int64_t worst_av = 0;
+    for (std::int64_t k = 0; k < 8 * 3600 * 25; ++k) {
+        const std::int64_t t = k * kTf;
+        const std::int64_t seg = t / 2'000'000'000;
+        const std::int64_t phase = (seg * 5'000'000) % 1'000'000'000;  // grojaraščio perskaitymo fazė: pjūklas iki 1 s
+        const auto seg_end = static_cast<std::int64_t>(static_cast<double>((seg + 1) * 2'000'000'000) * rate);
+        const std::int64_t a = kA0 + seg_end + phase + (t - seg * 2'000'000'000) / 100;
+        REQUIRE(video(sc, 900'000 + k * kFrame, a).ev != Event::Dropped);
+        sc.observe(1, 900'000 + k * kFrame, 900'000 + k * kFrame, kFrame, a + 1000);
+        worst_av = std::max(worst_av, std::abs(sc.offset_ns() - sc.audio_offset_ns()));
+    }
+    const ClockStats cs = sc.stats();
+    INFO("relock " << cs.relock_fresh << ", slydimai " << cs.drift_slips << ", drift_ppm " << cs.drift_ppm << ", A/V maks. " << worst_av / 1e6 << " ms");
+    CHECK(cs.relock_fresh == 0);
+    CHECK(worst_av <= kTf / 2 + 1'000'000);  // A/V ≤ 1 laukas (video slysta sveiku kadru)
+}
+
+TEST_CASE("source_clock: B4 — perfiksavimo įvykis: priežastis ir dydis", "[timing][source_clock][relock]") {
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::uint64_t relocks = 0;
+    for (int k = 0; k < 90 * 25; ++k) {  // nuo 20 s visi paketai atvyksta +600 ms vėliau (siuntėjo / tinklo latencijos pokytis)
+        const std::int64_t a = kA0 + k * kTf + (k >= 20 * 25 ? 600'000'000 : 0);
+        if (video(sc, k * kFrame, a).ev == Event::Relocked) ++relocks;
+        sc.observe(1, k * kFrame, k * kFrame, kFrame, a + 1000);
+    }
+    const RelockInfo ri = sc.last_relock();
+    INFO("perfiksavimų " << relocks << ", priežastis " << relock_reason_name(ri.reason) << ", dydis " << ri.step_ns / 1e6 << " ms");
+    CHECK(relocks == 1);
+    CHECK(ri.seq == 1);
+    CHECK(ri.reason == RelockReason::LatencyGuard);
+    CHECK(std::abs(ri.step_ns - 600'000'000) <= kTf / 2 + 1'000'000);  // + 600 ms (kvantuota iki kadro)
+}

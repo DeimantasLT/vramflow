@@ -899,6 +899,48 @@ def ingest_hls_by_content(out):
     return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | latencija {lat} ms | " + summary_line(si, sv, a, r))]
 
 
+def ingest_forced_relock(out):
+    """B4: siuntėjas nuo 20 s visus paketus vėlina +600 ms visam laikui (latencijos pokytis > drift_limit) → apsaugos
+    perfiksavimas: įvykis žurnale („perfiksavimas“ su priežastimi ir dydžiu), santraukoje ir gyvoje statistikoje (relocks),
+    eilėje laukę video paketai išmesti / perlaikyti kartu su garsu, garsas perjungtas su perėjimu; po perfiksavimo |A/V| ≤ 1 laukas."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_forced_relock", "FAIL", why=why)]
+    import json
+    tid, port = "ingest_forced_relock", BASE_PORT + 49
+    T, SHIFT = 75, 20
+    stats = pathlib.Path(out) / tid / "stats.jsonl"
+    stats.parent.mkdir(parents=True, exist_ok=True)
+    if stats.exists():
+        stats.unlink()
+    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"],
+                                  [lambda: Sender.ts(out, f"{tid}/snd", CLIPS / "av_1080i50.ts", port, "--shift-at-s", SHIFT, "--shift-ms", 600)], T,
+                                  ("--stats-file", stats), warm=6)
+    fi = flow(si)
+    a = av_stats(sv)
+    problems = []
+    if fi.get("relock_fresh", 0) < 1:
+        problems.append(f"relock_fresh {fi.get('relock_fresh')}")
+    line = next((ln for ln in err.splitlines() if "perfiksavimas" in ln), "")
+    if not line or "ms" not in line:
+        problems.append("žurnale nėra perfiksavimo eilutės su dydžiu")
+    live = 0
+    for ln in (stats.read_text(errors="replace").splitlines() if stats.exists() else []):
+        try:
+            j = json.loads(ln)
+        except ValueError:
+            continue
+        if "flows" in j:
+            live += (j["flows"][0].get("fn") or {}).get("relocks", 0)
+    if live < 1:
+        problems.append("gyvoje statistikoje relocks == 0")
+    i0 = a["raw"][0][0] if a["raw"] else 0
+    after = [p[1] / 1000.0 for p in a["raw"] if (p[0] - i0) / 50 > SHIFT + 40]
+    if len(after) < 8 or max(abs(x) for x in after) > 20:
+        problems.append(f"po perfiksavimo A/V porų {len(after)}, maks. {max((abs(x) for x in after), default=None)} ms")
+    if fi.get("late_frames", 0):
+        problems.append(f"late_frames {fi.get('late_frames')}")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | {line.strip()[:220]} | gyvai relocks {live} | " +
+                     summary_line(si, sv, a, ratio_ok(flow(sv))))]
 
 
 def ingest_no_idr_entry(out):
@@ -1160,3 +1202,4 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
 TESTS["ingest_drift_default"] = ingest_drift_default
 TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe
 TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
+TESTS["ingest_forced_relock"] = ingest_forced_relock

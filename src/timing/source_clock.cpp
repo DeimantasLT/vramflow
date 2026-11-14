@@ -142,7 +142,7 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
                 rss += (y - a0 - b * x) * (y - a0 - b * x);
             }
             const double se = n > 2 ? std::sqrt(rss / (n - 2) / (sxx - sx * sx / n)) : 0;
-            slope_ppm_ = std::fabs(b) > 3 * se ? b * 1e6 : 0.0;
+            slope_ppm_ = cfg_.track_slope && std::fabs(b) > 3 * se ? b * 1e6 : 0.0;
         }
     }
     // Apsauga: garso atsarga (su off_a) drift_windows langų iš eilės už atskaitos ± drift_limit — latencija pasikeitė
@@ -291,6 +291,10 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
             } else {
                 cur_.off_a = off;
             }
+            // B4: dydis — pateikimo trūkis prieš tęsinį (naujo paketo TAI − šio srauto senos ašies pabaiga): sandūrai ≈ 0 (PTS šuolis
+            // kompensuojamas poslinkiu), naujam fiksavimui — fresh − tęsinys
+            const std::int64_t off_now = s.is_video && cur_.v_ready ? cur_.off_v : cur_.off_a;
+            relock_ = {use_cont ? RelockReason::Splice : RelockReason::Fresh, s.have_end ? dts_ns + off_now - s.end_tai : 0, relock_.seq + 1};
             ev = Event::Relocked;
         }
         cur_.ready = true;
@@ -306,9 +310,11 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
         if (ev == Event::None && win_open_ && arrival_tai_ns - win_start_ >= cfg_.drift_window_ns) {
             win_open_ = false;
             if (close_window(arrival_tai_ns)) {
+                const std::int64_t prev_a = cur_.off_a;
                 cur_.off_a = arrival_tai_ns + cfg_.latency_ns - dts_ns;
                 if (grid_video) cur_.off_a = cur_.off_v = quantise(cur_.off_a, pts_ns);
                 relock_fresh_.fetch_add(1, std::memory_order_relaxed);
+                relock_ = {RelockReason::LatencyGuard, cur_.off_a - prev_a, relock_.seq + 1};
                 ev = Event::Relocked;
                 reset_drift();
             }
@@ -394,6 +400,24 @@ ClockStats SourceClock::stats() const {
     constexpr auto r = std::memory_order_relaxed;
     return {wraps_.load(r),       discontinuities_.load(r), relock_cont_.load(r),     relock_fresh_.load(r),
             drift_slips_.load(r), clock_steps_.load(r),     prelock_dropped_.load(r), drift_ppm_.load(r), margin_err_pub_.load(r), comp_ppm_.load(r)};
+}
+
+SourceClockConfig hls_clock_config(SourceClockConfig c, std::int64_t segment_ns) {
+    c.drift_limit_ns = std::max(c.drift_limit_ns, 2 * segment_ns);
+    c.margin_deadband_ns = segment_ns;
+    c.track_slope = false;
+    c.track_drift = true;
+    return c;
+}
+
+const char* relock_reason_name(RelockReason r) {
+    switch (r) {
+        case RelockReason::Splice: return "sandūra (tęsinys)";
+        case RelockReason::Fresh: return "nutrūkimas / naujas šaltinis";
+        case RelockReason::LatencyGuard: return "latencijos pokytis > drift_limit";
+        case RelockReason::None: break;
+    }
+    return "nėra";
 }
 
 std::uint64_t AudioCursor::place(std::int64_t pts_tai_ns, std::uint32_t n, std::uint32_t sample_rate, std::uint32_t tol, std::int64_t& gap) {

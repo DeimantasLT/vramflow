@@ -121,6 +121,51 @@ public:
         std::lock_guard g(m_);
         return any_ ? head_ : 0;
     }
+    // B4: perfiksavimas — senos laiko ašies dar negrotas garsas nuo pos atmetamas (head = pos), prieš pos fade mėginių užgesinami.
+    // Taip senas garsas baigiasi „dabar“, kaip ir senas vaizdas, o naujas prasideda nauju poslinkiu. Grąžina atmestų mėginių skaičių.
+    std::int64_t truncate(std::int64_t pos, std::uint32_t fade) {
+        std::lock_guard g(m_);
+        if (!any_ || pos >= head_) return 0;
+        pos = std::max(pos, lo_);
+        const std::int64_t cut = head_ - pos;
+        const std::int64_t from = std::max(lo_, pos - static_cast<std::int64_t>(fade));
+        const std::int64_t len = pos - from;
+        for (std::int64_t k = 0; k < len; ++k) {
+            const float w = static_cast<float>(len - 1 - k) / static_cast<float>(len);
+            for (auto& b : buf_) b[static_cast<std::size_t>(from + k) & (cap_ - 1)] *= w;
+        }
+        head_ = pos;
+        return cut;
+    }
+    // B4: perinkaravimas (laikrodžio šuolis) — trumpas perėjimas vietoje kieto kirpimo: senos laiko ašies paskutiniai fade mėginiai
+    // prieš min(pos, head) užgesinami (1 → 0), naujas gabalas [pos, pos + n) įrašomas, jo pirmi fade mėginiai įžiebiami (0 → 1). Taip mėginio
+    // šuolis ties sandūra ribotas (nėra spragtelėjimo). Grąžina true, jei buvo ką gesinti (žiedas ne tuščias).
+    bool write_resync(std::int64_t pos, const float* const* planes, std::uint32_t n, std::uint32_t fade) {
+        bool faded = false;
+        {
+            std::lock_guard g(m_);
+            if (any_ && fade > 0) {
+                // užgesinama prieš naujos ašies pradžią: šuolis pirmyn — seno galo, atgal — prieš pos (vėliau perrašoma nauju)
+                const std::int64_t end = std::min(pos, head_);
+                const std::int64_t from = std::max(lo_, end - static_cast<std::int64_t>(fade));
+                const std::int64_t len = std::max<std::int64_t>(0, end - from);
+                for (std::int64_t k = 0; k < len; ++k) {
+                    const float w = static_cast<float>(len - 1 - k) / static_cast<float>(len);
+                    for (auto& b : buf_) b[static_cast<std::size_t>(from + k) & (cap_ - 1)] *= w;
+                }
+                faded = len > 0;
+                // naujas gabalas toliau nei senas galas: tarpas — tyla (write jį užpildys), todėl užgesinimas baigiasi nuliu
+            }
+        }
+        write(pos, planes, n);
+        std::lock_guard g(m_);
+        const std::uint32_t m = std::min(fade, n);
+        for (std::uint32_t k = 0; k < m; ++k) {
+            const float w = static_cast<float>(k) / static_cast<float>(m);
+            for (auto& b : buf_) b[static_cast<std::size_t>(pos + k) & (cap_ - 1)] *= w;
+        }
+        return faded;
+    }
     std::uint64_t silence_written() const {
         std::lock_guard g(m_);
         return silence_written_;

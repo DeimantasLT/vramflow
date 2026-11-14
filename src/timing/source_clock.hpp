@@ -55,7 +55,23 @@ struct SourceClockConfig {
     // B3: atsargos grįžtamasis ryšys — neutrali zona (< 0 — drift_limit_ns / 4) ir laiko konstanta τ.
     std::int64_t margin_deadband_ns = -1;
     double margin_tau_s = 600;
+    // B4: false — nuolydis (regresija) nesekamas, lieka tik atsargos grįžtamasis ryšys (HLS: segmentų fazė slenka ne dėl laikrodžio)
+    bool track_slope = true;
 };
+
+// B4: HLS šaltinio laikrodis. Anksčiau dreifas nesektas visai (track_drift = false) — 100 ppm per ~5,5 val. suvalgydavo apsaugą ir
+// būdavo periodinis perfiksavimas. Dabar: nuolydis nesekamas (segmentų atvykimo fazės pjūklas — ne laikrodis), bet atsargos
+// grįžtamasis ryšys už neutralios zonos = segmentas seka tikrą dreifą (žemutinė gaubtinė — langų minimumai); apsauga 2 segmentai.
+SourceClockConfig hls_clock_config(SourceClockConfig c, std::int64_t segment_ns);
+
+// B4: paskutinio perfiksavimo priežastis ir dydis (garso poslinkio pokytis); seq didėja kiekvienam.
+enum class RelockReason : std::uint8_t { None, Splice, Fresh, LatencyGuard };
+struct RelockInfo {
+    RelockReason reason = RelockReason::None;
+    std::int64_t step_ns = 0;
+    std::uint64_t seq = 0;
+};
+const char* relock_reason_name(RelockReason r);
 
 // Locked — pirmas fiksavimas. Relocked — naujos epochos poslinkis nustatytas (nutrūkimas arba latencijos pokytis);
 // taip pat žymimas pirmas naujos epochos video paketas, jei epochą pradėjo garsas. Slipped — šio video paketo
@@ -86,6 +102,7 @@ public:
     std::int64_t offset_ns() const;        // video poslinkis (be video tinklelio — == audio_offset_ns)
     std::int64_t audio_offset_ns() const;  // tolydus garso poslinkis
     ClockStats stats() const;
+    RelockInfo last_relock() const { return relock_; }  // demux (observe) gija
 
     static constexpr double kMaxCompPpm = 1000.0;  // numatytasis biudžetas (±0,1 %, K6); veikia SourceClockConfig::max_comp_ppm
 
@@ -152,7 +169,8 @@ private:
     double slope_ppm_ = 0;          // reikšmingas nuolydis (be grįžtamojo ryšio)
     // B5: slydimo taškas pateikimo tvarka — video PTS < switch_pts_ dar žymimi off_v_prev_
     bool switch_active_ = false;
-    int last_slip_dir_ = 0;  // −1 — paskutinis slydimas −Tf, +1 — +Tf, 0 — nebuvo (histerezei)
+    int last_slip_dir_ = 0;
+    RelockInfo relock_;  // −1 — paskutinis slydimas −Tf, +1 — +Tf, 0 — nebuvo (histerezei)
     std::int64_t switch_pts_ = 0, off_v_prev_ = 0, max_vpts_ = INT64_MIN;
     std::int64_t margin_err_ns_ = 0;
 
