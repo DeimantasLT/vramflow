@@ -48,6 +48,9 @@ struct SourceClockConfig {
     // Garso rampos (ir swr kompensacijos) biudžetas, ppm: dreifo įvertis apkarpomas iki ±max_comp_ppm (K6: 1000 = ±0,1 %).
     // Didesnis — tik pagreitintiems dreifo testams (ingest --max-comp-ppm).
     double max_comp_ppm = 1000.0;
+    // Dreifo sekimas (garso rampa ir video slydimas pagal įvertį). false — poslinkiai pastovūs (HLS: segmentų atvykimo fazė lėtai
+    // slenka dėl grojaraščio perskaitymo ritmo — tai ne laikrodis); latencijos pokyčio apsauga lieka.
+    bool track_drift = true;
 };
 
 // Locked — pirmas fiksavimas. Relocked — naujos epochos poslinkis nustatytas (nutrūkimas arba latencijos pokytis);

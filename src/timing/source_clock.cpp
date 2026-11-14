@@ -135,7 +135,7 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
                 rss += (y - a0 - b * x) * (y - a0 - b * x);
             }
             const double se = n > 2 ? std::sqrt(rss / (n - 2) / (sxx - sx * sx / n)) : 0;
-            ppm_ = std::fabs(b) > 3 * se ? std::clamp(b * 1e6, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
+            ppm_ = cfg_.track_drift && std::fabs(b) > 3 * se ? std::clamp(b * 1e6, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
             drift_ppm_.store(ppm_, std::memory_order_relaxed);
         }
     }

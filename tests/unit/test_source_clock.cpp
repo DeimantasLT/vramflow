@@ -527,3 +527,38 @@ TEST_CASE("source_clock: HLS segmentų drebėjimas be dreifo — nei rampos, nei
     CHECK(cs.relock_fresh == 0);
     CHECK(worst <= 1'000'000);  // A/V (poslinkių skirtumas) ≤ 1 ms
 }
+
+// P3 (ingest_hls, išmatuota): HLS demuxeris grojaraštį perskaito kas segmento trukmę + apdorojimo laiką, todėl segmento
+// atvykimo fazė lėtai ir tiesiškai slenka (pjūklas su ~minučių periodu) — statistiškai „reikšmingas“ nuolydis, nors laikrodžio
+// dreifo nėra. HLS šaltiniui dreifas nesekamas (track_drift = false): poslinkiai pastovūs, A/V lygiai 0, slydimų nėra; apsauga
+// (latencijos pokytis > drift_limit) lieka. Su dreifo sekimu tas pats atvykimas duoda rampą ir A/V slinkimą (charakterizacija).
+TEST_CASE("source_clock: HLS segmentų fazės slinkimas — track_drift = false", "[timing][source_clock]") {
+    const bool track = GENERATE(true, false);
+    INFO("track_drift " << track);
+    SourceClockConfig c = cfg25();
+    c.latency_ns = 6'000'000'000;
+    c.drift_limit_ns = 2'000'000'000;
+    c.track_drift = track;
+    SourceClock sc(c);
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::int64_t worst = 0;
+    for (int k = 0; k < 300 * 25; ++k) {  // 300 s; segmento 2 s atvykimo fazė slenka 5 ms kiekvienam segmentui (2500 ppm)
+        const std::int64_t t = k * kTf;
+        const std::int64_t seg = t / 2'000'000'000;
+        const std::int64_t phase = (seg * 5'000'000) % 2'000'000'000;
+        const std::int64_t a = kA0 + (seg + 1) * 2'000'000'000 + phase + (t - seg * 2'000'000'000) / 100;
+        REQUIRE(video(sc, 900'000 + k * kFrame, a).ev != Event::Dropped);
+        sc.observe(1, 900'000 + k * kFrame, 900'000 + k * kFrame, kFrame, a + 1000);
+        worst = std::max(worst, std::abs(sc.offset_ns() - sc.audio_offset_ns()));
+    }
+    const ClockStats cs = sc.stats();
+    if (track) {
+        CHECK(worst > 1'000'000);  // dreifo sekimas palaiko fazės slinkimą laikrodžiu — A/V slenka
+    } else {
+        CHECK(worst == 0);
+        CHECK(cs.drift_slips == 0);
+        CHECK(cs.drift_ppm == 0.0);
+        CHECK(cs.relock_fresh == 0);
+    }
+}
