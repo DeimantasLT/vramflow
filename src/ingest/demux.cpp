@@ -144,55 +144,58 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // UDP (kaip dec): didelis FIFO ir socket buferis, perpildymas ne fatalus; tylą ir sustabdymą sprendžia kabliukas
     if (url.rfind("udp://", 0) == 0 && url.find("fifo_size") == std::string::npos)
         url += std::string(url.find('?') == std::string::npos ? "?" : "&") + "fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608";
-    ic_ = avformat_alloc_context();
-    attach_interrupt(ic_, &intr_);
     shown_ = shown;
     guard_http_ = hls;
-    opens_in_win_ = 0;
-    open_win0_ = 0;
-    opens_total_ = 0;
-    orig_io_open_ = ic_->io_open;
-    ic_->opaque = this;
-    ic_->io_open = [](AVFormatContext* c, AVIOContext** pb, const char* u, int fl, AVDictionary** op) {
-        return static_cast<Demux*>(c->opaque)->guarded_open(c, pb, u, fl, op);
-    };
-    // Zondavimo metu perskaityti paketai NEgrąžinami vėliau: jie jau sekundės senumo, o atvykimo laikas žymimas skaitant —
-    // SourceClock fiksavimas (atvykimas + latencija − PTS) būtų pasislinkęs tiek, kiek truko zondavimas
-    ic_->flags |= AVFMT_FLAG_NOBUFFER;
-    AVDictionary* o = nullptr;
-    // Trumpas zondavimas: TS H.264 / AAC parametrai žinomi per < 0,5 s (numatytasis 5 MB būtų ~4 s ir pliūpsnis po to)
-    av_dict_set(&o, "probesize", "2000000", 0);
-    av_dict_set(&o, "analyzeduration", "1000000", 0);
-    // Baltieji sąrašai (A1): paveldi visi įdėti atidarymai (HLS segmentai ir jų demuxeriai, RTP → UDP, HTTP → TCP / TLS)
-    av_dict_set(&o, "protocol_whitelist", protocol_whitelist_for(scheme).c_str(), 0);
-    av_dict_set(&o, "format_whitelist", format_whitelist_for(scheme).c_str(), 0);
-    if (hls) {
-        av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
-        av_dict_set(&o, "http_persistent", "0", 0);
-    }
-    int e = avformat_open_input(&ic_, url.c_str(), nullptr, &o);  // klaidoje ic_ atlaisvinamas
-    av_dict_free(&o);
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
         err = shown + ": " + what + ": " + why;
         close();
         return false;
     };
-    if (e < 0) {
-        ic_ = nullptr;
-        return fail("atidaryti nepavyko", e);
-    }
-    if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
-    // Apkrautoje mašinoje (daug šaltinių, siuntėjų) per analyzeduration video parametrų kartais dar nėra („unspecified size“) —
-    // zonduojama dar ne daugiau kaip 3 kartus, kol žinomas dydis ir pikselių formatas (išmatuota: 8 šaltiniai — 8-asis atmestas)
-    for (int k = 0; k < 3; ++k) {
+    // Apkrautoje mašinoje (daug šaltinių, siuntėjų) ar sraute, kurio SPS retas (intra atnaujinimas, prisijungimas vidury), per
+    // analyzeduration video parametrų kartais dar nėra („unspecified size“) — zonduojama iš naujo ne daugiau kaip 3 kartus, kaskart
+    // NAUJAI atidarant įėjimą su 2× ilgesniu langu (išmatuota: 8 šaltiniai — 8-asis atmestas). Anksčiau avformat_find_stream_info
+    // buvo kviečiamas pakartotinai tame pačiame kontekste — libavformat 60 su AVFMT_FLAG_NOBUFFER tada griūdavo (SIGSEGV, visas procesas).
+    for (int k = 0; k < 4; ++k) {
+        ic_ = avformat_alloc_context();
+        attach_interrupt(ic_, &intr_);
+        opens_in_win_ = 0;
+        open_win0_ = 0;
+        opens_total_ = 0;
+        orig_io_open_ = ic_->io_open;
+        ic_->opaque = this;
+        ic_->io_open = [](AVFormatContext* c, AVIOContext** pb, const char* u, int fl, AVDictionary** op) {
+            return static_cast<Demux*>(c->opaque)->guarded_open(c, pb, u, fl, op);
+        };
+        // Zondavimo metu perskaityti paketai NEgrąžinami vėliau: jie jau sekundės senumo, o atvykimo laikas žymimas skaitant —
+        // SourceClock fiksavimas (atvykimas + latencija − PTS) būtų pasislinkęs tiek, kiek truko zondavimas
+        ic_->flags |= AVFMT_FLAG_NOBUFFER;
+        AVDictionary* o = nullptr;
+        // Trumpas zondavimas: TS H.264 / AAC parametrai žinomi per < 0,5 s (numatytasis 5 MB būtų ~4 s ir pliūpsnis po to)
+        av_dict_set(&o, "probesize", std::to_string(2'000'000 << k).c_str(), 0);
+        av_dict_set(&o, "analyzeduration", std::to_string(1'000'000 << k).c_str(), 0);
+        // Baltieji sąrašai (A1): paveldi visi įdėti atidarymai (HLS segmentai ir jų demuxeriai, RTP → UDP, HTTP → TCP / TLS)
+        av_dict_set(&o, "protocol_whitelist", protocol_whitelist_for(scheme).c_str(), 0);
+        av_dict_set(&o, "format_whitelist", format_whitelist_for(scheme).c_str(), 0);
+        if (hls) {
+            av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
+            av_dict_set(&o, "http_persistent", "0", 0);
+        }
+        int e = avformat_open_input(&ic_, url.c_str(), nullptr, &o);  // klaidoje ic_ atlaisvinamas
+        av_dict_free(&o);
+        if (e < 0) {
+            ic_ = nullptr;
+            return fail("atidaryti nepavyko", e);
+        }
+        if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
         bool unknown = false;
         for (unsigned i = 0; i < ic_->nb_streams; ++i) {
             const AVCodecParameters* p = ic_->streams[i]->codecpar;
             if (p->codec_type == AVMEDIA_TYPE_VIDEO && (p->width <= 0 || p->format < 0)) unknown = true;
         }
-        if (!unknown) break;
-        if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
+        if (!unknown || k == 3) break;
+        std::fprintf(stderr, "[ingest] %s: video parametrų dar nėra (%d) — zonduojama iš naujo, langas %d ms\n", shown.c_str(), k + 1, 1000 << (k + 1));
+        avformat_close_input(&ic_);
     }
     vs_ = av_find_best_stream(ic_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     as_ = s.audio ? av_find_best_stream(ic_, AVMEDIA_TYPE_AUDIO, -1, vs_, nullptr, 0) : -1;
