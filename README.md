@@ -13,7 +13,7 @@ VRAMFlow gives you:
 
 | Part | What it does |
 |---|---|
-| `vramflow-func` | Ready-made media functions on MXL flows: test generator, logo burn-in, H.264 decode, H.264 + AAC encode, alpha graphics compositor, output checker. Each runs on the CPU or the GPU. |
+| `vramflow-func` | Ready-made media functions on MXL flows: test generator, real-source ingest with audio (MPEG-TS over UDP / RTP / SRT, HLS), logo burn-in, H.264 decode, H.264 + AAC encode, alpha graphics compositor, output checker. Each runs on the CPU or the GPU. |
 | `libvramflow-gfx` | C library: turn RGBA frames from any program into a standard MXL graphics flow (`video/v210a`, fill + key). |
 | `vramflow-verify` | Test writer and reader that check every grain (content, index, timing) on host or GPU flows. |
 | Tests and tools | Unit, GPU and functional tests; a capacity harness that measures how many flows fit on a machine. |
@@ -147,7 +147,25 @@ vramflow-func verify    --domain $D --flows 1 --mode composite $L --layer-geom l
 wait; rm -rf $D
 ```
 
-### 4.5 Look inside a domain
+### 4.5 Ingest a real source with audio
+
+`ingest` turns a live MPEG-TS source (UDP, RTP, SRT or HLS) into one video flow (v210, in GPU memory) and one audio flow
+(48 kHz float32) per source, both placed by the source's own timestamps. A local synthetic source:
+
+```bash
+bash scripts/linux/62-make-av-clip.sh ~/media-test/av          # synthetic H.264 + AAC clips with A/V sync markers (once)
+D=/dev/shm/vf-ing; mkdir -p $D
+python3 tests/perf/ts_burst.py ~/media-test/av/av_1080i50.ts --port 20000 --duration 45 &   # local UDP sender, paced by PCR
+vramflow-func ingest --domain $D --input udp://127.0.0.1:20000 --duration 40 --out /tmp/vf-ing &
+vramflow-func verify --domain $D --mode ingest --flows 1 --audio 1 --duration 35 --out /tmp/vf-ing
+wait; rm -rf $D
+```
+
+The format is taken from the stream (`--format auto`, here 1080i50). `verify --mode ingest` reads both MXL flows and reports,
+for every sync pulse, the offset between the audio impulse and the video frame it belongs to (`summary-verify-ingest.json`:
+`av_max_abs_us`, and the `ingest` array with every pulse); in this example every offset is `0`.
+
+### 4.6 Look inside a domain
 
 While an example is running, MXL's own tool lists the flows, their position and latency:
 
@@ -398,11 +416,12 @@ payload).
 |---|---|---|
 | `gen` | — → N video (+ audio) flows, v210 in `--format` (default 1080i50), moving test pattern | `--complexity 0–3`, `--audio` |
 | `logo` | N video flows → N video flows with a logo | `--logo builtin\|file.png`, `--logo-x`, `--logo-y`, `--deadline-ms` |
-| `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software) | `--port-base`, `--playout-frames`, `--chroma-siting auto\|field\|frame` |
+| `ingest` | Real sources: MPEG-TS over UDP / RTP / SRT or HLS → per source one video flow (v210) + one audio flow (48 kHz float32), placed by the source PTS | `--input URL` (repeat), `--decoder nvdec\|cuvid\|sw`, `--latency-ms`, `--decode-lead-ms`, `--format auto` — see *Ingest* below |
+| `dec` | H.264 MPEG-TS over UDP → N video flows (NVDEC or software); kept for the test clip, real sources use `ingest` | `--port-base`, `--playout-frames`, `--chroma-siting auto\|field\|frame` |
 | `enc` | N video (+ audio) flows → H.264 + AAC MPEG-TS over UDP (NVENC or x264) | `--encoder nvenc\|x264`, `--vbitrate`, `--abitrate`, `--port-base` |
 | `gfxgen` | — → N × K synthetic graphics flows (`v210a`) | `--layers K`, `--layer-geom logo,full,…\|WxH`, `--mode pace\|manual` |
 | `composite` | base video + K graphics flows → `v210` or `v210a` | `--layers`, `--layer-xy X,Y` (×K), `--opacity 0–1` (×K), `--base gen\|none`, `--out-format`, `--layer-flow K:UUID` |
-| `verify` | checks the output of `gen`, `logo`, `dec` or `composite` against the CPU reference | `--mode`, `--every N` (check every N-th field) |
+| `verify` | checks the output of `gen`, `logo`, `dec` or `composite` against the CPU reference; `--mode ingest` measures A/V sync and marker continuity of `ingest` flows | `--mode`, `--every N` (check every N-th field), `--ref`, `--audio 1` |
 | `clip`, `ref-crc` | helpers for the decode test clip | `--format` |
 | `split-raw` | raw NV12 frames → v210 frames with the reference (chroma PSNR tool) | `--format`, `--chroma frame\|field` |
 | `keepwarm` | — (not an MXL function): keeps the GPU out of its idle power state with a light periodic fill, see *GPU clocks* in section 8 | `--size-mb` (64), `--interval-ms` (5), `--duration` (0 — until stopped) |
@@ -443,7 +462,8 @@ Every flow has an explicit format: raster, scan and frame rate (`--format`, the 
 
 `vramflow-func` uses fixed, readable flow IDs so the functions find each other without configuration:
 `4d584c47-00RR-4000-8000-NNNNNNNNNNNN`, where `RR` is the role (`01` gen, `02` logo, `03` audio, `04` dec, `05`
-graphics, `06` compositor) and `N…` is the flow number in hex (graphics: `flow × 8 + layer`).
+graphics, `06` compositor, `07` ingest video, `08` ingest audio) and `N…` is the flow number in hex (graphics: `flow × 8 +
+layer`; ingest: source position + `--flow-base`). The audio flow of an ingest source shares the video flow's NMOS group hint.
 
 ### Start order, waits and restarts
 
@@ -483,6 +503,53 @@ stderr every 5 s.
 - A layer is waited for only until the first cut a(i) (`T + E + ro + Wr`), never to the final cut, so layers never
   delay the programme or its advertised bound. A layer that disappeared is used again only after
   `--layer-return-frames` consecutive frames on time (default 12), and only from a frame boundary.
+
+### Ingest (real sources with audio)
+
+`vramflow-func ingest --domain D --input URL [--input URL …]` — one process, any number of sources. Transports are the
+libavformat protocols of the system FFmpeg: `udp://`, `rtp://` (MPEG-TS payload, PT 33), `srt://` (if FFmpeg has it; otherwise
+the start fails with "srt protokolas nepalaikomas"), `http(s)://…/x.m3u8` (HLS), or a file.
+
+| Option | Meaning |
+|---|---|
+| `--input URL` | A source (repeat for more). Source `k` writes flows `07`/`08` number `--flow-base + k` |
+| `--format auto\|F` | `auto` (default): taken from the stream before any flow is created; `F`: the stream must match |
+| `--decoder nvdec\|cuvid\|sw` | `nvdec` (default): libavcodec `h264` / `hevc` with the CUDA hwaccel; `cuvid`: `h264_cuvid` (frames come out 4–8 frames after their packet); `sw`: software. `--impl cpu` always uses `sw` and writes host flows |
+| `--latency-ms N` | A frame is shown `N` ms after its packet arrived (default 1000). HLS: at least 3 segments |
+| `--decode-lead-ms N` | A packet enters the decoder no earlier than `N` ms before its time (default 400): bounds the decoded frames kept in VRAM |
+| `--audio 0\|1`, `--audio-channels N` | Audio flow on / off (default 1), channel count in MXL (default 2; mono is upmixed, extra channels dropped) |
+| `--input-wait-s S` | How long to wait for the first data at start (default: no limit); after that exit `2`, the message names the URL and the reason, and no flow is created |
+| `--input-silence-ms N` | A source silent for longer reconnects with back-off 1, 2, 4 … ≤ 30 s (default 2000; HLS: at least 3 segments) |
+| `--max-comp-ppm X` | Audio drift compensation limit (default 1000 = ±0.1 %, inaudible) |
+| `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
+
+**Timing model in plain words.** Every packet is stamped once, when the demuxer reads it: *output time = source timestamp
++ one offset per source*. The offset is fixed by the first video packet so that it is shown `--latency-ms` after it arrived,
+and it is the same for video and audio of that source. A frame therefore lands on the MXL index of its own timestamp, not
+on the index of the moment it happened to arrive: bursty transports (HLS segments, a sender that stalls 300 ms) do not
+move the picture against the sound. Packets wait compressed in RAM and are handed to the decoder `--decode-lead-ms` before
+their time; the tick of index `i` takes exactly the frame of `i`. If the source clock runs faster or slower than ours,
+the sound follows it sample by sample (a resampler changes the speed by at most `--max-comp-ppm`, no audible jump) and the
+picture repeats or drops one whole frame (an interlaced field pair) whenever it is half a frame away from the sound — like
+a broadcast frame synchroniser, so lip sync stays within one field. A timestamp jump (sender restart, loop splice, PTS wrap)
+is handled per source: a wrap is invisible, a splice continues without a gap, a source that returns after an outage is
+locked again. A frame that can no longer be decoded in time is not decoded: the decoder skips to the next key frame that
+can still make it, so an overloaded decoder loses single GOPs instead of falling behind forever.
+
+- One demuxer per source: video and audio come from the same libavformat context and the same clock.
+- The format of every source is detected before any flow is created (`--format auto`): H.264 or HEVC, 8-bit 4:2:0,
+  one of the formats in *Formats*. Field order is read from the first IDR of the stream (libavformat's guess from a
+  mid-stream start is not reliable). 4:2:2, 10-bit, BFF and unknown sizes or rates are rejected at start with the format
+  named (exit `2`).
+- A resolution change in the middle of a stream (or a reconnect that comes back with another format) stops that source with
+  a clear message and releases its flows; the other sources continue; the process ends with exit code `6`.
+- Sources of different rate families (50 Hz and 59.94 Hz) need separate processes; 50 Hz and 25p mix in one process.
+- Per-source counters (summary `flows[k]`): `fields_ok`, `frames_decoded`, `late_frames` (decoded after its time, dropped),
+  `missing_frames`, `repeat_frames` / `slip_drop_frames` (frame synchroniser), `skip_to_key`, `drift_slips`, `relock_cont`
+  (splice), `relock_fresh` (new lock), `wraps`, `audio_resyncs`, `audio_late_samples`, `input_reconnects`,
+  `drift_ppm_abs_x1000`, `startup_frames` (before the first frame: the latency, not a loss).
+- Edge contract: the outputs advertise the source commit bound (`ro + P/4 + G`) and `content-delay-ns` = the latency.
+- Variant H (GPU with host flows) is not offered by `ingest`; use G or C.
 
 ### Chain timing (edge contract)
 
@@ -599,6 +666,7 @@ Counters of the functions on the shared tick engine (`gen`, `logo`, `composite`,
 ```bash
 bash scripts/linux/run-all.sh --soak skip      # everything: probes, upstream tests, unit / GPU / functional tests, report
 bash scripts/linux/61-make-test-clip.sh        # synthetic 1080i50 H.264 clip for the dec / chain tests
+bash scripts/linux/62-make-av-clip.sh          # synthetic A/V clips with sync markers for the ingest tests
 
 # One capacity level: 8 logo flows on GPU flows, 60 s
 python3 tests/perf/capacity.py ~/evidence/try --func logo --n 8 --seconds 60 --impl gpu --storage cuda-linear
@@ -639,6 +707,24 @@ native Linux rerun will give the authoritative numbers.
   [`docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md`](docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md).
 
 Full tables and notes: [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
+
+Ingest (`vramflow-func ingest`), synthetic H.264 + AAC MPEG-TS over loopback UDP (paced by PCR), 30 s per level, every source
+checked by `verify --mode ingest` (≥ 99.8 % grains, 0 late frames, every sync pulse within one field / frame):
+
+| | 1080i50 | 1080p25 |
+|---|---|---|
+| NVDEC, GPU flows (G): N\* | ≥ 16 (ladder end) | ≥ 16 (ladder end) |
+| Software, CPU flows (C): N\* | ≥ 8 (ladder end) | ≥ 8 (ladder end) |
+| VRAM per source (G, slope 1 → 16) | 135 MiB | 135 MiB |
+| CPU cores per source, G / C | 0.10 / 0.26 | 0.10 / 0.25 |
+| A/V offset, every pulse (all levels) | max 0.52 ms | max 0.0 ms |
+| Commit after T(i), p99 | ≤ 2.8 ms (G), ≤ 4.8 ms (C) | ≤ 2.5 ms (G), ≤ 6.1 ms (C) |
+
+Functional tests (`tests/functional/ingest.py`, synthetic only): A/V 0.0 ms at every pulse for 1080i50 and 1080p25 on NVDEC
+and software, over UDP, RTP, SRT and HLS; 2 s bursts for 120 s without drift (Δ A/V 0.0 ms, no slip, no relock); a source
+0.5 % fast for 120 s: 13 whole-frame slips, A/V ≤ 18.8 ms, no audible break; PTS wrap and loop splices without index gaps;
+progressive chroma bit-exact against FFmpeg bilinear. Details and what is not verified:
+[`docs/rezultatai/2026-11-14-ingest.md`](docs/rezultatai/2026-11-14-ingest.md).
 
 Graphics compositor (`composite`), 1 base + K layers → `v210`, 60 s per level, deadline 30 ms, same N\* rule (tolerant / strict):
 
@@ -684,6 +770,9 @@ tests for synchronization groups and partial grains with GPU storage; U4 adds te
 - No 2-hour soak and no full sanitizer run of the media functions yet.
 - NVENC on this GPU encodes progressive frames; x264 encodes true interlaced (MBAFF, top field first).
 - VRAM flows work between processes on the same machine and GPU; other machines are outside this project.
+- `ingest`: tested with synthetic sources over loopback only (no real broadcast source, no lossy network); HEVC only with one
+  synthetic 1080p25 clip; UHD and the 59.94 family not run; variant H not offered; sources of different rate families need
+  separate processes.
 
 ## 12. License and credit
 

@@ -12,7 +12,7 @@ funkcija perduoda kadrus kitai nekopijuodama per CPU.
 
 | Dalis | Kas tai |
 |---|---|
-| `vramflow-func` | Paruoštos media funkcijos ant MXL flow'ų: generatorius, logotipas, H.264 dekodavimas, H.264 + AAC kodavimas, alfa grafikos kompozitorius, išėjimo patikra. Kiekviena veikia ant CPU arba GPU. |
+| `vramflow-func` | Paruoštos media funkcijos ant MXL flow'ų: generatorius, tikrų šaltinių priėmimas su garsu (MPEG-TS per UDP / RTP / SRT, HLS), logotipas, H.264 dekodavimas, H.264 + AAC kodavimas, alfa grafikos kompozitorius, išėjimo patikra. Kiekviena veikia ant CPU arba GPU. |
 | `libvramflow-gfx` | C biblioteka: RGBA kadrai iš bet kurios programos → standartinis MXL grafikos flow'as (`video/v210a`, fill + key). |
 | `vramflow-verify` | Bandomasis writer'is ir reader'is, tikrinantys kiekvieną grain'ą (turinys, indeksas, laikas). |
 | Testai ir įrankiai | Vienetų, GPU ir funkciniai testai; talpos matavimas (kiek flow'ų telpa). |
@@ -52,7 +52,9 @@ README.md 4 skyriuje — pavyzdžiai, kuriuos galima nukopijuoti:
 2. tas pats GPU atmintyje (`--storage cuda-linear`);
 3. media funkcija: `gen` → `logo` → `verify` (be GPU: `--impl cpu --storage host`);
 4. grafika su skaidrumu ant video: `gen` + `gfxgen` → `composite` → `verify`;
-5. domeno turinys: `mxl-info -d <domenas> -l`.
+5. tikras šaltinis su garsu: sintetinis klipas (`62-make-av-clip.sh`) per vietinį UDP siuntėją (`tests/perf/ts_burst.py`) →
+   `ingest` → `verify --mode ingest` (A/V poslinkis kiekvienam impulsui);
+6. domeno turinys: `mxl-info -d <domenas> -l`.
 
 ## 5. Savo programoje
 
@@ -73,7 +75,7 @@ README.md 4 skyriuje — pavyzdžiai, kuriuos galima nukopijuoti:
 
 ## 6. Komandos
 
-`vramflow-func gen | logo | dec | enc | gfxgen | composite | verify | keepwarm` — lentelė su pagrindiniais parametrais
+`vramflow-func gen | ingest | logo | dec | enc | gfxgen | composite | verify | keepwarm` — lentelė su pagrindiniais parametrais
 README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo `summary-<komanda>.json`.
 
 - **Tarnyba arba matavimas.** `--duration 0` (numatyta funkcijoms) — veikia iki `SIGINT` / `SIGTERM`; `--duration S > 0` —
@@ -105,6 +107,18 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   klaidoje — savininko run ID). Funkcijos domenų netrina.
 - **Domeno kelias GPU (`cuda-linear`) flow'ams — ne ilgesnis kaip 48 simboliai** (skaitytojo lizdo
   `<domenas>/<flow>.mxl-flow/payload.sock` kelias turi tilpti į 107 simbolius); ilgesnį `vramflow-func` atmeta iškart.
+- **`ingest` (tikri šaltiniai su garsu).** `--input URL` (kartoti; `udp://`, `rtp://`, `srt://`, `http://…m3u8`, failas) → kiekvienam
+  šaltiniui video flow'as (`07`, v210) ir garso flow'as (`08`, 48 kHz float32). Laiko modelis paprastai: kiekvienas paketas
+  pažymimas vieną kartą, kai demuxeris jį perskaito — *išėjimo laikas = šaltinio laiko žyma + vienas šaltinio poslinkis*, bendras
+  video ir garsui; poslinkį nustato pirmas video paketas taip, kad kadras būtų rodomas `--latency-ms` (numatyta 1000; HLS — ne
+  mažiau kaip 3 segmentai) po atvykimo. Todėl kadras patenka į savo laiko žymos MXL indeksą, ne į atvykimo — pliūpsniai ir
+  sulaikyti paketai vaizdo garso atžvilgiu nepastumia. Paketas į dekoderį (`--decoder nvdec | cuvid | sw`) paduodamas
+  `--decode-lead-ms` (numatyta 400) prieš savo laiką. Šaltinio laikrodžiui skubant ar vėluojant garsas seka jį mėginio tikslumu
+  (resampleris keičia greitį ne daugiau kaip `--max-comp-ppm`, numatyta ±0,1 %), o vaizdas pakartoja arba praleidžia visą kadrą
+  (interlaced — laukų porą), kai nuo garso nutolsta pusę kadro — kaip frame synchronizer'is, A/V ≤ 1 laukas. Kadras, kuris nebespės,
+  nededamas į dekoderį — praleidžiama iki kito rakto kadro (perkrova nesugriūna). Formatas nustatomas iš srauto prieš kuriant
+  flow'us (laukų tvarka — iš pirmo IDR); 4:2:2, 10 bitų, BFF atmetami su įvardytu formatu (exit `2`); formatas pasikeitė vidury
+  srauto — tas šaltinis sustabdomas, kiti tęsia, exit `6`. 50 Hz ir 25p šaltiniai — viename procese, 59,94 šeima — atskirame.
 - **Sąveika su MXL įrankiais.** `mxl-info` skaito visus VRAMFlow flow'us; `mxl-gst-sink` / `mxl-gst-cuda-sink` rodo `gen` ir
   `logo` išėjimus ir per aukštupio pertrauką laiko paskutinį gerą vaizdą (`--on-loss invalid`).
 
@@ -125,8 +139,8 @@ Exit kodai (variklio funkcijos; griežtas — `--strict-exit on` arba `auto` su 
 ## 7. Testai ir matavimai
 
 `bash scripts/linux/run-all.sh --soak skip` — viskas (zondai, upstream testai, vienetų / GPU / funkciniai testai, ataskaita);
-talpa — `tests/perf/capacity.py`, CPU prieš GPU — `scripts/linux/71-compare.sh` + `tests/perf/compare_report.py`. Tik
-sintetinė medžiaga.
+talpa — `tests/perf/capacity.py` (ingest — `tests/perf/ingest_capacity.py`), CPU prieš GPU — `scripts/linux/71-compare.sh` +
+`tests/perf/compare_report.py`; ingest testų klipai — `scripts/linux/62-make-av-clip.sh`. Tik sintetinė medžiaga.
 
 ## 8. Rezultatai (RTX 4070 Laptop 8 GB, WSL2 — orientaciniai)
 
@@ -150,6 +164,11 @@ Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pako
 
 Lentelę skaityti atsargiai (energijos profilis „Whisper“, GPU dažnis G bėgimuose 210–690 MHz, kiekviena pakopa — kartą);
 išsamiai: [`docs/rezultatai/2026-11-11-composite.md`](docs/rezultatai/2026-11-11-composite.md).
+
+**Ingest** (sintetinis H.264 + AAC per UDP, 30 s pakopa, kiekvienas šaltinis tikrintas): NVDEC (G) 1080i50 ir 1080p25 — N\* ≥ 16
+(pakopų galas), programinis (C) — ≥ 8; VRAM šaltiniui 135 MiB, CPU 0,10 (G) / 0,25 (C) branduolio; A/V kiekvienam impulsui
+≤ 0,52 ms. Funkciniuose testuose A/V 0,0 ms per UDP, RTP, SRT ir HLS; 0,5 % greitesnis šaltinis — 13 kadro slydimų, A/V ≤ 18,8 ms,
+be girdimų trūkių. Išsamiai: [`docs/rezultatai/2026-11-14-ingest.md`](docs/rezultatai/2026-11-14-ingest.md).
 
 **GPU dažniai.** Nešiojamo kompiuterio GPU (WSL2 / WDDM) iš P8 į P3 pereina sustabdydamas visų procesų GPU darbą 50–350 ms;
 kol eteris gyvas, laikykite `vramflow-func keepwarm` (64 MB kas 5 ms; +8,5 W) — testų įrankiai jį paleidžia patys. Serveriams
