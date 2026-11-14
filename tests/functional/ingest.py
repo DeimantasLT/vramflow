@@ -51,7 +51,7 @@ def dur(s):
 
 
 def ensure_clips():
-    need = ["av_1080i50.ts", "av_1080p25.ts", "fmtchange.ts", "wrap_1080i50.ts", "audio_only.ts", "bad_422.ts", "bad_10bit.ts", "bad_bff.ts",
+    need = ["av_1080i50.ts", "av_1080p25.ts", "fmtchange.ts", "wrap_1080i50.ts", "audio_only_90.ts", "bad_422.ts", "bad_10bit.ts", "bad_bff.ts",
             "fmt_1080i50_short.ts", "ref_crc_1080p25.json"]
     if all((CLIPS / n).exists() for n in need):
         return None
@@ -569,8 +569,8 @@ def ingest_no_video(out):
     if (why := ensure_clips()):
         return [F.result("ingest_no_video", "FAIL", why=why)]
     tid, port = "ingest_no_video", BASE_PORT + 21
-    T = dur(45)  # klipas 60 s: visas matavimo langas (ir ingest pabaiga) — kol siuntėjas dar siunčia
-    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"], [lambda: Sender.ts(out, f"{tid}/snd", CLIPS / "audio_only.ts", port)], T,
+    T = dur(60)  # US 11: 60 s; klipas 90 s — visas langas (ir ingest pabaiga) — kol siuntėjas dar siunčia
+    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"], [lambda: Sender.ts(out, f"{tid}/snd", CLIPS / "audio_only_90.ts", port)], T,
                                   video=False)
     fv = flow(sv)
     problems = []

@@ -15,7 +15,7 @@
 #                                     grain'ų CRC32C bitų tikslumo patikrai)
 #   av_720p50_short.ts               — 20 s 720p50 (formato pasikeitimui)
 #   fmtchange.ts                     — 15 s 1080i50, tada 720p50 (sujungti TS: PTS šuolis ir SPS pasikeitimas)
-#   audio_only.ts                    — 60 s tik AAC
+#   audio_only_90.ts                 — 90 s tik AAC
 #   bad_422.ts, bad_10bit.ts, bad_bff.ts — nepalaikomi (4:2:2, 10 bitų, BFF interlaced), 6 s
 #   wrap_1080i50.ts                  — 40 s, PTS persiverčia per 2^33 ~20-ą sekundę (-output_ts_offset)
 #   hevc_1080p25.ts                  — 20 s HEVC (jei yra libx265)
@@ -68,9 +68,9 @@ if [[ ! -f "$OUT/fmtchange.ts" || "${FORCE:-0}" == 1 ]]; then
   cat "$OUT/fmt_1080i50_short.ts" "$OUT/av_720p50_short.ts" > "$OUT/fmtchange.ts"
   echo "sukurta $OUT/fmtchange.ts"
 fi
-if [[ ! -f "$OUT/audio_only.ts" || "${FORCE:-0}" == 1 ]]; then
-  "${FF[@]}" -f lavfi -i "$(audio_src 60)" -c:a aac -b:a 192k -f mpegts "$OUT/audio_only.ts"
-  echo "sukurta $OUT/audio_only.ts"
+if [[ ! -f "$OUT/audio_only_90.ts" || "${FORCE:-0}" == 1 ]]; then
+  "${FF[@]}" -f lavfi -i "$(audio_src 90)" -c:a aac -b:a 192k -f mpegts "$OUT/audio_only_90.ts"
+  echo "sukurta $OUT/audio_only_90.ts"
 fi
 if ffmpeg -hide_banner -encoders 2>/dev/null | grep libx265 > /dev/null; then  # be -q: grep perskaito viską (pipefail + SIGPIPE)
   if [[ ! -f "$OUT/hevc_1080p25.ts" || "${FORCE:-0}" == 1 ]]; then
