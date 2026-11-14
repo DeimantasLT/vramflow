@@ -47,6 +47,7 @@ void AudioDecoder::close() {
 }
 
 int AudioDecoder::send(AVPacket* pkt) {
+    if (!c_) return AVERROR(EINVAL);  // neatidarytas (A2: kviečiantysis garsą laiko „nėra“; čia — tik apsauga nuo nullptr)
     const int e = avcodec_send_packet(c_, pkt);
     if (e != 0 && e != AVERROR(EAGAIN)) ++errors_;
     return e;
@@ -78,6 +79,7 @@ bool AudioDecoder::ensure_swr(const AVFrame* f) {
 }
 
 bool AudioDecoder::receive(AudioChunk& out) {
+    if (!c_) return false;
     for (;;) {
         const int r = avcodec_receive_frame(c_, fr_);
         if (r != 0) {

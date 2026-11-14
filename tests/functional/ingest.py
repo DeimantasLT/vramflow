@@ -732,6 +732,63 @@ def ingest_reconnect(out):
                      + summary_line(si, sv, a, ratio_ok(flow(sv))), ingest=si)]
 
 
+def ingest_audio_absent_reconnect(out):
+    """A2 (round 9): po prisijungimo iš naujo garso dekoderio atidaryti nepavyksta ([undecodable] — paslėptas
+    --test-audio-reopen-fail: kiekvienas atidarymas po pirmo nepavyksta, kaip nedekoduojamas kodekas) arba garso srauto nebėra
+    ([missing] — antras siuntėjas siunčia tik video). Procesas nekrenta (anksčiau — avcodec_send_packet(nullptr)), video tęsiasi po
+    grįžimo, garsas — tyla (audio_absent ≥ 1, tylos mėginių ≥ antros sesijos trukmė)."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_audio_absent_reconnect", "FAIL", why=why)]
+    vonly = pathlib.Path(out) / "ingest_audio_absent_reconnect" / "video_only.ts"
+    vonly.parent.mkdir(parents=True, exist_ok=True)
+    if not vonly.exists():
+        subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(CLIPS / "av_1080i50.ts"), "-map", "0:v", "-c", "copy",
+                        "-t", "60", "-f", "mpegts", str(vonly)], check=False)
+    res = []
+    for k, (case, clip2, extra) in enumerate((("undecodable", CLIPS / "av_1080i50.ts", ("--test-audio-reopen-fail", 1)),
+                                              ("missing", vonly, ()))):
+        tid, port = f"ingest_audio_absent_reconnect[{case}]", BASE_PORT + 41 + k
+        UP1, GAP, UP2 = 15, 6, 20
+        T = UP1 + GAP + UP2
+        d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
+        ing = s1 = s2 = None
+        try:
+            ing = F.FProc(out, tid, "ingest", d, "--input", f"udp://127.0.0.1:{port}", "--duration", T + 10, "--warmup", 4,
+                          *F.vcommon("gpu", "cuda-linear"), *extra)
+            s1 = Sender.ts(out, f"{tid}/snd1", CLIPS / "av_1080i50.ts", port)
+            time.sleep(UP1)
+            s1.stop()
+            time.sleep(GAP)
+            s2 = Sender.ts(out, f"{tid}/snd2", clip2, port)
+            ri = ing.wait(timeout=T + 60)
+        finally:
+            if ing is not None:
+                ing.term()
+            for s in (s1, s2):
+                if s is not None:
+                    s.stop()
+        si = F.vsummary(ing, "ingest")
+        fi = flow(si)
+        err = ing.err_path.read_text(errors="replace") if ing.err_path.exists() else ""
+        problems = []
+        if ri is None or ri < 0 or si is None:
+            problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+        if fi.get("input_reconnects", 0) < 1:
+            problems.append(f"input_reconnects {fi.get('input_reconnects')}")
+        if fi.get("audio_absent", 0) < 1 or "garso nėra" not in err:
+            problems.append(f"audio_absent {fi.get('audio_absent')} / žurnale nėra „garso nėra“")
+        # video tęsiasi po grįžimo: dekoduota ≥ 90 % abiejų sesijų kadrų (25 kadrai/s)
+        if fi.get("frames_decoded", 0) < (UP1 + UP2 - 8) * 25 * 0.9:
+            problems.append(f"frames_decoded {fi.get('frames_decoded')} (video po grįžimo?)")
+        if fi.get("audio_silent_samples", 0) < (UP2 - 6) * 48000:
+            problems.append(f"audio_silent_samples {fi.get('audio_silent_samples')} (garsas po grįžimo — ne tyla?)")
+        line = next((ln for ln in err.splitlines() if "garso nėra" in ln), "")
+        res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | {line.strip()[:200]} | exit {ri}, "
+                            f"frames_decoded {fi.get('frames_decoded')}, audio_absent {fi.get('audio_absent')}, "
+                            f"audio_absent_pkts {fi.get('audio_absent_pkts')}, silent {fi.get('audio_silent_samples')}"))
+    return res
+
+
 def ingest_overload_skip(out):
     if (why := ensure_clips()):
         return [F.result("ingest_overload_skip", "FAIL", why=why)]
@@ -905,4 +962,4 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_progressive_chroma": ingest_progressive_chroma, "ingest_bad_url": ingest_bad_url, "ingest_no_video": ingest_no_video,
          "ingest_format_change": ingest_format_change, "ingest_unsupported": ingest_unsupported,
          "ingest_hls_security": ingest_hls_security, "ingest_hls_recursion_live": ingest_hls_recursion_live,
-         "ingest_secrets_redacted": ingest_secrets_redacted}
+         "ingest_secrets_redacted": ingest_secrets_redacted, "ingest_audio_absent_reconnect": ingest_audio_absent_reconnect}

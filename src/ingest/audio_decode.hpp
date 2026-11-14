@@ -34,7 +34,8 @@ public:
 
     bool open(const AVCodecParameters* par, int out_channels, const AudioSyncConfig& sync, std::string& err);
     void close();
-    int send(AVPacket* pkt);  // 0, AVERROR(EAGAIN) — pirma receive, kita — klaida (skaičiuojama)
+    bool is_open() const { return c_ != nullptr; }
+    int send(AVPacket* pkt);  // 0, AVERROR(EAGAIN) — pirma receive, kita — klaida (skaičiuojama); neatidarytas — AVERROR(EINVAL)
     // Kitas iškoduotas ir resamplintas gabalas absoliučioje 48 kHz ašyje; false — šiuo metu nėra.
     bool receive(AudioChunk& out);
     // Nauja įėjimo sesija: dekoderis ir resampleris išvalomi, sekimas iš naujo (pirmas kadras — perinkaravimas).

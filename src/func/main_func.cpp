@@ -224,6 +224,7 @@ int main(int argc, char** argv) {
     ig->add_option("--max-audio-ring-mb", o.max_audio_ring_mb, "garso žiedo riba šaltiniui, MB (numatyta 256; daugiau — šaltinis atmetamas)")
         ->check(CLI::Range(1u, 4096u));
     ig->add_option("--test-decode-delay-ms", o.test_decode_delay_ms)->group("");  // perkrovos testui
+    ig->add_option("--test-audio-reopen-fail", o.test_audio_reopen_fail)->group("");  // A2 testui: garso dekoderis neatsidaro iš naujo
     std::uint32_t clip_frames = 250;
     std::uint64_t clip_first = 1000;
     auto* cl = app.add_subcommand("clip", "bandomojo klipo raw NV12 kadrai į stdout (CPU etalonas)");

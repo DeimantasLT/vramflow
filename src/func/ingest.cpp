@@ -63,6 +63,7 @@ namespace ig = mxlv::ingest;
 struct QItem {
     ig::Packet p;
     AVCodecParameters* par = nullptr;  // != nullptr — nauja sesija (dekoderis atidaromas iš naujo); savininkas — eilė / gija
+    bool no_stream = false;            // nauja sesija be šio srauto (A2: garso nebėra po prisijungimo iš naujo)
 };
 
 class PacketQueue {
@@ -140,7 +141,7 @@ struct Source {
     // statistika (gijos)
     Counter pkts_v{0}, pkts_a{0}, frames_decoded{0}, late_frames{0}, slip_drop_frames{0}, store_drops{0}, vdec_errors{0},
         adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0},
-        prestart_dropped{0};
+        prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0};
     std::atomic<std::int64_t> comp_abs{0};
     // tick gija
     AVFrame* cur = nullptr;   // dabartinis kadras (interlaced — abu laukai)
@@ -235,7 +236,7 @@ void demux_thread(Source& s, Shared& c) {
                 // nauja sesija: dekoderiai atidaromi iš naujo. Laikrodis — tas pats: siuntėjas pradėjo iš naujo (PTS šuolis) —
                 // nauja epocha ir fiksavimas; gyvo šaltinio PTS tęsiasi — tas pats PTS → TAI atvaizdis (indeksai nepasislenka)
                 if (s.video) s.vq.push(QItem{{}, par_copy(in.vpar)});
-                if (s.audio && in.audio) s.aq.push(QItem{{}, par_copy(in.apar)});
+                if (s.audio) s.aq.push(in.audio ? QItem{{}, par_copy(in.apar)} : QItem{{}, nullptr, true});
             }
             first = false;
             while (!c.stop.load() && !s.fmt_stopped.load()) {
@@ -404,22 +405,45 @@ void video_thread(Source& s, Shared& c) {
 }
 
 // --- garso dekodavimo gija ----------------------------------------------------------------------------------------
+// A2: garso kelias būna „nėra“, kai sesijoje nėra garso srauto arba dekoderio atidaryti nepavyko: paketai metami (skaičiuojami),
+// žiedas nerašomas — tick'as flow'ui rašo tylą (kaip spragai), žurnale — viena eilutė; kitoje sesijoje bandoma iš naujo.
+// (Anksčiau nepavykęs atidarymas palikdavo uždarytą dekoderį ir kitas paketas kviesdavo avcodec_send_packet(nullptr) — procesas krisdavo.)
 void audio_thread(Source& s, Shared& c) {
     ig::AudioDecoder dec;
-    std::string err;
-    if (!dec.open(s.apar0, c.o.audio_channels, c.async, err)) {
-        log_line("ingest", s.name + ": garsas: " + err);
-        return;
-    }
+    int sessions = 0;
+    bool absent = false;
+    std::uint64_t resync_base = 0;
+    auto open = [&](const AVCodecParameters* par) {
+        resync_base += dec.resyncs();
+        std::string why;
+        bool ok = false;
+        if (par == nullptr) why = "sesijoje nėra garso srauto";
+        else if (c.o.test_audio_reopen_fail && sessions > 0) why = "dekoderio atidaryti nepavyko (--test-audio-reopen-fail)";
+        else ok = dec.open(par, c.o.audio_channels, c.async, why);
+        ++sessions;
+        if (ok) {
+            if (absent) log_line("ingest", s.name + ": garsas vėl yra (" + std::string(avcodec_get_name(par->codec_id)) + ")");
+            absent = false;
+            return;
+        }
+        dec.close();
+        absent = true;
+        ++s.audio_absent;
+        log_line("ingest", s.name + ": garso nėra: " + why + " — flow'e tyla, bandoma kitoje sesijoje");
+    };
+    open(s.apar0);
     ig::AudioChunk ch;
     QItem it;
-    std::uint64_t resync_base = 0;
     while (!c.stop.load() && !s.fmt_stopped.load()) {
         if (!s.aq.pop(it, std::chrono::milliseconds(20))) continue;
-        if (it.par) {
-            resync_base += dec.resyncs();
-            if (!dec.open(it.par, c.o.audio_channels, c.async, err)) log_line("ingest", s.name + ": garsas: " + err);
+        if (it.par || it.no_stream) {
+            open(it.par);
             avcodec_parameters_free(&it.par);
+            continue;
+        }
+        if (absent) {
+            ++s.audio_absent_pkts;
+            PacketQueue::drop(it);
             continue;
         }
         int e = dec.send(it.p.pkt);
@@ -1019,6 +1043,8 @@ int run_ingest(const Opts& o_in) {
         f.inc("audio_silent_samples", s.audio_silent_samples);
         f.inc("audio_write_errors", s.audio_write_errors);
         f.inc("audio_resyncs", s.audio_resyncs);
+        f.inc("audio_absent", s.audio_absent);            // sesijos be garso (nėra srauto / dekoderis neatsidarė) — flow'e tyla (A2)
+        f.inc("audio_absent_pkts", s.audio_absent_pkts);  // tų sesijų garso paketai — išmesti
         f.inc("audio_comp_samples", static_cast<std::uint64_t>(s.comp_abs.load()));
         f.inc("wraps", cs.wraps);
         f.inc("discontinuities", cs.discontinuities);
