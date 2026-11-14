@@ -55,6 +55,9 @@ struct Opt {
     bool frame_mbs_only = false, field_pic = false, bottom_first = false, high = true, vui = true;
     int pic_struct = -1;  // < 0 — be pic_timing SEI (ir be pic_struct_present_flag)
     int delta = -1;       // delta_pic_order_cnt_bottom (kadrui)
+    bool idr = true;      // false — ne IDR pjūvis (NAL 1, be idr_pic_id): atviras GOP / periodinis intra atnaujinimas (B7)
+    bool recovery = false;  // recovery point SEI (payload 6) prieš pjūvį
+    int slice_type = 7;     // 7 — I (visi pjūviai), 5 — P
 };
 
 std::vector<std::uint8_t> stream(const Opt& o) {
@@ -147,20 +150,34 @@ std::vector<std::uint8_t> stream(const Opt& o) {
         sei.trail();
         nal(s, 6, 0, sei.b);
     }
+    if (o.recovery) {  // recovery_point: recovery_frame_cnt ue(0), exact_match 1, broken_link 0, changing_slice_group_idc 2 bitai
+        BW rp;
+        rp.ue(0);
+        rp.put(1, 1);
+        rp.put(0, 1);
+        rp.put(0, 2);
+        while (rp.bits % 8) rp.put(0, 1);
+        BW sei;
+        sei.put(6, 8);
+        sei.put(static_cast<std::uint32_t>(rp.b.size()), 8);
+        for (std::uint8_t c : rp.b) sei.put(c, 8);
+        sei.trail();
+        nal(s, 6, 0, sei.b);
+    }
     BW sl;
     sl.ue(0);
-    sl.ue(7);
+    sl.ue(static_cast<std::uint32_t>(o.slice_type));
     sl.ue(0);
     sl.put(0, 4);  // frame_num
     if (!o.frame_mbs_only) {
         sl.put(o.field_pic ? 1 : 0, 1);
         if (o.field_pic) sl.put(o.bottom_first ? 1 : 0, 1);
     }
-    sl.ue(0);      // idr_pic_id
+    if (o.idr) sl.ue(0);  // idr_pic_id
     sl.put(1, 6);  // poc lsb
     if (!o.field_pic) sl.se(o.delta);
     sl.trail();
-    nal(s, 5, 3, sl.b);
+    nal(s, o.idr ? 5 : 1, 3, sl.b);
     return s;
 }
 }  // namespace
@@ -217,4 +234,58 @@ TEST_CASE("h264_scan: be SPS / PPS — nežinoma, kol jų nėra", "[ingest][h264
     CHECK(s.scan() == Scan::Unknown);
     CHECK(s.feed(bs.data(), bs.size()));  // dabar su SPS / PPS / SEI
     CHECK(s.scan() == Scan::Bff);
+}
+
+TEST_CASE("h264_scan: B7 — įėjimo taškas be IDR: recovery point SEI arba I pjūvis (atviras GOP, intra atnaujinimas)", "[ingest][h264_scan]") {
+    Opt rec;  // ne IDR P pjūvis su recovery point SEI (x264 intra-refresh)
+    rec.idr = false;
+    rec.recovery = true;
+    rec.slice_type = 5;
+    rec.pic_struct = 3;
+    Opt iframe;  // ne IDR I pjūvis (atviras GOP: I kadras su recovery point arba be jo)
+    iframe.idr = false;
+    iframe.delta = 1;
+    Opt plain;  // ne IDR P pjūvis be recovery point — ne įėjimo taškas
+    plain.idr = false;
+    plain.slice_type = 5;
+    plain.pic_struct = 4;
+    Opt prog;
+    prog.frame_mbs_only = true;
+    prog.idr = false;
+    prog.recovery = true;
+    prog.slice_type = 5;
+    {
+        H264Scan s;
+        const auto bs = stream(rec);
+        CHECK(s.feed(bs.data(), bs.size()));
+        CHECK(s.scan() == Scan::Tff);
+        CHECK(s.entry() == Entry::RecoveryPoint);
+    }
+    {
+        H264Scan s;
+        const auto bs = stream(iframe);
+        CHECK(s.feed(bs.data(), bs.size()));
+        CHECK(s.scan() == Scan::Tff);
+        CHECK(s.entry() == Entry::IntraSlice);
+    }
+    {
+        H264Scan s;
+        const auto bs = stream(plain);
+        CHECK_FALSE(s.feed(bs.data(), bs.size()));
+        CHECK(s.scan() == Scan::Unknown);
+    }
+    {
+        H264Scan s;
+        const auto bs = stream(prog);
+        CHECK(s.feed(bs.data(), bs.size()));
+        CHECK(s.scan() == Scan::Progressive);
+    }
+    {
+        H264Scan s;  // IDR — kaip anksčiau
+        Opt idr;
+        idr.pic_struct = 4;
+        const auto bs = stream(idr);
+        CHECK(s.feed(bs.data(), bs.size()));
+        CHECK(s.entry() == Entry::Idr);
+    }
 }

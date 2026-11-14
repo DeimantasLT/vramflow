@@ -14,7 +14,9 @@ Režimai (galima derinti):
 Tik sintetinė medžiaga, tik loopback. Išėjimas: 0; statistika (išsiųsta, pliūpsniai, sulaikymai) — stdout JSON.
 
 Naudojimas: ts_burst.py FAILAS.ts --port 20000 [--speed 1.005] [--burst-s 2 --burst-ms 50] [--stall-every-s 5 --stall-ms 300]
-            [--loop] [--duration 120] [--rtp] [--start-at TAI_UNIX_S]
+            [--loop] [--duration 120] [--rtp] [--start-at TAI_UNIX_S] [--start-s 7.3] [--shift-at-s 20 --shift-ms 600]
+  --start-s S           — siųsti nuo medijos sekundės S (prisijungimas vidury srauto: pirmas kadras — ne IDR);
+  --shift-at-s T --shift-ms D — nuo sienos sekundės T visi paketai vėluoja D ms visam laikui (latencijos pokytis, perfiksavimas)
 """
 import argparse
 import json
@@ -91,6 +93,9 @@ def main():
     ap.add_argument("--loop", action="store_true")
     ap.add_argument("--duration", type=float, default=0)
     ap.add_argument("--rtp", action="store_true")
+    ap.add_argument("--start-s", type=float, default=0)  # pradėti nuo šios medijos sekundės (prisijungimas vidury srauto)
+    ap.add_argument("--shift-at-s", type=float, default=0)  # nuo šios sienos sekundės visi paketai vėluoja --shift-ms visam laikui
+    ap.add_argument("--shift-ms", type=float, default=0)
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         raise SystemExit("tik loopback")
@@ -105,9 +110,14 @@ def main():
     seq = random.getrandbits(16)
     sent = bursts = stalls = loops = 0
     n_pk = len(times)
-    t0 = time.monotonic() + 0.2
-    t_end = t0 + a.duration if a.duration > 0 else None
     k = 0
+    if a.start_s > 0:  # pirmas siunčiamas paketas — pirmasis, kurio laikas ≥ start_s (TS paketų riba; PES vidurys — demuxeris jį išmes)
+        while k < n_pk and times[k] < a.start_s:
+            k += 1
+        k -= k % PER_DGRAM
+    t0 = time.monotonic() + 0.2 - (times[k] if k < n_pk else 0)
+    t_end = time.monotonic() + 0.2 + a.duration if a.duration > 0 else None
+    shift = 0.0
     base = 0.0  # kilpos laiko poslinkis (medijos s)
     held = []
     next_stall = a.stall_every_s if a.stall_every_s > 0 else None
@@ -143,6 +153,9 @@ def main():
             when = t0 + ((w + 1) * a.burst_s) / a.speed + frac * a.burst_ms / 1000.0
         else:
             when = t0 + media / a.speed
+        if a.shift_ms > 0 and shift == 0.0 and time.monotonic() - (t0 + times[0]) >= a.shift_at_s:
+            shift = a.shift_ms / 1000.0  # latencijos pokytis: nuo čia visi paketai vėliau (be pasivijimo)
+        when += shift
         if t_end is not None and when > t_end:
             break
         now = time.monotonic()

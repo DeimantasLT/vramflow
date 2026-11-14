@@ -19,6 +19,9 @@
 namespace mxlv::ingest {
 
 enum class Scan : std::uint8_t { Unknown, Progressive, Tff, Bff };
+// B7: kuo prasidėjo dekoduojamas srautas — IDR, ne IDR pjūvis su recovery point SEI (x264 intra-refresh, atviras GOP) arba ne IDR
+// I pjūvis (atviras GOP be SEI). Srautas be nė vieno iš jų — „nėra dekoduojamo įėjimo taško“.
+enum class Entry : std::uint8_t { None, Idr, RecoveryPoint, IntraSlice };
 
 namespace h264 {
 
@@ -229,10 +232,15 @@ public:
                 if (q.valid && id < 256) pps_[id] = q;
             } else if (type == 6) {
                 sei(h264::rbsp(nal, len));
-            } else if (type == 9 || type == 1) {
-                pic_struct_ = -1;  // nauja prieigos dalis — senas pic_struct nebegalioja
+            } else if (type == 9) {
+                pic_struct_ = -1;  // nauja prieigos dalis — senas pic_struct ir recovery point nebegalioja
+                recovery_ = false;
+            } else if (type == 1) {
+                slice(h264::rbsp(nal, len), false);  // ne IDR: įėjimo taškas tik su recovery point arba I pjūvis (B7)
+                pic_struct_ = -1;
+                recovery_ = false;
             } else if (type == 5) {
-                slice(h264::rbsp(nal, len));
+                slice(h264::rbsp(nal, len), true);
             }
         });
         return done_;
@@ -240,6 +248,7 @@ public:
     Scan scan() const { return scan_; }
     bool done() const { return done_; }
     int pic_struct() const { return decided_ps_; }  // IDR prieigos dalies pic_struct (< 0 — nebuvo)
+    Entry entry() const { return entry_; }
 
 private:
     void sei(const std::vector<std::uint8_t>& r) {
@@ -255,6 +264,7 @@ private:
             if (i >= r.size()) return;
             size += r[i++];
             if (i + size > r.size()) return;
+            if (type == 6) recovery_ = true;           // recovery_point
             if (type == 1 && s.pic_struct_present) {  // pic_timing
                 h264::Bits b(r.data() + i, size);
                 if (s.hrd) {
@@ -267,16 +277,18 @@ private:
             if (i < r.size() && r[i] == 0x80) return;  // rbsp_trailing_bits
         }
     }
-    void slice(const std::vector<std::uint8_t>& r) {
+    void slice(const std::vector<std::uint8_t>& r, bool idr) {
         h264::Bits b(r.data(), r.size());
         b.ue();  // first_mb_in_slice
-        b.ue();  // slice_type
+        const std::uint32_t slice_type = b.ue();
+        if (!idr && !recovery_ && slice_type % 5 != 2) return;  // ne IDR, ne recovery point, ne I — ne įėjimo taškas
         const std::uint32_t pps_id = b.ue();
         if (pps_id >= 256 || !pps_[pps_id].valid) return;
         const h264::Pps& p = pps_[pps_id];
         if (p.sps_id >= 32 || !sps_[p.sps_id].valid) return;
         const h264::Sps& s = sps_[p.sps_id];
         done_ = true;
+        entry_ = idr ? Entry::Idr : recovery_ ? Entry::RecoveryPoint : Entry::IntraSlice;
         decided_ps_ = pic_struct_;
         if (s.frame_mbs_only) {
             scan_ = Scan::Progressive;
@@ -295,7 +307,7 @@ private:
             scan_ = b.u(1) ? Scan::Bff : Scan::Tff;
             return;
         }
-        b.ue();  // idr_pic_id
+        if (idr) b.ue();  // idr_pic_id
         if (s.poc_type == 0 && p.bottom_poc_present) {
             b.u(static_cast<int>(s.log2_max_poc_lsb));  // pic_order_cnt_lsb
             const std::int32_t d = b.se();               // apatinio lauko POC − viršutinio
@@ -309,8 +321,9 @@ private:
     h264::Sps sps_[32];
     h264::Pps pps_[256];
     int last_sps_ = -1, pic_struct_ = -1, decided_ps_ = -1;
-    bool done_ = false;
+    bool done_ = false, recovery_ = false;
     Scan scan_ = Scan::Unknown;
+    Entry entry_ = Entry::None;
 };
 
 }  // namespace mxlv::ingest

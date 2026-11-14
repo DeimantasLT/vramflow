@@ -130,6 +130,8 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // HLS atpažįstamas pagal turinį (#EXTM3U), ne pagal .m3u8 galūnę (B8); grojaraštis patikrinamas prieš libav (A1)
     bool hls = false;
     hls_target_ns_ = 0;
+    entry_ = Entry::None;
+    entry_discarded_ = 0;
     if (scheme == "http" || scheme == "https") {
         AVIOInterruptCB cb{interrupt_cb, &intr_};
         HlsLimits lim;
@@ -251,7 +253,13 @@ int Demux::key_field_order() {
     }
     av_packet_free(&pkt);
     static const char* const kName[] = {"nežinoma", "progresyvus", "TFF", "BFF"};
-    std::fprintf(stderr, "[ingest] skenavimas iš IDR: %s (pic_struct %d, paketų %d)\n", kName[static_cast<int>(scan.scan())], scan.pic_struct(), read);
+    static const char* const kEntry[] = {"nėra", "IDR", "recovery point SEI", "I pjūvis"};
+    entry_ = scan.entry();
+    entry_discarded_ = static_cast<std::uint64_t>(read);
+    // B7: įėjimo taškas — IDR, recovery point arba I pjūvis (atviras GOP, intra atnaujinimas); išmesti paketai skaičiuojami ir rodomi
+    std::fprintf(stderr, "[ingest] %s: skenavimas iš įėjimo taško (%s): %s (pic_struct %d), išmesta paketų %d%s\n", shown_.c_str(),
+                 kEntry[static_cast<int>(entry_)], kName[static_cast<int>(scan.scan())], scan.pic_struct(), read,
+                 scan.done() ? "" : " — NĖRA dekoduojamo įėjimo taško");
     switch (scan.scan()) {
         case Scan::Progressive: return AV_FIELD_PROGRESSIVE;
         case Scan::Tff: return AV_FIELD_TT;

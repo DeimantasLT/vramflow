@@ -15,6 +15,7 @@
 #                                     grain'ų CRC32C bitų tikslumo patikrai)
 #   av_1080i50_long.ts               — 300 s 1080i50 (dreifo testai numatytomis parinktimis, be kilpos)
 #   av_720p50_short.ts               — 20 s 720p50 (formato pasikeitimui)
+#   intra_refresh_1080p25.ts, open_gop_1080p25.ts — 30 s be IDR vidury (B7: įėjimas nuo recovery point / I kadro)
 #   fmtchange.ts                     — 15 s 1080i50, tada 720p50 (sujungti TS: PTS šuolis ir SPS pasikeitimas)
 #   audio_only_90.ts                 — 90 s tik AAC
 #   bad_422.ts, bad_10bit.ts, bad_bff.ts — nepalaikomi (4:2:2, 10 bitų, BFF interlaced), 6 s
@@ -61,6 +62,10 @@ make_clip av_1080i50.ts 1080i50 "$SECONDS_LONG"
 make_clip av_1080p25.ts 1080p25 "$SECONDS_LONG"
 make_clip av_1080i50_long.ts 1080i50 300  # dreifas numatytomis parinktimis (±500 ppm, 240 s be kilpos sandūrų)
 make_clip av_720p50_short.ts 720p50 20
+# B7: be IDR vidury — periodinis intra atnaujinimas (IDR tik pirmas kadras, recovery point SEI) ir atviras GOP (I kadrai ne IDR)
+# (vėlesnis -x264-params pakeičia make_clip numatytąjį)
+make_clip intra_refresh_1080p25.ts 1080p25 30 -x264-params "keyint=50:min-keyint=50:scenecut=0:intra-refresh=1:nal-hrd=cbr"
+make_clip open_gop_1080p25.ts 1080p25 30 -x264-params "keyint=25:min-keyint=25:scenecut=0:open-gop=1:nal-hrd=cbr"
 make_clip fmt_1080i50_short.ts 1080i50 15
 make_clip bad_422.ts 1080p25 6 -pix_fmt yuv422p -profile:v high422
 make_clip bad_10bit.ts 1080p25 6 -pix_fmt yuv420p10le -profile:v high10

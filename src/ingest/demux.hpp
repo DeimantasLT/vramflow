@@ -15,6 +15,7 @@ extern "C" {
 
 #include "common/format.hpp"
 #include "ingest/av_input.hpp"
+#include "ingest/h264_scan.hpp"
 #include "ingest/url_policy.hpp"
 #include "timing/source_clock.hpp"
 
@@ -67,6 +68,9 @@ public:
     int read(AVPacket* pkt, Kind& kind, std::string& why);
     // HLS: #EXT-X-TARGETDURATION ns (0 — ne HLS / nežinoma); naudojama latencijai ≥ 3 segmentai (K7).
     std::int64_t hls_target_ns() const { return hls_target_ns_; }
+    // B7: kuo prasidėjo zondavimo skenavimas (H.264) ir kiek paketų tam išmesta
+    Entry entry() const { return entry_; }
+    std::uint64_t entry_discarded() const { return entry_discarded_; }
     Interrupt& interrupt() { return intr_; }
 
 private:
@@ -77,6 +81,8 @@ private:
     std::uint32_t silence_ms_ = 0;
     std::int64_t hls_target_ns_ = 0;
     int field_order_ = AV_FIELD_UNKNOWN;  // laukų tvarka iš rakto kadro (key_field_order)
+    Entry entry_ = Entry::None;
+    std::uint64_t entry_discarded_ = 0;
     int key_field_order();
 
 public:

@@ -141,7 +141,8 @@ struct Source {
     // statistika (gijos)
     Counter pkts_v{0}, pkts_a{0}, frames_decoded{0}, late_frames{0}, slip_drop_frames{0}, store_drops{0}, vdec_errors{0},
         adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0},
-        prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0}, decoder_fallbacks{0}, reconnects_live{0};
+        prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0}, decoder_fallbacks{0}, reconnects_live{0}, entry_dropped{0},
+        no_entry_point{0}, probe_scan_dropped{0};
     std::atomic<std::int64_t> comp_abs{0};
     // tick gija
     AVFrame* cur = nullptr;   // dabartinis kadras (interlaced — abu laukai)
@@ -225,6 +226,7 @@ void demux_thread(Source& s, Shared& c) {
                     return false;
                 }
                 const ig::StreamInfo& in = s.demux.info();
+                s.probe_scan_dropped += s.demux.entry_discarded();
                 vramflow::VideoFormat f{};
                 std::string fw;
                 // B6: nepavykęs / neišsamus zondavimas (nėra video, nežinomas dydis ar pikselių formatas) — NE formato pasikeitimas:
@@ -304,6 +306,7 @@ void demux_thread(Source& s, Shared& c) {
 }
 
 // --- video dekodavimo gija ----------------------------------------------------------------------------------------
+constexpr std::uint64_t kNoEntryPkts = 250;       // ~10 s 25p be įėjimo taško → „nėra dekoduojamo įėjimo taško“ (B7)
 constexpr std::uint64_t kDecodeFailStreak = 100;  // ~4 s 25p: paketų iš eilės su klaida be nė vieno kadro → dekoderis laikomas sugedusiu
 void store_frame(Source& s, ig::DecodedFrame& df) {
     AVFrame* f = df.f;
@@ -389,6 +392,15 @@ void video_thread(Source& s, Shared& c) {
     };
     if (!open(s.vpar0)) return;
     std::uint64_t streak = 0;  // paketų iš eilės su dekoderio klaida ir be naujo kadro
+    const bool is_h264 = s.vpar0->codec_id == AV_CODEC_ID_H264;
+    ig::H264Scan entry_scan;
+    std::uint64_t waited = 0;
+    auto reset_scan = [&] {
+        entry_scan = ig::H264Scan{};
+        if (cur_par && cur_par->extradata && cur_par->extradata_size > 0)
+            entry_scan.feed(cur_par->extradata, static_cast<std::size_t>(cur_par->extradata_size));
+    };
+    reset_scan();
     bool need_key = true;  // po (re)atidarymo — nuo rakto kadro (be atramos kadrų dekoderis išvestų iškraipytą vaizdą)
     ig::DecodedFrame df;
     auto drain = [&] {
@@ -409,9 +421,27 @@ void video_thread(Source& s, Shared& c) {
             if (!ok) break;
             continue;
         }
-        if (need_key && !it.p.key) {
-            PacketQueue::drop(it);
-            continue;
+        if (need_key) {
+            // B7: įėjimo taškas — rakto paketas ARBA (H.264) recovery point SEI / I pjūvis (atviras GOP, intra atnaujinimas: IDR
+            // gali niekada neateiti). Išmesti paketai skaičiuojami; per ilgai be įėjimo taško — matoma būsena (žurnalas, skaitiklis).
+            bool entry = it.p.key;
+            if (!entry && is_h264 && it.p.pkt) entry = entry_scan.feed(it.p.pkt->data, static_cast<std::size_t>(it.p.pkt->size));
+            if (!entry) {
+                ++s.entry_dropped;
+                if (++waited == kNoEntryPkts) {
+                    ++s.no_entry_point;
+                    log_line("ingest", s.name + ": nėra dekoduojamo įėjimo taško (" + std::to_string(waited) +
+                                           " paketų be IDR / recovery point / I pjūvio) — laukiama toliau");
+                }
+                PacketQueue::drop(it);
+                continue;
+            }
+            static const char* const kEntry[] = {"rakto paketas", "IDR", "recovery point SEI", "I pjūvis"};
+            if (waited > 0)
+                log_line("ingest", s.name + ": dekodavimas pradėtas nuo įėjimo taško (" +
+                                       kEntry[it.p.key ? 0 : static_cast<int>(entry_scan.entry())] + ") po " + std::to_string(waited) + " išmestų paketų");
+            waited = 0;
+            reset_scan();
         }
         need_key = false;
         // Atsarga (pamoka 3): į dekoderį ne anksčiau kaip lead prieš DTS_TAI
@@ -904,6 +934,7 @@ int run_ingest(const Opts& o_in) {
             return stop.load() ? fail(kStoppedWaiting, "sustabdyta laukiant " + ig::redact_url(o.inputs[k])) : fail(2, err);
         }
         const ig::StreamInfo& in = s->demux.info();
+        s->probe_scan_dropped += s->demux.entry_discarded();
         s->video = in.video;
         s->audio = in.audio && o.ingest_audio;
         if (s->video) {
@@ -1152,6 +1183,9 @@ int run_ingest(const Opts& o_in) {
         f.inc("audio_absent", s.audio_absent);            // sesijos be garso (nėra srauto / dekoderis neatsidarė) — flow'e tyla (A2)
         f.inc("audio_absent_pkts", s.audio_absent_pkts);  // tų sesijų garso paketai — išmesti
         f.inc("decoder_fallbacks", s.decoder_fallbacks);  // NVDEC / cuvid → programinis (B8)
+        f.inc("entry_dropped_pkts", s.entry_dropped);    // B7: paketai prieš įėjimo tašką (po (re)atidarymo)
+        f.inc("no_entry_point", s.no_entry_point);       // B7: per kNoEntryPkts be įėjimo taško
+        f.inc("probe_scan_dropped_pkts", s.probe_scan_dropped);  // B7: zondavimo skenavimo išmesti paketai (iki įėjimo taško)
         f.inc("audio_comp_samples", static_cast<std::uint64_t>(s.comp_abs.load()));
         f.inc("wraps", cs.wraps);
         f.inc("discontinuities", cs.discontinuities);

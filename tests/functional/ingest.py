@@ -54,6 +54,7 @@ def ensure_clips():
     need = ["av_1080i50.ts", "av_1080p25.ts", "fmtchange.ts", "wrap_1080i50.ts", "audio_only_90.ts", "bad_422.ts", "bad_10bit.ts", "bad_bff.ts",
             "fmt_1080i50_short.ts", "ref_crc_1080p25.json"]
     need.append("av_1080i50_long.ts")
+    need += ["intra_refresh_1080p25.ts", "open_gop_1080p25.ts"]
     if all((CLIPS / n).exists() for n in need):
         return None
     r = subprocess.run(["bash", str(REPO / "scripts/linux/62-make-av-clip.sh"), str(CLIPS)], capture_output=True, text=True,
@@ -900,6 +901,34 @@ def ingest_hls_by_content(out):
 
 
 
+def ingest_no_idr_entry(out):
+    """B7: srautai be IDR vidury — x264 periodinis intra atnaujinimas (intra-refresh, IDR tik pirmas kadras) ir atviras GOP
+    (open-gop, I kadrai be IDR); siuntėjas pradeda vidury klipo (--start-s), todėl IDR niekada neateina. Dekodavimas pradedamas nuo
+    recovery point / I pjūvio: vaizdas atsiranda per ≤ 3 s, žurnale — įėjimo taškas ir išmestų paketų skaičius, A/V ≤ 1 kadras."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_no_idr_entry", "FAIL", why=why)]
+    res = []
+    for k, (name, clip) in enumerate((("intra_refresh", "intra_refresh_1080p25.ts"), ("open_gop", "open_gop_1080p25.ts"))):
+        tid, port = f"ingest_no_idr_entry[{name}]", BASE_PORT + 47 + k
+        if not (CLIPS / clip).exists():
+            res.append(F.result(tid, "FAIL", why=f"nėra {clip}"))
+            continue
+        # klipas 30 s, siunčiama nuo 2,3 s: ingest (T + 8 + 8 s) baigiasi anksčiau už siuntėją. Langas — nuo 8 s: intra atnaujinimo
+        # sraute vaizdas teisėtai atsiranda tik pasibaigus atnaujinimo ciklui (recovery_frame_cnt ≈ 2 s) po zondavimo ir latencijos
+        T = 10
+        si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"],
+                                      [lambda p=port, c=clip, t=tid: Sender.ts(out, f"{t}/snd", CLIPS / c, p, "--start-s", 2.3)], T, warm=8)
+        # intra atnaujinimas: per atnaujinimo ciklą po pirmo kadro dekoderis kelių kadrų dar neišveda (išmatuota: 2) — tai
+        # missing_frames ir griežtas exit 4; leidžiama ≤ 5 tokių, lango vaizdas — vis tiek ≥ 99,8 %
+        problems, a, r = base_checks(si, sv, ri, 40.0, T, want_rc=(0, 4) if name == "intra_refresh" else (0,))
+        fi = flow(si)
+        if fi.get("missing_frames", 0) > 5:
+            problems.append(f"missing_frames {fi.get('missing_frames')} > 5")
+        line = next((ln for ln in err.splitlines() if "įėjimo taško" in ln), "")
+        if not line or "NĖRA" in line:
+            problems.append(f"įėjimo taškas: {line.strip()[:160]!r}")
+        res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | {line.strip()[:200]} | " + summary_line(si, sv, a, r)))
+    return res
 
 
 def ingest_reconnect_reprobe(out):
@@ -1130,3 +1159,4 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_live_stats_fallback": ingest_live_stats_fallback, "ingest_hls_by_content": ingest_hls_by_content}
 TESTS["ingest_drift_default"] = ingest_drift_default
 TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe
+TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
