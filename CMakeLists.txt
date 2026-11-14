@@ -99,6 +99,7 @@ if(MXLV_BUILD_MEDIA)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil)
   include(${CMAKE_SOURCE_DIR}/cmake/media.cmake)       # mxlv_media biblioteka + jos testai
+  include(${CMAKE_SOURCE_DIR}/cmake/ingest.cmake)      # ingest: demux, dekoderiai, libswresample (P3)
   option(MXLV_BUILD_FUNC "vramflow-func vykdomasis" OFF)
   if(MXLV_BUILD_FUNC)
     include(${CMAKE_SOURCE_DIR}/cmake/func.cmake)       # vramflow-func vykdomasis

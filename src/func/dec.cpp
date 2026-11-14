@@ -34,6 +34,7 @@ extern "C" {
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "func/stats_lines.hpp"
+#include "ingest/av_input.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
 #include "media/media_ref.hpp"
@@ -42,11 +43,7 @@ extern "C" {
 namespace mxlv::func {
 namespace {
 
-std::string averr(int e) {
-    char b[AV_ERROR_MAX_STRING_SIZE]{};
-    av_strerror(e, b, sizeof b);
-    return b;
-}
+using ingest::averr;
 
 enum AVPixelFormat pick_cuda(AVCodecContext*, const enum AVPixelFormat* f) {
     for (; *f != AV_PIX_FMT_NONE; ++f)
@@ -78,23 +75,7 @@ struct DecStream {
     std::atomic<bool> playing{false};  // tick'as pradėjo atkurti šį srautą (iki tol perpildymas — paleidimo pliūpsnis)
 };
 
-// libavformat pertraukimas (B3): kiekviename laukime (atidarymas, zondavimas, av_read_frame) — stop (sustabdymas, iškart) ir
-// tyla: paskutinis paketas senesnis nei silence_ns (tik gavus bent vieną paketą sesijoje). 1 — nutraukti (AVERROR_EXIT).
-struct Interrupt {
-    const std::atomic<bool>* stop = nullptr;
-    std::uint64_t last_pkt = 0;  // TAI; 0 — sesijoje dar nė vieno paketo
-    std::uint64_t silence_ns = 0;
-    bool silent = false;
-};
-int interrupt_cb(void* p) {
-    auto* x = static_cast<Interrupt*>(p);
-    if (x->stop->load(std::memory_order_relaxed)) return 1;
-    if (x->last_pkt != 0 && x->silence_ns != 0 && now_tai() - x->last_pkt > x->silence_ns) {
-        x->silent = true;
-        return 1;
-    }
-    return 0;
-}
+// libavformat pertraukimas ir sesijų ciklas (B3) — bendri su ingest (ingest/av_input.hpp).
 
 // Viena įėjimo sesija: atidarymas → dekodavimas, kol įėjimas tylus / baigėsi / klaida arba stop. why — kodėl baigėsi;
 // true — nepataisoma klaida (netikėtas kadro formatas, nėra dekoderio): jungtis iš naujo beprasmiška.
@@ -102,7 +83,7 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
     const bool inter = o.fmt.raster.interlaced;
     const double fps = static_cast<double>(o.fmt.frame_rate.num) / static_cast<double>(o.fmt.frame_rate.den);
     bool fatal = false;
-    Interrupt intr;
+    ingest::Interrupt intr;
     intr.stop = &stop;
     intr.silence_ns = std::uint64_t{o.input_silence_ms} * 1'000'000;
     AVFormatContext* ic = avformat_alloc_context();
@@ -113,8 +94,7 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
     // be UDP `timeout`: tylą ir sustabdymą sprendžia pertraukimo kabliukas (anksčiau timeout=20 s — darbininkas baigdavosi
     // visam laikui, o sustabdymas laukdavo iki 20 s)
     std::snprintf(url, sizeof url, "udp://127.0.0.1:%d?fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608", o.port_base + s.idx);
-    ic->interrupt_callback.callback = interrupt_cb;
-    ic->interrupt_callback.opaque = &intr;
+    ingest::attach_interrupt(ic, &intr);
     // Trumpas zondavimas: numatytasis probesize 5 MB prie 8,5 Mbit/s = ~4,7 s, o sukaupti paketai po to
     // dekoduojami pliūpsniu. TS H.264 parametrai žinomi iš SPS per < 0,5 s.
     AVDictionary* io = nullptr;
@@ -159,7 +139,7 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
             why = intr.silent ? "įėjimas tylus > " + std::to_string(o.input_silence_ms) + " ms" : "read_frame: " + averr(e);
             break;
         }
-        intr.last_pkt = now_tai();
+        intr.packet();
         if (pkt->stream_index != vs) { av_packet_unref(pkt); continue; }
         ++s.pkts;
         if (pkt->flags & AV_PKT_FLAG_CORRUPT) ++s.pkts_corrupt;
@@ -231,27 +211,9 @@ out:
 // su atidėjimu 1, 2, 4 … ≤ 30 s (nutraukiamas stop per ≤ 20 ms); sesija, trukusi ≥ 60 s, atidėjimą grąžina į 1 s. Tuo metu
 // tick'as šiam flow'ui neturi kadrų (no_content) — vieneto būsena Unhealthy gyvoje statistikoje.
 void dec_worker(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic<bool>& stop) {
-    double backoff = 1;
-    while (!stop.load()) {
-        const std::uint64_t t0 = now_tai();
-        std::string why;
-        const bool fatal = dec_session(o, hw, s, stop, why);
-        if (stop.load()) break;
-        if (fatal) {
-            s.error = why;
-            log_line("dec", "srautas " + std::to_string(s.idx) + ": " + why + " — srautas sustabdytas");
-            break;
-        }
-        ++s.reconnects;
-        if (now_tai() - t0 >= 60'000'000'000ull) backoff = 1;
-        char b[64];
-        std::snprintf(b, sizeof b, "%.0f", backoff);
-        log_line("dec", "srautas " + std::to_string(s.idx) + ": " + why + " — jungiamasi iš naujo po " + b + " s (" +
-                            std::to_string(s.reconnects) + ")");
-        const std::uint64_t until = now_tai() + static_cast<std::uint64_t>(backoff * 1e9);
-        while (!stop.load() && now_tai() < until) std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        backoff = std::min(30.0, 2 * backoff);
-    }
+    ingest::reconnect_loop(
+        "srautas " + std::to_string(s.idx), stop, [&](std::string& why) { return dec_session(o, hw, s, stop, why); }, s.reconnects,
+        s.error, [](const std::string& t) { log_line("dec", t); });
 }
 
 }  // namespace
