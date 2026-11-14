@@ -37,10 +37,12 @@ audio_src() {  # $1 — trukmė, s
 make_clip() {
   local f="$1" fmt="$2" sec="$3"; shift 3
   [[ -f "$OUT/$f" && "${FORCE:-0}" != 1 ]] && { echo "yra $OUT/$f"; return; }
-  local w=1920 h=1080 fps=25 vflags=() xp="keyint=25:min-keyint=25:scenecut=0:open-gop=0:nal-hrd=cbr" fo=()
+  local w=1920 h=1080 fps=25 vflags=() xp="keyint=25:min-keyint=25:scenecut=0:open-gop=0:nal-hrd=cbr" fo=() vf=()
+  # interlaced: įėjimo kadrai pažymimi setfield — libx264 pic_struct (laukų tvarkos SEI) ima iš kadro TOP_FIELD_FIRST žymės;
+  # be jos rawvideo kadras laikomas BFF ir TFF turinys pažymimas bottom-top (išmatuota: be setfield pic_struct 3 → 4 nuo 16 kadro)
   case "$fmt" in
-    1080i50) vflags=(-flags +ildct+ilme); xp="tff=1:$xp"; fo=(-field_order tt) ;;
-    1080i50bff) vflags=(-flags +ildct+ilme); xp="bff=1:$xp"; fo=(-field_order bb); fmt=1080i50 ;;
+    1080i50) vflags=(-flags +ildct+ilme); xp="tff=1:$xp"; fo=(-field_order tt); vf=(-vf setfield=tff) ;;
+    1080i50bff) vflags=(-flags +ildct+ilme); xp="bff=1:$xp"; fo=(-field_order bb); vf=(-vf setfield=bff); fmt=1080i50 ;;
     1080p25) ;;
     720p50) w=1280; h=720; fps=50; xp="keyint=50:min-keyint=50:scenecut=0:open-gop=0:nal-hrd=cbr" ;;
     *) echo "nežinomas formatas $fmt" >&2; return 1 ;;
@@ -48,7 +50,7 @@ make_clip() {
   local frames=$((sec * fps))
   "$BIN" clip --format "$fmt" --frames "$frames" --first-field 1000 --complexity 2 | \
     "${FF[@]}" -f rawvideo -pix_fmt nv12 -s "${w}x${h}" -r "$fps" -i - -f lavfi -i "$(audio_src "$sec")" \
-      -map 0:v -map 1:a -c:v libx264 -preset veryfast "${vflags[@]}" -x264-params "$xp" \
+      -map 0:v -map 1:a "${vf[@]}" -c:v libx264 -preset veryfast "${vflags[@]}" -x264-params "$xp" \
       -b:v 8M -maxrate 8M -bufsize 8M -bf 2 "${fo[@]}" "$@" \
       -c:a aac -b:a 192k -shortest -f mpegts -muxrate 10000000 "$OUT/$f"
   echo "sukurta $OUT/$f"
@@ -70,7 +72,7 @@ if [[ ! -f "$OUT/audio_only.ts" || "${FORCE:-0}" == 1 ]]; then
   "${FF[@]}" -f lavfi -i "$(audio_src 60)" -c:a aac -b:a 192k -f mpegts "$OUT/audio_only.ts"
   echo "sukurta $OUT/audio_only.ts"
 fi
-if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx265; then
+if ffmpeg -hide_banner -encoders 2>/dev/null | grep libx265 > /dev/null; then  # be -q: grep perskaito viską (pipefail + SIGPIPE)
   if [[ ! -f "$OUT/hevc_1080p25.ts" || "${FORCE:-0}" == 1 ]]; then
     "$BIN" clip --format 1080p25 --frames 500 --first-field 1000 --complexity 2 | \
       "${FF[@]}" -f rawvideo -pix_fmt nv12 -s 1920x1080 -r 25 -i - -f lavfi -i "$(audio_src 20)" -map 0:v -map 1:a \
