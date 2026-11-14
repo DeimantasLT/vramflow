@@ -16,7 +16,8 @@ namespace mxlv::engine {
 
 // --- MxlVideoInput --------------------------------------------------------------------------------------------------
 bool MxlVideoInput::attach_poll(std::uint64_t now_tai) {
-    return slot_.poll(inst_, now_tai) == runtime::InputSlot::State::Attached;
+    // Tick'o kelyje — tik asinchroniškai (item 0 a): reader'is ir cuda-linear atvaizdavimas ruošiami pagalbinėje gijoje
+    return slot_.poll_async(inst_, now_tai) == runtime::InputSlot::State::Attached;
 }
 
 bool MxlVideoInput::mismatch(std::string& why) const {

@@ -26,14 +26,21 @@ fstart_longpath — domeno kelias > 48 simbolių su cuda-linear (reader'io `payl
 fstart_logo_restart — pats logo (rašanti funkcija viduryje grandinės) nužudomas kill -9 ir paleidžiamas vėl: startuoja (savo
                   pasenusius išėjimus pašalina; be to cuda-linear restartas sukdavosi ant MXL_ERR_CONFLICT), išėjimas vėl
                   juda, o verify prie naujo flow prisijungia pats (reattached >= 1) ir neranda teisingumo klaidų.
+fstart_attach   — item 0 (a): logo --start immediate, gamintojas (gen) atsiranda vėlai ir 10 kartų nužudomas / paleidžiamas vėl:
+                  prisijungimas (reader'is + cuda-linear atvaizdavimas) ir atjungimas vyksta pagalbinėje gijoje, ne tick'e —
+                  0 praradimų, priskirtų prisijungimui (logo praradimo eilutės, kurių indekso laikas [prisijungimas − 0,5 s,
+                  + 2 s] ir ne gamintojo nužudymo akimirka ±0,5 s), reattached == 10.
+                  Variantai C, H, G (FSTART_ATTACH_VARIANTS).
 Variantai: FSTART_VARIANTS=C,G (numatyta).
 
 Šie testai tikrina elgseną iš išorės (procesai, exit kodai, summary skaitikliai `reattached`, `missing_fields`, `fields_ok`,
 `run_id`, stderr tekstas) — nepriklauso nuo to, kuris ciklas ją įgyvendina, ir turi likti žali po tick variklio suvienodinimo.
 """
+import datetime
 import json
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -347,7 +354,75 @@ def fstart_logo_restart(out):
     return res
 
 
-TESTS = {"fstart_order": fstart_order, "fstart_restart": fstart_restart, "fstart_wait": fstart_wait, "fstart_owner": fstart_owner,
+ATTACH_EV = re.compile(r"^\[vramflow (\S+)Z\] logo: (input_attached|input_reattached|input_detached) ")
+LOSS_LINE = re.compile(r"^\[logo\] praradimas: flow (\d+), indeksas (\d+) \((\w+)\)")
+
+
+def attach_losses(err, rate=50):
+    """logo stderr → praradimai, priskirti prisijungimui: indekso laikas [prisijungimas − 0,5 s, + 2 s] ir ne arčiau kaip 0,5 s
+    nuo atsijungimo (gamintojo nužudymo akimirkos praradimas — ne prisijungimo kaina). Grąžina (prisijungimo, kiti) sąrašus."""
+    att, det, losses = [], [], []
+    for line in err.splitlines():
+        m = ATTACH_EV.match(line)
+        if m:
+            t = datetime.datetime.fromisoformat(m.group(1)).replace(tzinfo=datetime.timezone.utc).timestamp() + 37
+            (det if m.group(2) == "input_detached" else att).append(t)
+            continue
+        m = LOSS_LINE.match(line)
+        if m:
+            losses.append((int(m.group(1)), int(m.group(2)), m.group(3)))
+    by_attach, other = [], []
+    for flow, idx, why in losses:
+        t = idx / rate
+        near_det = any(abs(t - d) <= 0.5 for d in det)
+        (by_attach if not near_det and any(a - 0.5 <= t <= a + 2.0 for a in att) else other).append((flow, idx, why))
+    return by_attach, other, len(att)
+
+
+def fstart_attach(out):
+    """Item 0 (a): vėlai atsirandantis / 10 kartų grįžtantis gamintojas — prisijungimas tick'ui nieko nekainuoja."""
+    res = []
+    N, PRE, UP, DOWN, RESTARTS = 2, 4, 3.0, 2.0, 10
+    want = [x for x in os.environ.get("FSTART_ATTACH_VARIANTS", "C,H,G").split(",") if x]
+    for tag in want:
+        impl, storage = VARIANTS[tag]
+        tid = f"fstart_attach[{tag}]"
+        sub = f"fstart-attach-{tag}"
+        d = F.fresh_domain(sub)
+        v = F.vcommon(impl, storage)
+        total = PRE + (RESTARTS + 1) * (UP + DOWN) + 3
+        lg = None
+        gens = []
+        rl = None
+        try:
+            lg = F.FProc(out, sub, "logo", d, "--flows", N, "--duration", int(total), "--warmup", 1, "--start", "immediate", *v)
+            time.sleep(PRE)
+            for k in range(RESTARTS + 1):
+                g = F.FProc(out, f"{sub}/g{k}", "gen", d, "--flows", N, "--duration", 60, *v)
+                gens.append(g)
+                time.sleep(UP)
+                if k < RESTARTS:
+                    g.kill9()
+                    time.sleep(DOWN)
+            rl = lg.wait(timeout=total + 60)
+        finally:
+            for pr in [lg, *gens]:
+                if pr is not None:
+                    pr.term()
+        sl = F.vsummary(lg, "logo")
+        fl = (sl or {}).get("flows") or []
+        by_attach, other, n_att = attach_losses(err_text(lg))
+        reatt = [f.get("reattached", 0) for f in fl]
+        okf = [f.get("fields_ok", 0) for f in fl]
+        ok = (rl in (0, 4) and len(fl) == N and not by_attach and n_att == N * (RESTARTS + 1) and all(r == RESTARTS for r in reatt)
+              and min(okf) >= 0.8 * (RESTARTS + 1) * UP * 50)
+        res.append(F.result(tid, "PASS" if ok else "FAIL",
+                            why=f"logo exit={rl} prisijungimų={n_att} praradimai dėl prijungimo={by_attach[:6]} (iš viso {len(by_attach)}) "
+                                f"kiti (gamintojo nužudymo akimirka)={len(other)} reattached={reatt} fields_ok={okf} "
+                                f"missing_fields={[f.get('missing_fields', 0) for f in fl]}", logo=sl))
+    return res
+
+TESTS = {"fstart_attach": fstart_attach, "fstart_order": fstart_order, "fstart_restart": fstart_restart, "fstart_wait": fstart_wait, "fstart_owner": fstart_owner,
          "fstart_domain": fstart_domain, "fstart_parallel": fstart_parallel, "fstart_longpath": fstart_longpath,
          "fstart_logo_restart": fstart_logo_restart}
 

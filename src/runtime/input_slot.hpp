@@ -19,11 +19,17 @@
 //
 // Formatas: expect != nullptr — laukiamas formatas (rastras ir grain'o ritmas); nullptr — pirmas prijungtas formatas tampa
 // laukiamu. Saugykla (cuda / host) visada užrakinama pagal pirmą prijungimą. Viena gija (tick gija) — be sinchronizacijos.
+//
+// Asinchroninis prisijungimas (item 0 a; poll_async): reader'io kūrimas ir cuda-linear payload'o atvaizdavimas trunka iki
+// ~18 ms — tick'e tai kainuodavo laukus. poll_async tą darbą (ir visas patikras) atiduoda slot'o pagalbinei gijai, o tick'as
+// tik perima paruoštą reader'į (perkėlimas, be sisteminių kvietimų) kitame poll_async. Nuo pirmo poll_async ir atjungto
+// reader'io atlaisvinimas vyksta toje pačioje gijoje. Sinchroninis poll (paleidimas, verify) nepakitęs.
 #include <mxl/flow.h>
 #include <mxl/mxl.h>
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -50,6 +56,11 @@ public:
     // Neblokuoja. Kai neprijungtas — bandymas prisijungti (ne dažniau kaip kas kRetryNs pagal now_tai_ns). Attached — tik
     // grąžina būseną (be sisteminių kvietimų).
     State poll(mxlInstance inst, std::uint64_t now_tai_ns);
+    // Kaip poll, bet niekada neblokuoja: bandymą (ne dažniau kaip kas kRetryNs) vykdo pagalbinė gija; jo rezultatas
+    // pritaikomas kitame poll_async. Kviečiančioje gijoje — tik mutex'as ir perkėlimas.
+    State poll_async(mxlInstance inst, std::uint64_t now_tai_ns);
+    // Pagalbinė gija sukuriama iš anksto (ne pirmame poll_async — gijos kūrimas ~0,1 ms; kviesti ne tick'e).
+    void prepare_async();
     // Kaip VideoIn::get; ne Attached → MXL_ERR_FLOW_NOT_FOUND. Gamintojas dingo → MXL_ERR_FLOW_INVALID ir būsena Detached.
     mxlStatus get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainInfo& info, const std::uint32_t*& ptr);
     std::uint64_t head();  // MXL_UNDEFINED_INDEX, jei neprijungtas / nežinomas
@@ -77,7 +88,14 @@ public:
     void release();
 
 private:
+    struct Attempt;  // vieno prisijungimo bandymo prašymas ir rezultatas (input_slot.cpp)
+    struct Helper;   // pagalbinė gija (poll_async)
     void detach();
+    Attempt request(mxlInstance inst, std::uint64_t now_tai_ns) const;
+    static void try_attach(Attempt& a);  // be slot'o būsenos — gali vykti pagalbinėje gijoje
+    State apply(Attempt& a);
+    void stop_helper();
+    std::shared_ptr<Helper> helper_;
     std::string id_;
     vramflow::VideoFormat want_{};
     bool have_want_ = false;

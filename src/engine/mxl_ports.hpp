@@ -28,7 +28,8 @@ namespace mxlv::engine {
 
 class MxlVideoInput final : public InputPort {
 public:
-    MxlVideoInput(runtime::InputSlot& slot, mxlInstance inst) : slot_(slot), inst_(inst) {}
+    // Slot'o pagalbinė gija (asinchroninis prisijungimas, item 0 a) sukuriama čia — ne tick'e.
+    MxlVideoInput(runtime::InputSlot& slot, mxlInstance inst) : slot_(slot), inst_(inst) { slot_.prepare_async(); }
 
     bool attach_poll(std::uint64_t now_tai) override;
     bool mismatch(std::string& why) const override;

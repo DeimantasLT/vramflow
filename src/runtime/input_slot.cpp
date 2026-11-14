@@ -5,8 +5,11 @@
 #include <mxl/time.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <thread>
+#include <utility>
 
 namespace mxlv::runtime {
 
@@ -19,6 +22,61 @@ bool flow_active(mxlInstance inst, const std::string& id) {
 
 std::string storage_name(bool cuda) { return cuda ? "cuda-linear" : "host"; }
 }  // namespace
+
+// Vienas prisijungimo bandymas: prašymas (slot'o būsenos nuotrauka) → rezultatas. try_attach neliečia slot'o, todėl gali
+// vykti pagalbinėje gijoje; rezultatą slot'ui pritaiko apply (kviečianti gija).
+struct InputSlot::Attempt {
+    enum class Kind { None, NotYet, Rejected, Ok };
+    // prašymas
+    mxlInstance inst = nullptr;
+    std::string id;
+    bool have_want = false, check_storage = false, want_cuda = false, ever = false, detached = false, waiting = false;
+    vramflow::VideoFormat want{};
+    std::uint64_t detach_head = 0, detach_tai = 0, waiting_head = 0, now = 0;
+    // rezultatas
+    Kind kind = Kind::None;
+    bool clear_reason = false, set_waiting_head = false;
+    std::string reason;  // Rejected: formato / saugyklos atmetimas; NotYet: reader'io klaida (laukimo eilutei) arba tuščia
+    func::VideoIn in;    // Ok
+};
+
+// --- Pagalbinė gija (poll_async) ------------------------------------------------------------------------------------
+struct InputSlot::Helper {
+    std::mutex m;
+    std::condition_variable cv;
+    bool pending = false, done = false, quit = false;
+    Attempt a;
+    std::vector<std::pair<mxlInstance, func::VideoIn>> release;  // atjungti reader'iai (atlaisvinami čia, ne tick'e)
+    std::thread th;
+
+    void run() {
+        std::unique_lock lk(m);
+        for (;;) {
+            cv.wait(lk, [&] { return quit || pending || !release.empty(); });
+            while (!release.empty()) {
+                auto r = std::move(release.back());
+                release.pop_back();
+                lk.unlock();
+                r.second.release(r.first);
+                lk.lock();
+            }
+            if (pending) {
+                Attempt x = std::move(a);
+                lk.unlock();
+                InputSlot::try_attach(x);
+                lk.lock();
+                a = std::move(x);
+                x.in.r = nullptr;
+                pending = false;
+                done = true;
+            }
+            if (quit && release.empty() && !pending) {
+                if (done && a.kind == Attempt::Kind::Ok && a.in.r) a.in.release(a.inst);  // paruoštas, bet neperimtas
+                return;
+            }
+        }
+    }
+};
 
 const char* state_name(InputSlot::State s) {
     switch (s) {
@@ -39,7 +97,9 @@ InputSlot::InputSlot(InputSlot&& o) noexcept { *this = std::move(o); }
 
 InputSlot& InputSlot::operator=(InputSlot&& o) noexcept {
     if (this == &o) return *this;
+    stop_helper();
     release();
+    helper_ = std::move(o.helper_);
     id_ = std::move(o.id_);
     want_ = o.want_;
     have_want_ = o.have_want_;
@@ -62,7 +122,10 @@ InputSlot& InputSlot::operator=(InputSlot&& o) noexcept {
     return *this;
 }
 
-InputSlot::~InputSlot() { release(); }
+InputSlot::~InputSlot() {
+    stop_helper();
+    release();
+}
 
 void InputSlot::release() {
     if (in_.r && inst_) in_.release(inst_);
@@ -74,74 +137,122 @@ void InputSlot::detach() {
     const std::uint64_t h = in_.r ? in_.head() : MXL_UNDEFINED_INDEX;
     detach_head_ = h == MXL_UNDEFINED_INDEX ? 0 : h;
     detach_tai_ = mxlGetTime();
-    release();
+    if (helper_ && in_.r && inst_) {  // poll_async režimas: reader'io (cuda-linear atvaizdavimo) atlaisvinimas — ne tick'e
+        {
+            std::lock_guard g(helper_->m);
+            helper_->release.emplace_back(inst_, std::move(in_));
+        }
+        in_.r = nullptr;
+        helper_->cv.notify_one();
+    } else {
+        release();
+    }
     early_since_ = 0;
     state_ = State::Detached;
     next_try_ = 0;  // kitas poll bando iškart (gamintojas gali jau būti grįžęs)
 }
 
-InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
-    if (state_ == State::Attached || state_ == State::Mismatch) return state_;
-    if (now_tai_ns < next_try_) return state_;
-    next_try_ = now_tai_ns + kRetryNs;
-    inst_ = inst;
+// Brangioji dalis: gyvumas, reader'is (cuda-linear — payload'o atvaizdavimas), formatas, head ir „rašomas“ sąlygos.
+void InputSlot::try_attach(Attempt& a) {
+    a.kind = Attempt::Kind::NotYet;
     // Tik gyvas writer'is: nužudyto gamintojo pasenęs flow (failai liko) neprijungiamas.
-    if (!flow_active(inst, id_)) {
-        reason_.clear();  // flow nėra (arba be writer'io) — ankstesnė atmetimo priežastis nebegalioja
-        return state_;
+    if (!flow_active(a.inst, a.id)) {
+        a.clear_reason = true;  // flow nėra (arba be writer'io) — ankstesnė atmetimo priežastis nebegalioja
+        return;
     }
     func::VideoIn fresh;
     std::string err;
     static const std::atomic<bool> no_stop{false};
-    if (!fresh.open(inst, id_, OpenPolicy{0, 0}, no_stop, err, static_cast<const vramflow::VideoFormat*>(nullptr))) {
-        fresh.release(inst);
-        reason_ = "flow " + id_ + " yra, bet reader'is neatsidaro: " + err;  // matoma laukimo eilutėje ir ribos klaidoje
-        return state_;
+    if (!fresh.open(a.inst, a.id, OpenPolicy{0, 0}, no_stop, err, static_cast<const vramflow::VideoFormat*>(nullptr))) {
+        fresh.release(a.inst);
+        a.reason = "flow " + a.id + " yra, bet reader'is neatsidaro: " + err;  // matoma laukimo eilutėje ir ribos klaidoje
+        return;
     }
     // Formatas / saugykla: expect (arba pirmas prijungtas formatas) ir pirmo prijungimo saugykla.
     std::string bad;
-    if (have_want_ && !(fresh.fmt.raster == want_.raster && vramflow::same_rate(fresh.fmt.grain_rate(), want_.grain_rate())))
-        bad = "flow " + id_ + ": formatas " + vramflow::format_name(fresh.fmt) + " != laukiamas " + vramflow::format_name(want_);
-    else if ((ever_ || lock_storage_) && fresh.cuda != want_cuda_)
-        bad = "flow " + id_ + ": saugykla " + storage_name(fresh.cuda) + " != " + (ever_ ? "buvusi " : "laukiama ") + storage_name(want_cuda_);
+    if (a.have_want && !(fresh.fmt.raster == a.want.raster && vramflow::same_rate(fresh.fmt.grain_rate(), a.want.grain_rate())))
+        bad = "flow " + a.id + ": formatas " + vramflow::format_name(fresh.fmt) + " != laukiamas " + vramflow::format_name(a.want);
+    else if (a.check_storage && fresh.cuda != a.want_cuda)
+        bad = "flow " + a.id + ": saugykla " + storage_name(fresh.cuda) + " != " + (a.ever ? "buvusi " : "laukiama ") +
+              storage_name(a.want_cuda);
     if (!bad.empty()) {
-        fresh.release(inst);
-        if (reason_ != bad) std::fprintf(stderr, "[vramflow] %s%s\n", bad.c_str(), on_change_ == FormatChange::Exit ? "" : " — laukiama");
-        reason_ = bad;
-        if (on_change_ == FormatChange::Exit) state_ = State::Mismatch;
-        return state_;
+        fresh.release(a.inst);
+        a.kind = Attempt::Kind::Rejected;
+        a.reason = bad;
+        return;
     }
     // Gamintojas jau gamina (head žinomas) — kitaip pirmi tick'ai būtų vėlyvi; bandoma vėl po kRetryNs.
     const std::uint64_t h = fresh.head();
     if (h == MXL_UNDEFINED_INDEX || h == 0) {
-        fresh.release(inst);
-        return state_;
+        fresh.release(a.inst);
+        return;
     }
     // Po atjungimo — tik jei flow'as nuo tada rašomas (head pajudėjo arba lastWriteTime šviežias): kitaip „gyvas“ buvo tik
     // kito skaitytojo flock (mxlIsFlowActive), o flow'as — pasenęs.
-    if (state_ == State::Detached) {
+    if (a.detached) {
         mxlFlowRuntimeInfo rt{};
         const bool info = mxlFlowReaderGetRuntimeInfo(fresh.r, &rt) == MXL_STATUS_OK;
-        if (!(h > detach_head_ || (info && rt.lastWriteTime > detach_tai_))) {
-            fresh.release(inst);
-            return state_;
+        if (!(h > a.detach_head || (info && rt.lastWriteTime > a.detach_tai))) {
+            fresh.release(a.inst);
+            return;
         }
     }
     // Pirmas prisijungimas (peržiūra D6): ta pati taisyklė — tik flow'as, kuris RAŠOMAS (lastWriteTime ne senesnis kaip
     // kStaleNs arba head pajudėjo nuo ankstesnio bandymo). Kitaip nužudyto gamintojo pasenęs flow + kito skaitytojo flock
     // („gyvas“ mxlIsFlowActive) būtų prijungtas ir pirmi tick'ai skaitytų seną ring'ą.
-    if (state_ == State::Waiting) {
+    if (a.waiting) {
         mxlFlowRuntimeInfo rt{};
         const bool info = mxlFlowReaderGetRuntimeInfo(fresh.r, &rt) == MXL_STATUS_OK;
-        const bool recent = info && rt.lastWriteTime + kStaleNs >= now_tai_ns;
-        const bool moved = waiting_head_ != 0 && h > waiting_head_;
-        waiting_head_ = h;
+        const bool recent = info && rt.lastWriteTime + kStaleNs >= a.now;
+        const bool moved = a.waiting_head != 0 && h > a.waiting_head;
+        a.set_waiting_head = true;
+        a.waiting_head = h;
         if (!(recent || moved)) {
-            fresh.release(inst);
-            return state_;
+            fresh.release(a.inst);
+            return;
         }
     }
-    in_ = std::move(fresh);
+    a.in = std::move(fresh);
+    fresh.r = nullptr;
+    a.kind = Attempt::Kind::Ok;
+}
+
+InputSlot::Attempt InputSlot::request(mxlInstance inst, std::uint64_t now_tai_ns) const {
+    Attempt a;
+    a.inst = inst;
+    a.id = id_;
+    a.have_want = have_want_;
+    a.want = want_;
+    a.check_storage = ever_ || lock_storage_;
+    a.want_cuda = want_cuda_;
+    a.ever = ever_;
+    a.detached = state_ == State::Detached;
+    a.waiting = state_ == State::Waiting;
+    a.detach_head = detach_head_;
+    a.detach_tai = detach_tai_;
+    a.waiting_head = waiting_head_;
+    a.now = now_tai_ns;
+    return a;
+}
+
+InputSlot::State InputSlot::apply(Attempt& a) {
+    if (a.set_waiting_head) waiting_head_ = a.waiting_head;
+    if (a.clear_reason) reason_.clear();
+    switch (a.kind) {
+        case Attempt::Kind::None: return state_;
+        case Attempt::Kind::NotYet:
+            if (!a.reason.empty()) reason_ = a.reason;
+            return state_;
+        case Attempt::Kind::Rejected:
+            if (reason_ != a.reason)
+                std::fprintf(stderr, "[vramflow] %s%s\n", a.reason.c_str(), on_change_ == FormatChange::Exit ? "" : " — laukiama");
+            reason_ = a.reason;
+            if (on_change_ == FormatChange::Exit) state_ = State::Mismatch;
+            return state_;
+        case Attempt::Kind::Ok: break;
+    }
+    in_ = std::move(a.in);
+    a.in.r = nullptr;
     if (!have_want_) {
         want_ = in_.fmt;
         have_want_ = true;
@@ -154,6 +265,55 @@ InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
     early_since_ = 0;
     state_ = State::Attached;
     return state_;
+}
+
+InputSlot::State InputSlot::poll(mxlInstance inst, std::uint64_t now_tai_ns) {
+    if (state_ == State::Attached || state_ == State::Mismatch) return state_;
+    if (now_tai_ns < next_try_) return state_;
+    next_try_ = now_tai_ns + kRetryNs;
+    inst_ = inst;
+    Attempt a = request(inst, now_tai_ns);
+    try_attach(a);
+    return apply(a);
+}
+
+InputSlot::State InputSlot::poll_async(mxlInstance inst, std::uint64_t now_tai_ns) {
+    if (state_ == State::Attached || state_ == State::Mismatch) return state_;
+    inst_ = inst;
+    prepare_async();
+    Helper& h = *helper_;
+    std::unique_lock lk(h.m);
+    if (h.done) {  // ankstesnio bandymo rezultatas — pritaikomas čia (perkėlimas, be sisteminių kvietimų)
+        h.done = false;
+        Attempt a = std::move(h.a);
+        h.a.in.r = nullptr;
+        lk.unlock();
+        return apply(a);
+    }
+    if (h.pending || now_tai_ns < next_try_) return state_;
+    next_try_ = now_tai_ns + kRetryNs;
+    h.a = request(inst, now_tai_ns);
+    h.pending = true;
+    lk.unlock();
+    h.cv.notify_one();
+    return state_;
+}
+
+void InputSlot::prepare_async() {
+    if (helper_) return;
+    helper_ = std::make_shared<Helper>();
+    helper_->th = std::thread([h = helper_.get()] { h->run(); });
+}
+
+void InputSlot::stop_helper() {
+    if (!helper_) return;
+    {
+        std::lock_guard g(helper_->m);
+        helper_->quit = true;
+    }
+    helper_->cv.notify_one();
+    if (helper_->th.joinable()) helper_->th.join();
+    helper_.reset();
 }
 
 mxlStatus InputSlot::get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainInfo& info, const std::uint32_t*& ptr) {

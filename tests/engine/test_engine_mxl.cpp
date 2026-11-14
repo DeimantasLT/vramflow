@@ -471,3 +471,48 @@ TEST_CASE("engine_mxl: open INVALID_ARG — AlreadyCommitted tik jau įrašytam 
     CHECK(released);
     o.release(d.inst);
 }
+
+// Item 0 (a): vėlai atsirandantis ir 10 kartų grįžtantis gamintojas. Tick'o kelyje (MxlVideoInput::attach_poll, detach)
+// prisijungimas niekada neblokuoja: reader'io kūrimas (cuda-linear — ir payload'o atvaizdavimas, iki ~18 ms) ir atlaisvinimas
+// vyksta slot'o pagalbinėje gijoje. Kiekvienas kvietimas < 0,2 ms (anksčiau — visas mxlCreateFlowReader tick'e).
+TEST_CASE("engine_mxl: prisijungimas ir atjungimas tick'o kelyje neblokuoja (item 0 a)", "[engine_mxl][realtime]") {
+    Domain d(11);
+    const vramflow::VideoFormat f = k1080i;
+    InputSlot slot(func::flow_id(func::kRoleGen, 3), &f, FormatChange::Exit);
+    MxlVideoInput in(slot, d.inst);
+    const mxlRational r{50, 1};
+    double worst_attach_ms = 0, worst_detach_ms = 0;
+    int attaches = 0;
+    for (int k = 0; k < 11; ++k) {
+        VideoOut src;
+        std::string err;
+        mxlGarbageCollectFlows(d.inst);
+        REQUIRE(src.create(d.inst, func::video_def(func::kRoleGen, 3, 1, f), "", err, f));
+        std::atomic<bool> stop_prod{false};
+        std::thread prod(produce, std::vector<VideoOut*>{&src}, std::cref(stop_prod));
+        const auto t0 = std::chrono::steady_clock::now();
+        bool att = false;
+        while (!att && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(3)) {
+            const auto a = std::chrono::steady_clock::now();
+            att = in.attach_poll(mxlGetTime());
+            worst_attach_ms = std::max(worst_attach_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        REQUIRE(att);
+        ++attaches;
+        GrainRef g;
+        const Index j = mxlGetCurrentIndex(&r) - 1;
+        CHECK(in.probe(j, g) == Probe::Ready);
+        stop_prod = true;
+        prod.join();
+        src.release(d.inst);
+        const auto a = std::chrono::steady_clock::now();
+        in.detach();  // variklis: gamintojas dingo (Gone / negyvas) → atjungti
+        worst_detach_ms = std::max(worst_detach_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count());
+    }
+    std::printf("[measure] attach_poll blogiausias %.3f ms, detach %.3f ms (%d prisijungimų)\n", worst_attach_ms, worst_detach_ms, attaches);
+    CHECK(attaches == 11);
+    CHECK(slot.reattached() == 10);
+    CHECK(worst_attach_ms < 0.2);
+    CHECK(worst_detach_ms < 0.2);
+}
