@@ -99,7 +99,11 @@ void SourceClock::reset_drift() {
     have_last_media_ = false;
     ramp_acc_ = 0;
     ppm_ = 0;
+    slope_ppm_ = 0;
+    margin_err_ns_ = 0;
     drift_ppm_.store(0.0, std::memory_order_relaxed);
+    comp_ppm_.store(0.0, std::memory_order_relaxed);
+    margin_err_pub_.store(0, std::memory_order_relaxed);
 }
 
 void SourceClock::publish() {
@@ -135,19 +139,33 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
                 rss += (y - a0 - b * x) * (y - a0 - b * x);
             }
             const double se = n > 2 ? std::sqrt(rss / (n - 2) / (sxx - sx * sx / n)) : 0;
-            ppm_ = cfg_.track_drift && std::fabs(b) > 3 * se ? std::clamp(b * 1e6, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
-            drift_ppm_.store(ppm_, std::memory_order_relaxed);
+            slope_ppm_ = std::fabs(b) > 3 * se ? b * 1e6 : 0.0;
         }
     }
     // Apsauga: garso atsarga (su off_a) drift_windows langų iš eilės už atskaitos ± drift_limit — latencija pasikeitė
     // daugiau, nei sugeria rampa → naujas fiksavimas. Atskaita — pirmo lango po (per)fiksavimo m_min (≈ L tolygiam šaltiniui;
     // pliūpsnių šaltiniui — L minus fiksavimo paketo fazė pliūpsnyje).
     const std::int64_t m_min = win_min_ + cur_.off_a;
-    if (!have_base_) {
+    const bool first = !have_base_;
+    if (first) {
         have_base_ = true;
         base_ = m_min;
-        return false;
     }
+    // B3: grįžtamasis ryšys pagal atsargos paklaidą e = m_min − atskaita. Nuolydžio vartai (|b| > 3·se) triukšmingoje linijoje
+    // nuolydį dažnai nunulina, ir nesekama dreifo dalis kaupdavosi į atsargą be ribos (20 ppm — 200 ms per ~2,8 val. → perfiksavimas).
+    // Už neutralios zonos (numatyta drift_limit / 4) pridedama (|e| − zona) / τ: pirmos eilės kilpa, nusistovėjusi paklaida ≤ zona +
+    // τ · nesekamas dreifas (600 s · 20 ppm = 12 ms), be svyravimų. Viduje zonos — 0 (drebėjimas nevirsta rampa).
+    margin_err_ns_ = m_min - base_;
+    const std::int64_t db = cfg_.margin_deadband_ns >= 0 ? cfg_.margin_deadband_ns : cfg_.drift_limit_ns / 4;
+    double fb = 0;
+    if (margin_err_ns_ > db) fb = static_cast<double>(margin_err_ns_ - db) / (cfg_.margin_tau_s * 1e9) * 1e6;
+    else if (margin_err_ns_ < -db) fb = static_cast<double>(margin_err_ns_ + db) / (cfg_.margin_tau_s * 1e9) * 1e6;
+    // drift_ppm — šaltinio laikrodžio nuokrypio įvertis (nuolydis); comp_ppm — taikoma rampa (nuolydis + grįžtamasis ryšys)
+    ppm_ = cfg_.track_drift ? std::clamp(slope_ppm_ + fb, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
+    drift_ppm_.store(cfg_.track_drift ? std::clamp(slope_ppm_, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0, std::memory_order_relaxed);
+    comp_ppm_.store(ppm_, std::memory_order_relaxed);
+    margin_err_pub_.store(margin_err_ns_, std::memory_order_relaxed);
+    if (first) return false;  // pirmas langas — tik atskaita
     if (m_min < base_ - cfg_.drift_limit_ns) {
         ++low_;
         high_ = 0;
@@ -345,7 +363,7 @@ std::int64_t SourceClock::audio_offset_ns() const { return off_a_pub_.load(std::
 ClockStats SourceClock::stats() const {
     constexpr auto r = std::memory_order_relaxed;
     return {wraps_.load(r),       discontinuities_.load(r), relock_cont_.load(r),     relock_fresh_.load(r),
-            drift_slips_.load(r), clock_steps_.load(r),     prelock_dropped_.load(r), drift_ppm_.load(r)};
+            drift_slips_.load(r), clock_steps_.load(r),     prelock_dropped_.load(r), drift_ppm_.load(r), margin_err_pub_.load(r), comp_ppm_.load(r)};
 }
 
 std::uint64_t AudioCursor::place(std::int64_t pts_tai_ns, std::uint32_t n, std::uint32_t sample_rate, std::uint32_t tol, std::int64_t& gap) {

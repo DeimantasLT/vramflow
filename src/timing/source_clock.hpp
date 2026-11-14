@@ -51,6 +51,9 @@ struct SourceClockConfig {
     // Dreifo sekimas (garso rampa ir video slydimas pagal įvertį). false — poslinkiai pastovūs (HLS: segmentų atvykimo fazė lėtai
     // slenka dėl grojaraščio perskaitymo ritmo — tai ne laikrodis); latencijos pokyčio apsauga lieka.
     bool track_drift = true;
+    // B3: atsargos grįžtamasis ryšys — neutrali zona (< 0 — drift_limit_ns / 4) ir laiko konstanta τ.
+    std::int64_t margin_deadband_ns = -1;
+    double margin_tau_s = 600;
 };
 
 // Locked — pirmas fiksavimas. Relocked — naujos epochos poslinkis nustatytas (nutrūkimas arba latencijos pokytis);
@@ -66,6 +69,8 @@ struct Stamp {
 struct ClockStats {
     std::uint64_t wraps, discontinuities, relock_cont, relock_fresh, drift_slips, clock_steps, prelock_dropped;
     double drift_ppm;  // (šaltinio laikas / atvykimo laikas − 1) · 10⁶; + šaltinis greitesnis. 0 — dar nežinoma
+    std::int64_t margin_err_ns;  // B3: garso atsargos paklaida nuo atskaitos (paskutinis langas), ns
+    double comp_ppm;             // B3: taikoma garso rampa = drift_ppm + atsargos grįžtamasis ryšys (apkarpyta ±max_comp_ppm)
 };
 
 class SourceClock {
@@ -141,12 +146,15 @@ private:
     std::array<DriftPoint, kDriftPoints> pts_{};
     std::size_t pts_n_ = 0, pts_head_ = 0;
     double ppm_ = 0;
+    double slope_ppm_ = 0;          // reikšmingas nuolydis (be grįžtamojo ryšio)
+    std::int64_t margin_err_ns_ = 0;
 
     std::atomic<bool> locked_pub_{false};
+    std::atomic<std::int64_t> margin_err_pub_{0};
     std::atomic<std::int64_t> off_v_pub_{0}, off_a_pub_{0};
     std::atomic<std::uint64_t> wraps_{0}, discontinuities_{0}, relock_cont_{0}, relock_fresh_{0}, drift_slips_{0},
         clock_steps_{0}, prelock_dropped_{0};
-    std::atomic<double> drift_ppm_{0.0};
+    std::atomic<double> drift_ppm_{0.0}, comp_ppm_{0.0};
 };
 
 // Garso rašymo žymeklis (žingsnis 8): sulygina paketus į ištisinę mėginių seką, kai apvalinimo paklaida ≤ tol.

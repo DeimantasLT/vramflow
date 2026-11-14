@@ -528,6 +528,82 @@ TEST_CASE("source_clock: HLS segmentų drebėjimas be dreifo — nei rampos, nei
     CHECK(worst <= 1'000'000);  // A/V (poslinkių skirtumas) ≤ 1 ms
 }
 
+namespace {
+// B3 (round 9): ilgas dreifo bandymas su „drebančia“ linija. Atvykimo vėlinimas = lango (10 s) bazė U[0, jit_ns] + paketo
+// U[0, 2 ms] — langų minimumai triukšmingi (σ ≈ jit / √12), todėl nuolydžio reikšmingumo vartai (|b| > 3·se) dažnai duoda 0.
+// drift_ppm(t) — šaltinio dreifas laiko momentu t (s). Grąžina garso atsargos paklaidą (stamp − nominalus atvykimas − L)
+// min / max po pirmų 120 s ir galutinę būseną.
+struct LongRun {
+    std::int64_t e_min = INT64_MAX, e_max = INT64_MIN;
+    ClockStats cs{};
+    double ppm_abs_max_after = 0;  // |drift_ppm| maks. po pirmų 600 s
+};
+template <class PpmAt>
+LongRun long_run(double hours, std::int64_t jit_ns, PpmAt ppm_at, unsigned seed = 7) {
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::mt19937_64 rng(seed);
+    std::uniform_int_distribution<std::int64_t> win(0, jit_ns), pkt(0, 2'000'000);
+    LongRun r;
+    std::int64_t base_delay = win(rng);
+    double nominal = 0;  // nominalus atvykimas (be vėlinimo), ns nuo kA0
+    const auto frames = static_cast<std::int64_t>(hours * 3600 * 25);
+    for (std::int64_t k = 0; k < frames; ++k) {
+        const double t_s = static_cast<double>(k) * 0.04;
+        if (k > 0 && k % 250 == 0) base_delay = win(rng);
+        const std::int64_t a_nom = kA0 + static_cast<std::int64_t>(nominal);
+        const std::int64_t a = a_nom + base_delay + pkt(rng);
+        nominal += static_cast<double>(kTf) * (1.0 - ppm_at(t_s) * 1e-6);
+        const Stamp v = video(sc, k * kFrame, a);
+        REQUIRE(v.ev != Event::Dropped);
+        const Stamp au = sc.observe(1, k * kFrame, k * kFrame, kFrame, a + 1000);
+        if (t_s >= 120) {
+            const std::int64_t e = au.pts_tai_ns - a_nom - kL;
+            r.e_min = std::min(r.e_min, e);
+            r.e_max = std::max(r.e_max, e);
+        }
+        if (t_s >= 600) r.ppm_abs_max_after = std::max(r.ppm_abs_max_after, std::abs(sc.stats().drift_ppm));
+    }
+    r.cs = sc.stats();
+    return r;
+}
+}  // namespace
+
+TEST_CASE("source_clock: B3 — 20 ppm drebančioje linijoje 6 val. — atsarga ribota, be perfiksavimo", "[timing][source_clock][drift]") {
+    const double sign = GENERATE(+1.0, -1.0);
+    INFO("dreifas " << sign * 20 << " ppm");
+    const LongRun r = long_run(6.0, 20'000'000, [&](double) { return sign * 20.0; });
+    INFO("atsargos paklaida [" << r.e_min / 1e6 << ", " << r.e_max / 1e6 << "] ms, drift_ppm " << r.cs.drift_ppm << ", relock " << r.cs.relock_fresh);
+    // be grįžtamojo ryšio 20 ppm · 6 val. = 432 ms — guard'as (200 ms) suvalgomas per ~2,8 val. ir perfiksuojama
+    CHECK(r.cs.relock_fresh == 0);
+    CHECK(r.e_max - r.e_min <= 120'000'000);  // atsarga lieka ribose: neutrali zona (50 ms) + τ·likutis + drebėjimas
+    CHECK(std::max(std::abs(r.e_min), std::abs(r.e_max)) <= 100'000'000);
+}
+
+TEST_CASE("source_clock: B3 — dreifo šuolis 0 → 50 ppm — konverguoja be svyravimų", "[timing][source_clock][drift]") {
+    const LongRun r = long_run(4.0, 20'000'000, [](double t) { return t < 3600 ? 0.0 : 50.0; });
+    INFO("atsargos paklaida [" << r.e_min / 1e6 << ", " << r.e_max / 1e6 << "] ms, drift_ppm " << r.cs.drift_ppm);
+    CHECK(r.cs.relock_fresh == 0);
+    CHECK(std::max(std::abs(r.e_min), std::abs(r.e_max)) <= 100'000'000);
+    CHECK(r.cs.drift_ppm > 30.0);  // galutinis įvertis — prie 50 ppm (be persišokimo į priešingą pusę)
+    CHECK(r.cs.drift_ppm < 70.0);
+}
+
+TEST_CASE("source_clock: B3 — be dreifo, drebėjimas — kompensacija lieka prie 0", "[timing][source_clock][drift]") {
+    const LongRun r = long_run(3.0, 20'000'000, [](double) { return 0.0; });
+    INFO("atsargos paklaida [" << r.e_min / 1e6 << ", " << r.e_max / 1e6 << "] ms, |drift_ppm| maks. " << r.ppm_abs_max_after);
+    CHECK(r.cs.relock_fresh == 0);
+    CHECK(r.cs.drift_slips == 0);
+    // įvertis triukšmingas (nuolydžio vartai kartais praleidžia ~3·se ≈ 30 ppm), bet atsarga beveik nejuda
+    CHECK(r.ppm_abs_max_after <= 50.0);
+    CHECK(r.cs.comp_ppm == r.cs.drift_ppm);  // atsarga neutralioje zonoje — grįžtamojo ryšio nėra
+    CHECK(r.e_max - r.e_min <= 10'000'000);
+    CHECK(std::max(std::abs(r.e_min), std::abs(r.e_max)) <= 60'000'000);
+}
+
+
+
 // P3 (ingest_hls, išmatuota): HLS demuxeris grojaraštį perskaito kas segmento trukmę + apdorojimo laiką, todėl segmento
 // atvykimo fazė lėtai ir tiesiškai slenka (pjūklas su ~minučių periodu) — statistiškai „reikšmingas“ nuolydis, nors laikrodžio
 // dreifo nėra. HLS šaltiniui dreifas nesekamas (track_drift = false): poslinkiai pastovūs, A/V lygiai 0, slydimų nėra; apsauga
