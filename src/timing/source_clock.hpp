@@ -37,11 +37,17 @@ struct SourceClockConfig {
     std::int64_t disc_fwd_ns = 1'000'000'000;     // DTS šuolis pirmyn > šio — nutrūkimas
     std::int64_t disc_back_ns = 0;                // DTS šuolis atgal > šio — nutrūkimas
     std::int64_t relock_slack_ns = 500'000'000;   // |tęsinys − naujas| ≤ šio → tęsiama be šuolio
-    std::int64_t drift_limit_ns = 200'000'000;    // atsarga m_min už L ± šio drift_windows langų → naujas fiksavimas
+    // Atsarga m_min už atskaitos ± šio drift_windows langų iš eilės → naujas fiksavimas. Atskaita — pirmo lango po fiksavimo
+    // m_min (ne L): pliūpsnių / periodinių sulaikymų šaltinio atsarga nuo pat pradžios pastoviai mažesnė už L (fiksavimo paketas
+    // pasitaikė pliūpsnio viduryje), ir tai ne latencijos pokytis.
+    std::int64_t drift_limit_ns = 200'000'000;
     Rational align_rate{0, 1};                    // video kadrų dažnis; {0,1} — nekvantuoti, neslysti
     std::int64_t drift_window_ns = 10'000'000'000;  // m_min lango ilgis (atvykimo laiku)
     int drift_windows = 3;                        // langų iš eilės už ribos iki naujo fiksavimo
     std::int64_t epoch_grace_ns = 2'000'000'000;  // kiek ilgiausiai po nutrūkimo priimami senos epochos paketai
+    // Garso rampos (ir swr kompensacijos) biudžetas, ppm: dreifo įvertis apkarpomas iki ±max_comp_ppm (K6: 1000 = ±0,1 %).
+    // Didesnis — tik pagreitintiems dreifo testams (ingest --max-comp-ppm).
+    double max_comp_ppm = 1000.0;
 };
 
 // Locked — pirmas fiksavimas. Relocked — naujos epochos poslinkis nustatytas (nutrūkimas arba latencijos pokytis);
@@ -72,7 +78,7 @@ public:
     std::int64_t audio_offset_ns() const;  // tolydus garso poslinkis
     ClockStats stats() const;
 
-    static constexpr double kMaxCompPpm = 1000.0;  // rampa ribojama swr kompensacijos biudžetu (±0,1 %, K6)
+    static constexpr double kMaxCompPpm = 1000.0;  // numatytasis biudžetas (±0,1 %, K6); veikia SourceClockConfig::max_comp_ppm
 
 private:
     struct Stream {
@@ -127,6 +133,8 @@ private:
     bool win_open_ = false;
     std::int64_t win_start_ = 0, win_min_ = 0;  // win_min_ — žalia atsarga ns(dts) − a (be poslinkio)
     int low_ = 0, high_ = 0;
+    bool have_base_ = false;  // pirmo lango po (per)fiksavimo m_min — apsaugos atskaita
+    std::int64_t base_ = 0;
     std::array<DriftPoint, kDriftPoints> pts_{};
     std::size_t pts_n_ = 0, pts_head_ = 0;
     double ppm_ = 0;

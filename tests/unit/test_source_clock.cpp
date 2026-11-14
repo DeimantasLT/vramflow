@@ -368,3 +368,162 @@ TEST_CASE("source_clock: tik garso šaltinis", "[timing][source_clock]") {
     CHECK(s2.ev == Event::None);
     CHECK(s2.pts_tai_ns == kA0 + kL + 21'333'333);
 }
+
+// P3 (ingest): kompensacijos biudžetas konfigūruojamas (SourceClockConfig::max_comp_ppm, numatyta 1000 = ±0,1 %, K6).
+// 0,5 % greitesnis šaltinis (pagreitintas dreifo testas): su 6000 ppm biudžetu garso rampa seka be perfiksavimo, video slysta
+// sveikais kadrais, |off_v − off_a| ≤ Tf/2 visada; su numatytuoju 1000 ppm — rampa nepasiveja, atsarga nuslenka už drift_limit
+// ir perfiksuojama (dokumentuota: realūs laikrodžiai ≤ 100 ppm).
+TEST_CASE("source_clock: max_comp_ppm — 0,5 % greitesnis šaltinis", "[timing][source_clock]") {
+    const double budget = GENERATE(6000.0, 1000.0);
+    INFO("biudžetas " << budget << " ppm");
+    SourceClockConfig c = cfg25();
+    c.max_comp_ppm = budget;
+    SourceClock sc(c);
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    const double rate = 1.0 / 1.005;  // šaltinis 0,5 % greitesnis: medijos sekundė atvyksta per 0,995 s
+    std::uint64_t relocked = 0, av_far = 0;
+    for (int k = 0; k < 3000; ++k) {  // 120 s medijos
+        const std::int64_t a = kA0 + static_cast<std::int64_t>(static_cast<double>(k) * kTf * rate);
+        const Stamp v = video(sc, k * kFrame, a);
+        if (v.ev == Event::Relocked) ++relocked;
+        if (std::abs(sc.offset_ns() - sc.audio_offset_ns()) > kTf / 2) ++av_far;
+        REQUIRE(sc.observe(1, k * kFrame, k * kFrame, kFrame, a + 1000).ev != Event::Dropped);
+    }
+    const ClockStats cs = sc.stats();
+    CHECK(av_far == 0);
+    if (budget > 5000) {
+        CHECK(relocked == 0);
+        CHECK(cs.relock_fresh == 0);
+        CHECK(cs.drift_slips >= 1);
+        CHECK(std::abs(cs.drift_ppm - 5000.0) <= 50.0);
+    } else {
+        CHECK(cs.drift_ppm <= 1000.0);
+        CHECK(cs.relock_fresh >= 1);
+    }
+}
+
+// P3 (ingest): įėjimo sesija baigėsi ir po pertraukos prasidėjo nauja (reconnect) — tas pats SourceClock, srautai neregistruojami
+// iš naujo. Po 30 s pertraukos — naujas fiksavimas (relock_fresh); gyvo šaltinio PTS tęsiasi kartu su sienos laiku — TAS PATS
+// PTS → TAI atvaizdis (indeksai nepasislenka); siuntėjas pradėjo iš naujo (PTS atgal) — kitas. Trumpa pertrauka (300 ms) su tęsiamu
+// PTS — ne nutrūkimas (atvaizdis nekinta, perfiksavimo nėra). Visais atvejais naujos sesijos garsas sulygiuotas su video (≤ Tf/2).
+TEST_CASE("source_clock: įėjimas prisijungė iš naujo (tas pats laikrodis)", "[timing][source_clock]") {
+    const int kase = GENERATE(0, 1, 2);  // 0 — gyvas, 30 s; 1 — siuntėjas iš naujo, 30 s; 2 — gyvas, 300 ms
+    INFO("atvejis " << kase);
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::int64_t last = 0;
+    for (int k = 0; k < 250; ++k) {
+        last = video(sc, 900'000 + k * kFrame, kA0 + k * kTf).dts_tai_ns;
+        sc.observe(1, 900'000 + k * kFrame, 900'000 + k * kFrame, kFrame, kA0 + k * kTf + 1000);
+    }
+    const std::int64_t off = sc.offset_ns();
+    const std::int64_t gap_ns = kase == 2 ? 300'000'000 : 30'000'000'000;
+    const std::int64_t a = kA0 + 250 * kTf + gap_ns;
+    const std::int64_t raw = kase == 1 ? 126'000 : 900'000 + 250 * kFrame + gap_ns / 1'000'000'000 * 90'000 + (gap_ns % 1'000'000'000) * 9 / 100'000;
+    const Stamp s = video(sc, raw, a);
+    const ClockStats cs = sc.stats();
+    CHECK(std::abs(s.dts_tai_ns - (a + kL)) <= kTf / 2);
+    if (kase == 2) {
+        CHECK(s.ev == Event::None);
+        CHECK(cs.discontinuities == 0);
+        CHECK(sc.offset_ns() == off);
+    } else {
+        CHECK(s.ev == Event::Relocked);
+        CHECK(cs.discontinuities == 1);
+        CHECK(cs.relock_fresh == 1);
+        CHECK(cs.relock_cont == 0);
+    }
+    if (kase == 0) {
+        CHECK(sc.offset_ns() == off);  // tas pats PTS → TAI atvaizdis
+        CHECK(s.dts_tai_ns - last == gap_ns + kTf);
+    }
+    const Stamp au = sc.observe(1, raw, raw, kFrame, a + 1000);
+    CHECK(au.ev != Event::Dropped);
+    CHECK(std::abs(au.pts_tai_ns - s.pts_tai_ns) <= kTf / 2);
+}
+
+// P3 (ingest_bursty_no_drift): pliūpsniai — kiekvieno 2 s medijos lango paketai atvyksta per 50 ms lango PABAIGOJE. Pirmas
+// fiksavimo paketas pasitaiko pliūpsnio viduryje (media 1 s), todėl visų vėlesnių pliūpsnių pirmų paketų atsarga ≈ L − 1 s —
+// pastovi (ne latencijos pokytis). Apsauga lygina lango m_min su atsarga po fiksavimo (pirmas langas — atskaita), ne su L:
+// perfiksavimo nėra, poslinkis nekinta, slydimų nėra. (Anksčiau — lyginta su L: po 3 langų relock_fresh, kas ~30 s.)
+TEST_CASE("source_clock: pliūpsnių šaltinis, fiksavimas pliūpsnio viduryje — be perfiksavimo", "[timing][source_clock]") {
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::int64_t off = 0;
+    int relocked = 0;
+    for (int k = 25; k < 25 + 300 * 25; ++k) {  // 300 s; pirmas stebimas paketas — media 1 s (pliūpsnio vidurys)
+        const std::int64_t t = k * kTf;
+        const std::int64_t w = t / 2'000'000'000;
+        const std::int64_t frac = t - w * 2'000'000'000;
+        const std::int64_t a = kA0 + (w + 1) * 2'000'000'000 + frac * 50 / 2000;
+        const Stamp s = video(sc, 900'000 + k * kFrame, a);
+        REQUIRE(s.ev != Event::Dropped);
+        if (k == 25) {
+            REQUIRE(s.ev == Event::Locked);
+            off = sc.offset_ns();
+        } else if (s.ev == Event::Relocked) {
+            ++relocked;
+        }
+        sc.observe(1, 900'000 + k * kFrame, 900'000 + k * kFrame, kFrame, a + 1000);
+        CHECK(s.dts_tai_ns - a >= kL - 1'000'000'000 - kTf);  // kadras vis dar laiku (L − pliūpsnio fazė)
+    }
+    const ClockStats cs = sc.stats();
+    CHECK(relocked == 0);
+    CHECK(cs.relock_fresh == 0);
+    CHECK(cs.drift_slips == 0);
+    CHECK(sc.offset_ns() == off);
+    CHECK(std::abs(cs.drift_ppm) < 1.0);
+}
+
+// Tas pats su periodiniais sulaikymais (ingest_pts_order_not_arrival): kas 5 s paketai sulaikomi 300 ms ir atvyksta iškart —
+// kiekvienas langas turi sulaikymą, m_min ≈ L − 300 ms nuo pat pradžios → ne latencijos pokytis, perfiksavimo nėra.
+TEST_CASE("source_clock: periodiniai 300 ms sulaikymai — be perfiksavimo", "[timing][source_clock]") {
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    int relocked = 0;
+    std::int64_t off = 0;
+    for (int k = 0; k < 300 * 25; ++k) {
+        const std::int64_t t = k * kTf;
+        const std::int64_t ph = t % 5'000'000'000;
+        const std::int64_t a = kA0 + (ph >= 2'000'000'000 && ph < 2'300'000'000 ? t - ph + 2'300'000'000 : t);
+        const Stamp s = video(sc, 900'000 + k * kFrame, a);
+        if (k == 0) off = sc.offset_ns();
+        else if (s.ev == Event::Relocked) ++relocked;
+    }
+    CHECK(relocked == 0);
+    CHECK(sc.stats().relock_fresh == 0);
+    CHECK(sc.offset_ns() == off);
+}
+
+// P3 (ingest_hls): HLS segmentai (2 s) atvyksta pliūpsniu po atsitiktinio 0–1 s grojaraščio uždelsimo; tikro dreifo nėra.
+// Lango m_min triukšmas (iki 1 s) negali tapti dreifo įverčiu: įvertis taikomas tik kai jis reikšmingas (|nuolydis| > 3 jo
+// standartinės paklaidos), kitaip garso rampa nejuda — A/V nesislenka, video neslysta. (Anksčiau: įvertis iš 3 triukšmingų
+// langų → rampa iki ±1000 ppm → A/V iki 20 ms ir slydimas.)
+TEST_CASE("source_clock: HLS segmentų drebėjimas be dreifo — nei rampos, nei slydimų", "[timing][source_clock]") {
+    SourceClockConfig c = cfg25();
+    c.drift_limit_ns = 2'000'000'000;  // ingest HLS: ≥ segmentas (latencija 3 segmentai)
+    c.latency_ns = 6'000'000'000;
+    SourceClock sc(c);
+    sc.add_stream(0, kTb, true);
+    sc.add_stream(1, kTb, false);
+    std::mt19937 rng(11);
+    std::uniform_int_distribution<std::int64_t> delay(0, 1'000'000'000);
+    std::int64_t seg_delay = delay(rng), worst = 0;
+    for (int k = 0; k < 600 * 25; ++k) {  // 600 s
+        const std::int64_t t = k * kTf;
+        const std::int64_t seg = t / 2'000'000'000;
+        if (k > 0 && t % 2'000'000'000 == 0) seg_delay = delay(rng);
+        const std::int64_t a = kA0 + (seg + 1) * 2'000'000'000 + seg_delay + (t - seg * 2'000'000'000) / 100;
+        const Stamp s = video(sc, 900'000 + k * kFrame, a);
+        REQUIRE(s.ev != Event::Dropped);
+        sc.observe(1, 900'000 + k * kFrame, 900'000 + k * kFrame, kFrame, a + 1000);
+        worst = std::max(worst, std::abs(sc.offset_ns() - sc.audio_offset_ns()));
+    }
+    const ClockStats cs = sc.stats();
+    CHECK(cs.drift_slips == 0);
+    CHECK(cs.relock_fresh == 0);
+    CHECK(worst <= 1'000'000);  // A/V (poslinkių skirtumas) ≤ 1 ms
+}

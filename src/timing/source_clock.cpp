@@ -5,6 +5,7 @@
 #include "timing/source_clock.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace mxlv::timing {
@@ -40,6 +41,7 @@ SourceClock::SourceClock(const SourceClockConfig& cfg) : cfg_(cfg) {
     if (cfg_.wrap_bits < 0 || cfg_.wrap_bits > 62) throw std::invalid_argument("SourceClock: wrap_bits turi būti 0..62");
     if (cfg_.align_rate.num < 0 || cfg_.align_rate.den <= 0) throw std::invalid_argument("SourceClock: blogas align_rate");
     if (cfg_.drift_window_ns <= 0 || cfg_.drift_windows < 1) throw std::invalid_argument("SourceClock: blogas dreifo langas");
+    if (!(cfg_.max_comp_ppm > 0)) throw std::invalid_argument("SourceClock: max_comp_ppm turi būti > 0");
     wrap_mod_ = cfg_.wrap_bits == 0 ? 0 : std::uint64_t{1} << cfg_.wrap_bits;
     if (cfg_.align_rate.num > 0) tf_ = time_of(1, cfg_.align_rate);
     cur_.id = next_epoch_++;
@@ -92,6 +94,7 @@ void SourceClock::start_epoch(std::int64_t arrival_ns) {
 void SourceClock::reset_drift() {
     win_open_ = false;
     low_ = high_ = 0;
+    have_base_ = false;
     pts_n_ = pts_head_ = 0;
     have_last_media_ = false;
     ramp_acc_ = 0;
@@ -122,17 +125,33 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
         }
         const double n = static_cast<double>(pts_n_), den = n * sxx - sx * sx;
         if (den > 0) {
-            ppm_ = std::clamp((n * sxy - sx * sy) / den * 1e6, -kMaxCompPpm, kMaxCompPpm);
+            // Nuolydis ir jo standartinė paklaida (liekanos): įvertis taikomas tik kai reikšmingas (|b| > 3·se). Kitaip — 0:
+            // atvykimo triukšmas (HLS segmentų grojaraščio uždelsimas, pliūpsniai) nevirsta garso rampa ir A/V slinkimu.
+            const double b = (n * sxy - sx * sy) / den, a0 = (sy - b * sx) / n;
+            double rss = 0;
+            for (std::size_t i = 0; i < pts_n_; ++i) {
+                const DriftPoint& p = pts_[(first + i) % kDriftPoints];
+                const double x = static_cast<double>(p.arrival_ns - x0), y = static_cast<double>(p.margin_ns - y0);
+                rss += (y - a0 - b * x) * (y - a0 - b * x);
+            }
+            const double se = n > 2 ? std::sqrt(rss / (n - 2) / (sxx - sx * sx / n)) : 0;
+            ppm_ = std::fabs(b) > 3 * se ? std::clamp(b * 1e6, -cfg_.max_comp_ppm, cfg_.max_comp_ppm) : 0.0;
             drift_ppm_.store(ppm_, std::memory_order_relaxed);
         }
     }
-    // Apsauga: garso atsarga (su off_a) drift_windows langų iš eilės už L ± drift_limit — latencija pasikeitė
-    // daugiau, nei sugeria rampa → naujas fiksavimas.
+    // Apsauga: garso atsarga (su off_a) drift_windows langų iš eilės už atskaitos ± drift_limit — latencija pasikeitė
+    // daugiau, nei sugeria rampa → naujas fiksavimas. Atskaita — pirmo lango po (per)fiksavimo m_min (≈ L tolygiam šaltiniui;
+    // pliūpsnių šaltiniui — L minus fiksavimo paketo fazė pliūpsnyje).
     const std::int64_t m_min = win_min_ + cur_.off_a;
-    if (m_min < cfg_.latency_ns - cfg_.drift_limit_ns) {
+    if (!have_base_) {
+        have_base_ = true;
+        base_ = m_min;
+        return false;
+    }
+    if (m_min < base_ - cfg_.drift_limit_ns) {
         ++low_;
         high_ = 0;
-    } else if (m_min > cfg_.latency_ns + cfg_.drift_limit_ns) {
+    } else if (m_min > base_ + cfg_.drift_limit_ns) {
         ++high_;
         low_ = 0;
     } else {
