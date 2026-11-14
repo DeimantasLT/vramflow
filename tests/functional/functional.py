@@ -16,6 +16,7 @@ import os
 import pathlib
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -192,6 +193,31 @@ def f6(out):
     return res
 
 
+FD_MIN_SAMPLES = 3  # mažiau matavimų lange — lygio nustatyti negalima
+
+
+def fd_leak(samples, t_first_kill_ns, t_last_kill_ns, t_term_ns):
+    """F7 nuotėkio kriterijus. samples — [(ts_mono_ns, fd_count)] iš proc-writer.csv (1 Hz, CLOCK_MONOTONIC —
+    tas pats laikrodis kaip time.monotonic_ns()).
+
+    Nuotėkis = FD lygis po paskutinio nužudyto reader'io (iki writer'io stabdymo) aukštesnis nei prieš pirmą
+    nužudymą. Lygis — lango mediana: deskriptorius, likęs po nužudyto reader'io, pakelia visą „po“ langą, o vienas
+    trumpalaikis matavimas (procesas trumpam atidaro failą; 5 atvejai per 11 345 matavimus, 2026-11-14) lygio
+    nekeičia. Anksčiau kriterijus buvo „maksimumas == pirmas matavimas“ — jis krisdavo nuo vieno tokio matavimo.
+
+    Grąžina (ok, info): ok True — nuotėkio nėra, False — yra, None — kuriame nors lange per mažai matavimų
+    (kriterijus nenustatomas; testas tai laiko FAIL, ne tylia sėkme)."""
+    before = [fd for ts, fd in samples if ts < t_first_kill_ns]
+    after = [fd for ts, fd in samples if t_last_kill_ns < ts < t_term_ns]
+    info = {"n_before": len(before), "n_after": len(after)}
+    if len(before) < FD_MIN_SAMPLES or len(after) < FD_MIN_SAMPLES:
+        return None, info
+    lb, la = statistics.median_low(before), statistics.median_low(after)
+    info.update(level_before=lb, level_after=la,
+                transients=sum(1 for ts, fd in samples if ts < t_term_ns and fd > lb))
+    return la <= lb, info
+
+
 def f7(out, cycles=10):
     gpu_mode("gpu")  # vramflow-verify writer / reader — GPU (cuda-linear)
     d = fresh_domain("f7")
@@ -199,24 +225,61 @@ def f7(out, cycles=10):
     time.sleep(2)
     ra = Proc("reader", d, out / "f7/readerA", "--duration", 10 + cycles * 3)
     time.sleep(2)
+    t_first_kill = t_last_kill = None
     for k in range(cycles):
         rb = Proc("reader", d, out / f"f7/readerB{k}", "--duration", 30)
         time.sleep(2.5)
+        if t_first_kill is None:
+            t_first_kill = time.monotonic_ns()
         rb.kill9()
+        t_last_kill = time.monotonic_ns()
     racode = ra.wait(timeout=90)
+    t_term = time.monotonic_ns()
     wcode = w.term()
     ws, rs = w.summary(), ra.summary()
     proc = (out / "f7/writer/proc-writer.csv").read_text().strip().splitlines()[1:]
-    fds = [int(l.split(",")[3]) for l in proc]
+    samples = [(int(col[1]), int(col[3])) for col in (l.split(",") for l in proc)]
+    fds = [fd for _, fd in samples]
     c = counters(rs)
-    # Nuotėkis = FD skaičius auga su kiekvienu nužudytu reader'iu. Pabaigoje writer'is atlaisvina flow, todėl
-    # FD sumažėja — tai ne nuotėkis. Kriterijus: maksimumas per visą laiką == pirmas matavimas.
-    ok = racode == 0 and verify_errors(rs) == 0 and c.get("gap_grains") == 0 and fds and max(fds) == fds[0]
+    # Nuotėkis = FD lygis po 10 nužudytų reader'ių aukštesnis nei prieš pirmą (žr. fd_leak). Pabaigoje writer'is
+    # atlaisvina flow, todėl FD sumažėja — tai ne nuotėkis; langas „po“ baigiasi prieš writer'io stabdymą.
+    leak_ok, lv = fd_leak(samples, t_first_kill, t_last_kill, t_term)
+    ok = racode == 0 and verify_errors(rs) == 0 and c.get("gap_grains") == 0 and leak_ok is True
     return result("F7", "PASS" if ok else "FAIL",
                   why=f"{cycles}× reader kill -9: reader A exit={racode} verif={verify_errors(rs)} gap={c.get('gap_grains')}; "
-                      f"writer fd pradžia={fds[0] if fds else '?'} max={max(fds) if fds else '?'} pabaiga={fds[-1] if fds else '?'}, "
+                      f"writer fd lygis prieš={lv.get('level_before', '?')} po={lv.get('level_after', '?')} "
+                      f"(matavimų {lv['n_before']}/{lv['n_after']}, trumpalaikių={lv.get('transients', '?')}), "
+                      f"pradžia={fds[0] if fds else '?'} max={max(fds) if fds else '?'} pabaiga={fds[-1] if fds else '?'}, "
                       f"late_skips={counters(ws).get('writer_late_skips')}",
-                  writer_exit=wcode, writer_fds={"first": fds[0], "max": max(fds), "last": fds[-1]} if fds else None)
+                  writer_exit=wcode,
+                  writer_fds={"first": fds[0], "max": max(fds), "last": fds[-1], **lv} if fds else None,
+                  kill_window_ns={"first_kill": t_first_kill, "last_kill": t_last_kill, "term": t_term})
+
+
+def f7_teeth(out):
+    """F7 kriterijaus „dantys“ (be procesų): fd_leak turi skirti nuotėkį nuo vieno trumpalaikio matavimo."""
+    s = 1_000_000_000
+    first_kill, last_kill, term = 6 * s, 30 * s, 43 * s  # kaip F7 tvarkaraštis; matavimai kas 1 s nuo 1 s
+
+    def series(fn, start=1, end=44):
+        return [(t * s, fn(t)) for t in range(start, end)]
+
+    cases = [
+        ("lygu", series(lambda t: 39), True),
+        ("vienas trumpalaikis po nužudymų", series(lambda t: 40 if t == 42 else 39), True),
+        ("vienas trumpalaikis prieš nužudymus", series(lambda t: 41 if t == 3 else 39), True),
+        ("+1 lieka po trečio nužudymo", series(lambda t: 40 if t >= 13 else 39), False),
+        ("+1 po kiekvieno nužudymo", series(lambda t: 39 + max(0, min(10, (t - 4) // 2)) if t > 6 else 39), False),
+        ("sumažėja po nužudymų", series(lambda t: 38 if t >= 20 else 39), True),
+        ("nėra matavimų prieš nužudymus", series(lambda t: 39, start=7), None),
+    ]
+    bad = []
+    for name, samples, want in cases:
+        got, info = fd_leak(samples, first_kill, last_kill, term)
+        if got is not want:
+            bad.append(f"{name}: gauta {got}, laukta {want} ({info})")
+    return result("f7_teeth", "PASS" if not bad else "FAIL",
+                  why=f"{len(cases) - len(bad)}/{len(cases)} atvejų teisingi" + ("; " + "; ".join(bad) if bad else ""))
 
 
 def f8(out):
@@ -1130,7 +1193,7 @@ def main():
     out.mkdir(parents=True)
     KW.log_dir = out
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
-             "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
+             "f7_teeth": lambda: [f7_teeth(out)], "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
              "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
