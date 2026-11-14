@@ -13,6 +13,7 @@
 # Klipai (KATALOGAS, numatyta ~/media-test/av):
 #   av_1080i50.ts, av_1080p25.ts   — pagrindiniai (CLIP_SECONDS, numatyta 150 s) + ref_crc_<fmt>.json (programinis dekoderis →
 #                                     grain'ų CRC32C bitų tikslumo patikrai)
+#   av_1080i50_long.ts               — 300 s 1080i50 (dreifo testai numatytomis parinktimis, be kilpos)
 #   av_720p50_short.ts               — 20 s 720p50 (formato pasikeitimui)
 #   fmtchange.ts                     — 15 s 1080i50, tada 720p50 (sujungti TS: PTS šuolis ir SPS pasikeitimas)
 #   audio_only_90.ts                 — 90 s tik AAC
@@ -58,6 +59,7 @@ make_clip() {
 
 make_clip av_1080i50.ts 1080i50 "$SECONDS_LONG"
 make_clip av_1080p25.ts 1080p25 "$SECONDS_LONG"
+make_clip av_1080i50_long.ts 1080i50 300  # dreifas numatytomis parinktimis (±500 ppm, 240 s be kilpos sandūrų)
 make_clip av_720p50_short.ts 720p50 20
 make_clip fmt_1080i50_short.ts 1080i50 15
 make_clip bad_422.ts 1080p25 6 -pix_fmt yuv422p -profile:v high422

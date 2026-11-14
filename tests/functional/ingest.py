@@ -53,6 +53,7 @@ def dur(s):
 def ensure_clips():
     need = ["av_1080i50.ts", "av_1080p25.ts", "fmtchange.ts", "wrap_1080i50.ts", "audio_only_90.ts", "bad_422.ts", "bad_10bit.ts", "bad_bff.ts",
             "fmt_1080i50_short.ts", "ref_crc_1080p25.json"]
+    need.append("av_1080i50_long.ts")
     if all((CLIPS / n).exists() for n in need):
         return None
     r = subprocess.run(["bash", str(REPO / "scripts/linux/62-make-av-clip.sh"), str(CLIPS)], capture_output=True, text=True,
@@ -311,6 +312,42 @@ def ingest_drift_accelerated(out):
                      why="; ".join(problems) + f" | drift_ppm {ppm:.0f} | " + summary_line(si, sv, a, ratio_ok(fv)), drift_ppm=ppm, ingest=si)]
 
 
+def ingest_drift_default(out):
+    """Round 9 (C): realistinis dreifas NUMATYTOMIS parinktimis (--max-comp-ppm 1000): siuntėjas ±500 ppm, 240 s — keli video
+    slydimai (≥ 2), 0 perfiksavimų, garse nė vieno tylos tarpo / trūkio, audio_resyncs == 0, |A/V| ≤ 1 laukas visada. (Ekstremalus
+    ingest_drift_accelerated — 0,5 % su --max-comp-ppm 6000 — lieka nepakeistas.)"""
+    if (why := ensure_clips()):
+        return [F.result("ingest_drift_default", "FAIL", why=why)]
+    res = []
+    for k, ppm in enumerate((500, -500)):
+        tid, port = f"ingest_drift_default[{ppm:+d}ppm]", BASE_PORT + 44 + k
+        T = dur(240)
+        si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"],
+                                      [lambda p=port, s=1 + ppm * 1e-6, t=tid: Sender.ts(out, f"{t}/snd", CLIPS / "av_1080i50_long.ts", p, "--speed", s)],
+                                      T, (), warm=6)
+        fi, fv = flow(si), flow(sv)
+        a = av_stats(sv)
+        problems = []
+        if ri not in (0,):
+            problems.append(f"ingest exit {ri}")
+        if fi.get("drift_slips", 0) < 2:
+            problems.append(f"drift_slips {fi.get('drift_slips')} < 2")
+        if fi.get("relock_fresh", 0) + fi.get("relock_cont", 0) + fi.get("discontinuities", 0):
+            problems.append(f"perfiksavimai {fi.get('relock_fresh')}+{fi.get('relock_cont')}, nutrūkimai {fi.get('discontinuities')}")
+        if a["max_abs_ms"] is None or a["max_abs_ms"] > 20:
+            problems.append(f"|A/V| maks. {a['max_abs_ms']} ms > 20")
+        if fv.get("audio_zero_runs", 1) or fv.get("audio_disc", 1):
+            problems.append(f"garso trūkiai: tylos {fv.get('audio_zero_runs')} trūkiai {fv.get('audio_disc')} {a['disc'][:5]}")
+        if fi.get("audio_resyncs", 0):
+            problems.append(f"audio_resyncs {fi.get('audio_resyncs')}")
+        bad_steps = [j for j in a["jumps"] if j[1] not in (-1, 1, 3)]
+        if bad_steps:
+            problems.append(f"video trūkiai > 1 kadro: {bad_steps[:5]}")
+        sgn = -1 if fi.get("drift_ppm_negative") else 1
+        est = sgn * fi.get("drift_ppm_abs_x1000", 0) / 1000.0
+        res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | drift_ppm {est:.0f} | " +
+                            summary_line(si, sv, a, ratio_ok(fv)), drift_ppm=est))
+    return res
 
 
 def ingest_pts_wrap(out):
@@ -1042,3 +1079,4 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_hls_security": ingest_hls_security, "ingest_hls_recursion_live": ingest_hls_recursion_live,
          "ingest_secrets_redacted": ingest_secrets_redacted, "ingest_audio_absent_reconnect": ingest_audio_absent_reconnect,
          "ingest_live_stats_fallback": ingest_live_stats_fallback, "ingest_hls_by_content": ingest_hls_by_content}
+TESTS["ingest_drift_default"] = ingest_drift_default
