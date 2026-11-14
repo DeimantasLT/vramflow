@@ -86,6 +86,17 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         return fail("atidaryti nepavyko", e);
     }
     if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
+    // Apkrautoje mašinoje (daug šaltinių, siuntėjų) per analyzeduration video parametrų kartais dar nėra („unspecified size“) —
+    // zonduojama dar ne daugiau kaip 3 kartus, kol žinomas dydis ir pikselių formatas (išmatuota: 8 šaltiniai — 8-asis atmestas)
+    for (int k = 0; k < 3; ++k) {
+        bool unknown = false;
+        for (unsigned i = 0; i < ic_->nb_streams; ++i) {
+            const AVCodecParameters* p = ic_->streams[i]->codecpar;
+            if (p->codec_type == AVMEDIA_TYPE_VIDEO && (p->width <= 0 || p->format < 0)) unknown = true;
+        }
+        if (!unknown) break;
+        if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
+    }
     vs_ = av_find_best_stream(ic_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     as_ = s.audio ? av_find_best_stream(ic_, AVMEDIA_TYPE_AUDIO, -1, vs_, nullptr, 0) : -1;
     if (vs_ < 0) vs_ = -1;

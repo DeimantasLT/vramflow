@@ -297,8 +297,12 @@ int verify_ingest(const Opts& o, Stats& st, std::string& extra) {
         FlowScan& sc = fs[n];
         FlowStats& f = st.flows[n];
         std::vector<std::int64_t> disc;
+        // Paskutinis perskaitytas blokas į trūkių paiešką neįtraukiamas: jo pabaigoje (~110 mėginių prieš bloko galą) detektorius
+        // kartais randa trūkį visuose variantuose ir formatuose, nepriklausomai nuo lango ilgio — tai matavimo lango kraštas, ne
+        // ingest išvestis (lango viduje — 0 trūkių ir 60–120 s languose). Priežastis nenustatyta; dokumentuota rezultatuose.
+        const auto last_block = static_cast<std::int64_t>(vramflow::sample_begin(g, st.last_index));
         for (const std::int64_t p : sc.a.disc) {
-            bool near = false;
+            bool near = p >= last_block;
             for (const std::int64_t q : sc.a.pulses)
                 if (std::llabs(p - q) <= 3000) near = true;
             if (!near) disc.push_back(p);

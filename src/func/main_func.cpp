@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         ->check(CLI::Range(50u, 60000u));
     ig->add_option("--decode-lead-ms", o.decode_lead_ms, "paketas į dekoderį ne anksčiau kaip tiek ms prieš savo laiką (numatyta 400)")
         ->check(CLI::Range(20u, 10000u));
-    ig->add_option("--surfaces", o.surfaces, "nvdec: papildomų kadrų baseinas (0 — auto)")->check(CLI::Range(0, 64));
+    ig->add_option("--surfaces", o.surfaces, "nvdec: dekoderio paviršių atsarga virš DPB (0 — auto: 1)")->check(CLI::Range(0, 64));
     ig->add_option("--audio", o.ingest_audio, "garso flow'as (numatyta 1)");
     ig->add_option("--audio-channels", o.audio_channels, "garso kanalai MXL flow'e (numatyta 2)")->check(CLI::Range(1, 16));
     ig->add_option("--input-wait-s", o.input_wait_s, "kiek laukti šaltinio duomenų paleidžiant, s (< 0 — neribotai; numatyta)");

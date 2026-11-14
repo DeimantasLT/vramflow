@@ -6,6 +6,7 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 #include <libavutil/opt.h>
 }
+#include <cuda_runtime_api.h>
 
 #include <cstring>
 
@@ -39,9 +40,10 @@ const char* decoder_name(Decoder d) {
 }
 
 bool VideoDecoder::open(const AVCodecParameters* par, Decoder d, AVBufferRef* hw, bool to_device, int threads, int extra_frames,
-                        std::string& err) {
+                        int device, std::string& err) {
     close();
     d_ = d;
+    device_ = device;
     to_device_ = d == Decoder::Sw && to_device;
     const AVCodec* codec = nullptr;
     if (d == Decoder::Cuvid) codec = avcodec_find_decoder_by_name(par->codec_id == AV_CODEC_ID_HEVC ? "hevc_cuvid" : "h264_cuvid");
@@ -83,6 +85,11 @@ bool VideoDecoder::open(const AVCodecParameters* par, Decoder d, AVBufferRef* hw
 }
 
 void VideoDecoder::close() {
+    if (stream_) {
+        cudaStreamSynchronize(static_cast<cudaStream_t>(stream_));
+        cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
+        stream_ = nullptr;
+    }
     avcodec_free_context(&c_);
     av_buffer_unref(&frames_);
     av_buffer_unref(&hw_);
@@ -96,20 +103,66 @@ int VideoDecoder::send(AVPacket* pkt) {
     return e;
 }
 
-bool VideoDecoder::to_device(AVFrame* src, AVFrame*& dst, std::string& err) {
-    if (!frames_) {
-        frames_ = av_hwframe_ctx_alloc(hw_);
-        auto* fc = reinterpret_cast<AVHWFramesContext*>(frames_->data);
-        fc->format = AV_PIX_FMT_CUDA;
-        fc->sw_format = AV_PIX_FMT_NV12;
-        fc->width = src->width;
-        fc->height = src->height;
-        if (const int e = av_hwframe_ctx_init(frames_); e < 0) {
-            err = "CUDA kadrų baseinas: " + averr(e);
-            av_buffer_unref(&frames_);
+bool VideoDecoder::ensure_pool(int w, int h, std::string& err) {
+    if (frames_) {
+        const auto* fc = reinterpret_cast<const AVHWFramesContext*>(frames_->data);
+        if (fc->width == w && fc->height == h) return true;
+        av_buffer_unref(&frames_);  // raiška pasikeitė (kviečiantysis šaltinį stabdo; baseinas — naujam dydžiui)
+    }
+    frames_ = av_hwframe_ctx_alloc(hw_);
+    auto* fc = reinterpret_cast<AVHWFramesContext*>(frames_->data);
+    fc->format = AV_PIX_FMT_CUDA;
+    fc->sw_format = AV_PIX_FMT_NV12;
+    fc->width = w;
+    fc->height = h;
+    if (const int e = av_hwframe_ctx_init(frames_); e < 0) {  // baseinas dinaminis: kadrų tiek, kiek jų laikoma
+        err = "CUDA kadrų baseinas: " + averr(e);
+        av_buffer_unref(&frames_);
+        return false;
+    }
+    return true;
+}
+
+bool VideoDecoder::compact(AVFrame* src, AVFrame*& dst, std::string& err) {
+    if (!ensure_pool(src->width, src->height, err)) return false;
+    if (!stream_) {
+        cudaStream_t s{};
+        // BLOKUOJANTIS stream'as: libav nvdec / cuvid kadrą į išvesties buferį kopijuoja asinchroniškai numatytajame (legacy)
+        // stream'e — non-blocking stream'as su juo nesisinchronizuotų ir kopijuotų dar nebaigtą (išmatuota: A/V nuslinko kadru)
+        if (cudaSetDevice(device_) != cudaSuccess || cudaStreamCreate(&s) != cudaSuccess) {
+            err = "CUDA stream'as kopijai";
             return false;
         }
+        stream_ = s;
     }
+    dst = av_frame_alloc();
+    if (const int e = av_hwframe_get_buffer(frames_, dst, 0); e < 0) {
+        err = "CUDA kadras: " + averr(e);
+        av_frame_free(&dst);
+        return false;
+    }
+    auto* s = static_cast<cudaStream_t>(stream_);
+    const auto w = static_cast<std::size_t>(src->width);
+    // NV12: Y (h eilučių) ir supinta UV (h / 2 eilučių); kopija baigiama prieš atlaisvinant libav kadrą (dekoderis paviršių
+    // gali tuoj pat perrašyti)
+    cudaError_t ce = cudaMemcpy2DAsync(dst->data[0], static_cast<std::size_t>(dst->linesize[0]), src->data[0],
+                                       static_cast<std::size_t>(src->linesize[0]), w, static_cast<std::size_t>(src->height),
+                                       cudaMemcpyDeviceToDevice, s);
+    if (ce == cudaSuccess)
+        ce = cudaMemcpy2DAsync(dst->data[1], static_cast<std::size_t>(dst->linesize[1]), src->data[1], static_cast<std::size_t>(src->linesize[1]),
+                               w, static_cast<std::size_t>(src->height / 2), cudaMemcpyDeviceToDevice, s);
+    if (ce == cudaSuccess) ce = cudaStreamSynchronize(s);
+    if (ce != cudaSuccess) {
+        err = std::string("CUDA kopija: ") + cudaGetErrorString(ce);
+        av_frame_free(&dst);
+        return false;
+    }
+    av_frame_copy_props(dst, src);
+    return true;
+}
+
+bool VideoDecoder::to_device(AVFrame* src, AVFrame*& dst, std::string& err) {
+    if (!ensure_pool(src->width, src->height, err)) return false;
     if (!nv12_ || nv12_->width != src->width || nv12_->height != src->height) {
         av_frame_free(&nv12_);
         nv12_ = av_frame_alloc();
@@ -160,9 +213,9 @@ bool VideoDecoder::receive(DecodedFrame& out, std::string& err) {
     out.pts_tai_ns = tmp_->best_effort_timestamp != AV_NOPTS_VALUE ? tmp_->best_effort_timestamp : tmp_->pts;
     out.interlaced = (tmp_->flags & AV_FRAME_FLAG_INTERLACED) != 0;
     out.tff = (tmp_->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) != 0;
-    if (to_device_) {
+    if (to_device_ || tmp_->format == AV_PIX_FMT_CUDA) {
         AVFrame* dev = nullptr;
-        const bool ok = to_device(tmp_, dev, err);
+        const bool ok = to_device_ ? to_device(tmp_, dev, err) : compact(tmp_, dev, err);
         av_frame_unref(tmp_);
         if (!ok) return false;
         out.f = dev;

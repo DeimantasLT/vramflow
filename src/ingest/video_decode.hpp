@@ -7,6 +7,9 @@
 //   cuvid — h264_cuvid / hevc_cuvid (deint=weave; kadras išeina 4–8 kadrais vėliau nei paketas, brief'o pamoka 3);
 //   sw    — FFmpeg programinis (kadrų + slice'ų gijos); to_device: kadras perkeliamas į CUDA NV12 (U / V supinami CPU, tada
 //           av_hwframe_transfer_data) — tas pats GPU kelias kaip NVDEC; kitaip — host yuv420p (C variantas, CPU split).
+// VRAM (US 12): NVDEC kadras laiko ir dekoderio paviršių, ir išvesties kopiją (libav nvdec / cuvid) — atsargoje laikomas kadras
+// kainuotų du NV12 buferius. Todėl nvdec / cuvid kadras iškart nukopijuojamas (D2D, savo stream'e, sync) į savo baseino kadrą,
+// o libav kadras atlaisvinamas: dekoderiui pakanka DPB + kelių paviršių, laikomas kadras — vienas buferis.
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/buffer.h>
@@ -37,7 +40,9 @@ public:
 
     // hw — CUDA įrenginio kontekstas (nvdec / cuvid / sw + to_device). threads — programiniam (0 — 2). extra_frames — kiek
     // dekoduotų kadrų laikoma ne dekoderyje (atsarga + tick'as): nvdec paviršių baseinui.
-    bool open(const AVCodecParameters* par, Decoder d, AVBufferRef* hw, bool to_device, int threads, int extra_frames, std::string& err);
+    // device — CUDA įrenginys (kopijai D2D dekodavimo gijoje).
+    bool open(const AVCodecParameters* par, Decoder d, AVBufferRef* hw, bool to_device, int threads, int extra_frames, int device,
+              std::string& err);
     void close();
     // Paketas (pts / dts — TAI ns). 0 — priimtas; AVERROR(EAGAIN) — išvesties eilė pilna: pirma receive, tada tą patį paketą
     // siųsti iš naujo; kita — dekoderio klaida (skaičiuojama, tęsiama).
@@ -50,6 +55,8 @@ public:
 
 private:
     bool to_device(AVFrame* src, AVFrame*& dst, std::string& err);
+    bool compact(AVFrame* src, AVFrame*& dst, std::string& err);  // CUDA → savo baseino kadras (D2D)
+    bool ensure_pool(int w, int h, std::string& err);
     AVCodecContext* c_ = nullptr;
     Decoder d_ = Decoder::Nvdec;
     bool to_device_ = false;
@@ -58,6 +65,8 @@ private:
     AVFrame* tmp_ = nullptr;         // gautas kadras
     AVFrame* nv12_ = nullptr;        // host NV12 (sw → CUDA)
     std::uint64_t errors_ = 0;
+    int device_ = -1;
+    void* stream_ = nullptr;  // cudaStream_t (antraštė be CUDA)
 };
 
 }  // namespace mxlv::ingest

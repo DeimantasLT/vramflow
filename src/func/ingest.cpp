@@ -136,7 +136,8 @@ struct Source {
     std::string error;
     // statistika (gijos)
     Counter pkts_v{0}, pkts_a{0}, frames_decoded{0}, late_frames{0}, slip_drop_frames{0}, store_drops{0}, vdec_errors{0},
-        adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0};
+        adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0},
+        prestart_dropped{0};
     std::atomic<std::int64_t> comp_abs{0};
     // tick gija
     AVFrame* cur = nullptr;   // dabartinis kadras (interlaced — abu laukai)
@@ -286,7 +287,26 @@ void store_frame(Source& s, ig::DecodedFrame& df) {
         av_frame_free(&f);
         return;
     }
+    // Kadro laikas praėjo, o tick'as šio šaltinio dar nerodo (paleidimas: variklis startuoja tik sukūrus visų šaltinių flow'us) —
+    // kadras niekam nereikalingas. Kitaip žemėlapis augtų iki ribos, o CUDA kadrų baseinas — kartu (baseinas nesitraukia:
+    // išmatuota ~340 MB VRAM šaltiniui vietoje ~100 MB).
+    if (df.pts_tai_ns + timing::time_of(1, s.fmt.frame_rate) < static_cast<std::int64_t>(ig::tai_now())) {
+        ++s.prestart_dropped;
+        av_frame_free(&f);
+        return;
+    }
     std::lock_guard g(s.fm);
+    // Kadrai, kurių laikas (visas kadro periodas) jau praėjo, žemėlapyje nereikalingi — jie lieka tik tada, kai tick'as šio šaltinio
+    // dar neima (paleidimas: variklis startuoja sukūrus VISŲ šaltinių flow'us; šaltinis 0 laukia, kol zonduojami kiti). Be šio
+    // valymo ankstyvo šaltinio žemėlapis (ir CUDA kadrų baseinas — jis nesitraukia) augdavo iki ribos: VRAM augo kvadratiškai
+    // šaltinių skaičiui (išmatuota: 4 šaltiniai — 1,3 GB vietoje ~0,4 GB).
+    const auto now = static_cast<std::int64_t>(ig::tai_now());
+    const std::uint64_t f_past = timing::index_of(now - timing::time_of(1, s.fmt.frame_rate), s.fmt.frame_rate);
+    while (!s.frames.empty() && s.frames.begin()->first < f_past) {
+        av_frame_free(&s.frames.begin()->second);
+        s.frames.erase(s.frames.begin());
+        ++s.prestart_dropped;
+    }
     auto [it, fresh] = s.frames.emplace(F, f);
     if (!fresh) {  // tas pats indeksas antrą kartą: video slydimas −1 kadras (šaltinis greitesnis, K6) — senesnis išmetamas
         av_frame_free(&it->second);
@@ -304,10 +324,11 @@ void video_thread(Source& s, Shared& c) {
     ig::VideoDecoder dec;
     ig::SkipToKey skip;
     std::string err;
-    const int extra = static_cast<int>(c.o.surfaces > 0 ? c.o.surfaces
-                                                        : (c.gate.lead_ns * s.fmt.frame_rate.num / s.fmt.frame_rate.den) / 1'000'000'000 + 8);
+    // NVDEC paviršių atsarga virš DPB: kadrai iškart nukopijuojami į savo baseiną (VideoDecoder::compact), todėl dekoderiui
+    // pakanka vieno papildomo (numatyta 1; anksčiau atsarga · kadrų dažnis + 8 — kiekvienas laikomas kadras kainavo du buferius)
+    const int extra = c.o.surfaces > 0 ? c.o.surfaces : 1;
     auto open = [&](const AVCodecParameters* par) {
-        if (!dec.open(par, c.decoder, c.hw, c.to_device, c.o.threads, extra, err)) {
+        if (!dec.open(par, c.decoder, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) {
             s.stop_format(s.name + ": " + err);
             return false;
         }
@@ -701,12 +722,17 @@ int run_ingest(const Opts& o_in) {
     sh.gate.min_ns = 0;
     sh.async.max_ppm = o.max_comp_ppm;
 
-    // 1. Šaltiniai: atidaryti ir zonduoti (iki --input-wait-s); formatas nustatomas PRIEŠ kuriant flow'us (pusiau sukurtų nelieka)
-    std::vector<std::unique_ptr<Source>> src;
-    int rc = 0;
+    // 1. Šaltiniai: atidaryti ir zonduoti (iki --input-wait-s) LYGIAGREČIAI (zondavimas + IDR — ~2–3 s šaltiniui; nuosekliai 8
+    //    šaltiniai užtrukdavo ~24 s); formatas nustatomas PRIEŠ kuriant flow'us (pusiau sukurtų nelieka). Pirma klaida — bendras
+    //    stop: kiti zondavimai nutraukiami, procesas baigiasi su ta klaida.
+    std::vector<std::unique_ptr<Source>> src(N);
+    std::vector<std::string> perr(N);
+    std::vector<int> prc(N, 0);
+    std::atomic<bool> failed_probe{false};
     const std::int64_t open_ns = o.input_wait_s > 0 ? static_cast<std::int64_t>(o.input_wait_s * 1e9) : 0;
-    for (std::size_t k = 0; k < N && !rc; ++k) {
-        auto s = std::make_unique<Source>();
+    auto probe = [&](std::size_t k) {
+        auto& s = src[k];
+        s = std::make_unique<Source>();
         s->idx = static_cast<int>(k);
         s->name = "šaltinis " + std::to_string(k) + " (" + o.inputs[k] + ")";
         s->spec.url = o.inputs[k];
@@ -714,36 +740,29 @@ int run_ingest(const Opts& o_in) {
         s->spec.audio = o.ingest_audio;
         s->spec.audio_channels = o.audio_channels;
         s->spec.silence_ms = o.input_silence_ms;
+        auto fail = [&](int code, std::string why) {
+            prc[k] = code;
+            perr[k] = std::move(why);
+            if (!failed_probe.exchange(true)) stop = true;  // kiti zondavimai nutraukiami
+        };
         std::string err;
         if (!s->demux.open(s->spec, stop, open_ns, err)) {
-            st.fatal = stop.load() ? "sustabdyta laukiant " + o.inputs[k] : err;
-            rc = stop.load() ? kStoppedWaiting : 2;
-            break;
+            if (failed_probe.load()) return;  // nutraukta dėl kito šaltinio klaidos
+            return stop.load() ? fail(kStoppedWaiting, "sustabdyta laukiant " + o.inputs[k]) : fail(2, err);
         }
         const ig::StreamInfo& in = s->demux.info();
         s->video = in.video;
         s->audio = in.audio && o.ingest_audio;
         if (s->video) {
             std::string why;
-            if (!s->demux.video_format(s->fmt, why)) {
-                st.fatal = s->name + ": nepalaikomas formatas — " + why;
-                rc = 2;
-                break;
-            }
+            if (!s->demux.video_format(s->fmt, why)) return fail(2, s->name + ": nepalaikomas formatas — " + why);
             if (o.format != "auto") {
                 vramflow::VideoFormat want{};
-                if (!vramflow::parse_format(o.format, want, err) || !(want == s->fmt)) {
-                    st.fatal = s->name + ": srauto formatas " + vramflow::format_name(s->fmt) + " != --format " + o.format;
-                    rc = 2;
-                    break;
-                }
+                if (!vramflow::parse_format(o.format, want, err) || !(want == s->fmt))
+                    return fail(2, s->name + ": srauto formatas " + vramflow::format_name(s->fmt) + " != --format " + o.format);
             }
         }
-        if (!s->video && !s->audio) {
-            st.fatal = s->name + ": nėra nei video, nei garso srauto";
-            rc = 2;
-            break;
-        }
+        if (!s->video && !s->audio) return fail(2, s->name + ": nėra nei video, nei garso srauto");
         // K7: latencija; HLS — ne mažiau kaip 3 segmentai (pliūpsniai = segmentai), dreifo riba — segmentas
         s->latency_ns = static_cast<std::int64_t>(o.latency_ms) * 1'000'000;
         const std::int64_t seg = s->demux.hls_target_ns();
@@ -771,17 +790,25 @@ int run_ingest(const Opts& o_in) {
         std::fprintf(stderr, "[ingest] %s: %s%s, latencija %.0f ms\n", s->name.c_str(),
                      s->video ? vramflow::format_name(s->fmt).c_str() : "be video", s->audio ? " + garsas" : ", be garso",
                      static_cast<double>(s->latency_ns) / 1e6);
-        // Demux gija — iškart po zondavimo: paketai žymimi atvykimo metu. Kitaip, kol zonduojami kiti šaltiniai ir kuriami flow'ai,
-        // jie kauptųsi UDP buferyje, o pirmas (fiksavimo) paketas būtų pažymėtas pavėluotu atvykimu: poslinkis ir pirmi dreifo
-        // langai iškreipti (išmatuota: 60 s A/V nuslinko −1,4 ms dėl klaidingo pradinio dreifo įverčio).
-        // Dekodavimo gijos — taip pat iškart: kol zonduojami kiti šaltiniai, šio kadrai jau dekoduojami laiku (kitaip pirmi kadrai
-        // po paleidimo vėluodavo — late_frames, išmatuota dviejų šaltinių teste).
+        // Šaltinio gijos — iškart po zondavimo. Demux: paketai žymimi atvykimo metu (kitaip, kol zonduojami kiti šaltiniai ir kuriami
+        // flow'ai, jie kauptųsi UDP buferyje, o fiksavimo paketas gautų pavėluotą atvykimą — išmatuota: A/V per 60 s nuslinko −1,4 ms).
+        // Dekodavimas: kadrai dekoduojami laiku (kitaip pirmi kadrai po paleidimo vėluodavo — late_frames).
         Source* sp = s.get();
-        src.push_back(std::move(s));
         sp->th_demux = std::thread([sp, &sh] { demux_thread(*sp, sh); });
         if (sp->video) sp->th_video = std::thread([sp, &sh] { video_thread(*sp, sh); });
         if (sp->audio) sp->th_audio = std::thread([sp, &sh] { audio_thread(*sp, sh); });
+    };
+    {
+        std::vector<std::thread> pt;
+        for (std::size_t k = 0; k < N; ++k) pt.emplace_back(probe, k);
+        for (auto& t : pt) t.join();
     }
+    int rc = 0;
+    for (std::size_t k = 0; k < N && !rc; ++k)
+        if (prc[k]) {
+            rc = prc[k];
+            st.fatal = perr[k];
+        }
     // Klaida — šaltinių gijos sustabdomos (bendras stop) ir sujungiamos (~Source)
     auto abort_sources = [&] {
         stop = true;
@@ -949,6 +976,7 @@ int run_ingest(const Opts& o_in) {
         f.inc("slip_drop_frames", s.slip_drop_frames);  // video slydimas −1 kadras: senesnis išmestas
         f.inc("skipped_frames", s.late_taken);          // jų indeksai praleisti varikliu
         f.inc("store_drops", s.store_drops);
+        f.inc("prestart_dropped", s.prestart_dropped);  // dekoduotas po savo laiko, kol variklis dar nerodė (paleidimas)
         f.inc("flag_mismatch", s.flag_mismatch);
         f.inc("skip_to_key", s.skip_runs);
         f.inc("skip_dropped_pkts", s.skip_dropped);

@@ -8,7 +8,7 @@ pkg_check_modules(SWR REQUIRED IMPORTED_TARGET libswresample)
 add_library(mxlv_ingest STATIC src/ingest/av_input.cpp src/ingest/demux.cpp src/ingest/video_decode.cpp src/ingest/audio_decode.cpp)
 vramflow_warnings(mxlv_ingest)
 target_include_directories(mxlv_ingest PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(mxlv_ingest PUBLIC mxlv_timing mxlv_common PkgConfig::LIBAV PkgConfig::SWR mxl::mxl)
+target_link_libraries(mxlv_ingest PUBLIC mxlv_timing mxlv_common PkgConfig::LIBAV PkgConfig::SWR mxl::mxl CUDA::cudart_static)
 
 if(MXLV_BUILD_TESTS)
   # Gryna logika (be libav / MXL / GPU): tiekimo vartai, garso sekimas ir žiedas, H.264 skenavimas.
