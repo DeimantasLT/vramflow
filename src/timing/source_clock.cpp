@@ -100,6 +100,9 @@ void SourceClock::reset_drift() {
     ramp_acc_ = 0;
     ppm_ = 0;
     slope_ppm_ = 0;
+    windows_ = 0;
+    err_n_ = 0;
+    have_fb_base_ = false;
     switch_active_ = false;  // (per)fiksavimas — visi kadrai nuo šiol nauju poslinkiu
     last_slip_dir_ = 0;
     max_vpts_ = INT64_MIN;
@@ -158,11 +161,32 @@ bool SourceClock::close_window(std::int64_t arrival_ns) {
     // nuolydį dažnai nunulina, ir nesekama dreifo dalis kaupdavosi į atsargą be ribos (20 ppm — 200 ms per ~2,8 val. → perfiksavimas).
     // Už neutralios zonos (numatyta drift_limit / 4) pridedama (|e| − zona) / τ: pirmos eilės kilpa, nusistovėjusi paklaida ≤ zona +
     // τ · nesekamas dreifas (600 s · 20 ppm = 12 ms), be svyravimų. Viduje zonos — 0 (drebėjimas nevirsta rampa).
-    margin_err_ns_ = m_min - base_;
+    // Grįžtamojo ryšio atskaita — mažiausias pirmų kFeedbackBaseWindow langų po (per)fiksavimo m_min (žemutinė gaubtinė; ne vien
+    // pirmo lango, kaip apsaugos): pirmuose languose atsarga dar nusistovi, o vienas langas gali pagauti negilų sulaikymą / pliūpsnį —
+    // išmatuota: nuo pirmo lango atskaitos pliūpsnių šaltinis gavo ~57 ms paklaidą ir rampą (A/V +1,1 ms per 100 s, nors dreifo nėra).
+    ++windows_;
+    if (windows_ <= kFeedbackBaseWindow) {
+        fb_base_ = windows_ == 1 ? m_min : std::min(fb_base_, m_min);
+        have_fb_base_ = windows_ == kFeedbackBaseWindow;
+    }
+    margin_err_ns_ = have_fb_base_ ? m_min - fb_base_ : 0;
     const std::int64_t db = cfg_.margin_deadband_ns >= 0 ? cfg_.margin_deadband_ns : cfg_.drift_limit_ns / 4;
+    // Tik ilgalaikė paklaida: už zonos drift_windows langų iš eilės, ta pačia kryptimi; dydis — mažiausias iš jų (langų minimumų
+    // triukšmas — pvz. HLS segmentų vėlinimas 0–1 s — pavienis ir rampos nesukelia)
+    err_hist_[err_n_ % kErrHist] = have_fb_base_ ? margin_err_ns_ : 0;
+    ++err_n_;
     double fb = 0;
-    if (margin_err_ns_ > db) fb = static_cast<double>(margin_err_ns_ - db) / (cfg_.margin_tau_s * 1e9) * 1e6;
-    else if (margin_err_ns_ < -db) fb = static_cast<double>(margin_err_ns_ + db) / (cfg_.margin_tau_s * 1e9) * 1e6;
+    const int need = std::min(cfg_.drift_windows, kErrHist);
+    if (have_fb_base_ && err_n_ >= static_cast<std::uint64_t>(need)) {
+        std::int64_t lo = INT64_MAX, hi = INT64_MIN;
+        for (int k = 0; k < need; ++k) {
+            const std::int64_t v = err_hist_[(err_n_ - 1 - static_cast<std::uint64_t>(k)) % kErrHist];
+            lo = std::min(lo, v);
+            hi = std::max(hi, v);
+        }
+        if (lo > db) fb = static_cast<double>(lo - db) / (cfg_.margin_tau_s * 1e9) * 1e6;
+        else if (hi < -db) fb = static_cast<double>(hi + db) / (cfg_.margin_tau_s * 1e9) * 1e6;
+    }
     // drift_ppm — šaltinio laikrodžio nuokrypio įvertis (nuolydis); comp_ppm — taikoma rampa (nuolydis + grįžtamasis ryšys)
     // Grįžtamasis ryšys rampos nestumia virš 90 % biudžeto (nebent pats nuolydis jau ten): resampleris (AudioSync) turi turėti
     // atsargos sekti rampą, kitaip garsas atsilieka nuo off_a ir A/V viršija lauką (išmatuota: 0,5 % dreifas — 20,2 ms).

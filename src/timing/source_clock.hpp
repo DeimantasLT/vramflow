@@ -173,6 +173,13 @@ private:
     RelockInfo relock_;  // −1 — paskutinis slydimas −Tf, +1 — +Tf, 0 — nebuvo (histerezei)
     std::int64_t switch_pts_ = 0, off_v_prev_ = 0, max_vpts_ = INT64_MIN;
     std::int64_t margin_err_ns_ = 0;
+    static constexpr int kFeedbackBaseWindow = 3;  // grįžtamojo ryšio atskaita — šio lango po (per)fiksavimo m_min
+    int windows_ = 0;
+    static constexpr int kErrHist = 8;
+    std::array<std::int64_t, kErrHist> err_hist_{};
+    std::uint64_t err_n_ = 0;
+    bool have_fb_base_ = false;
+    std::int64_t fb_base_ = 0;
 
     std::atomic<bool> locked_pub_{false};
     std::atomic<std::int64_t> margin_err_pub_{0};
