@@ -311,6 +311,8 @@ def ingest_drift_accelerated(out):
                      why="; ".join(problems) + f" | drift_ppm {ppm:.0f} | " + summary_line(si, sv, a, ratio_ok(fv)), drift_ppm=ppm, ingest=si)]
 
 
+
+
 def ingest_pts_wrap(out):
     """US 5: PTS persiverčia per 2^33 (klipas su -output_ts_offset, persivertimas ~20-ą s): indeksai tęsiasi be spragos ir be
     pasikartojimo, A/V ≤ 1 laukas, wraps == 1, perfiksavimų nėra (relock_cont persivertimui nepadidėja)."""
@@ -357,6 +359,8 @@ class PlaylistServer:
                 path = h.path.split("?")[0]
                 srv.hits[path] = srv.hits.get(path, 0) + 1
                 body = srv.routes.get(path)
+                if callable(body):
+                    body = body()
                 if body is None:
                     return super().do_GET()
                 h.send_response(200)
@@ -789,6 +793,80 @@ def ingest_audio_absent_reconnect(out):
     return res
 
 
+def ingest_live_stats_fallback(out):
+    """B8: NVDEC neatsidaro (paslėptas --test-hw-decoder-fail) → programinis dekoderis su žurnalo eilute ir decoder_fallbacks == 1,
+    srautas veikia (A/V, ≥ 99,8 %); šaltinio skaitikliai — gyvai --stats-file eilutėse (flows[n].fn), ne tik pabaigoje:
+    Σ eilučių frames_decoded == santraukos, ne nulis bent 5 eilutėse prieš paskutinę."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_live_stats_fallback", "FAIL", why=why)]
+    import json
+    tid, port = "ingest_live_stats_fallback", BASE_PORT + 43
+    T = dur(20)
+    stats = pathlib.Path(out) / tid / "stats.jsonl"
+    stats.parent.mkdir(parents=True, exist_ok=True)
+    if stats.exists():
+        stats.unlink()
+    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"], [lambda: Sender.ts(out, f"{tid}/snd", CLIPS / "av_1080i50.ts", port)], T,
+                                  ("--stats-file", stats, "--test-hw-decoder-fail", 1))
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    fi = flow(si)
+    if fi.get("decoder_fallbacks", 0) != 1 or "perjungiama į programinį" not in err:
+        problems.append(f"decoder_fallbacks {fi.get('decoder_fallbacks')} / žurnale nėra perjungimo")
+    lines = []
+    for ln in (stats.read_text(errors="replace").splitlines() if stats.exists() else []):
+        try:
+            j = json.loads(ln)
+        except ValueError:
+            continue
+        if "flows" in j:
+            lines.append(((j["flows"][0].get("fn") or {}).get("frames_decoded")))
+    total = sum(x or 0 for x in lines)
+    live = sum(1 for x in lines[:-1] if x)
+    # Σ eilučių ≤ santrauka: kadrai, dekoduoti po paskutinio tick'o (variklis jau sustojo), eilutėse nebūna — ≤ 1 s (25 kadrai)
+    gap = (fi.get("frames_decoded") or 0) - total
+    if not lines or not 0 <= gap <= 25 or live < 5:
+        problems.append(f"stats eilutės: {len(lines)}, Σ frames_decoded {total} (santrauka {fi.get('frames_decoded')}), gyvų eilučių {live}")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | eilučių {len(lines)}, gyvų {live}, Σ {total} | " +
+                     summary_line(si, sv, a, r))]
+
+
+def ingest_hls_by_content(out):
+    """B8: HLS atpažįstamas pagal turinį — grojaraštis URL be .m3u8 galūnės (/live): latencija ≥ 3 segmentai, A/V ir ≥ 99,8 %."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_hls_by_content", "FAIL", why=why)]
+    tid = "ingest_hls_by_content"
+    T = dur(30)
+    work = pathlib.Path(out) / tid / "hls"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-i", str(CLIPS / "av_1080i50.ts"), "-c", "copy",
+                            "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work / "seg.log", "w"))
+    srv = PlaylistServer(work)
+    srv.routes["/live"] = lambda: (work / "live.m3u8").read_bytes() if (work / "live.m3u8").exists() else b""
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+        si, sv, ri, err, _ = run_case(out, tid, [srv.url("/live")], [], T, warm=10)
+    finally:
+        seg.terminate()
+        seg.wait()
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    lat = (si or {}).get("proc", {}).get("latency_ms")
+    if lat is None or lat < 3 * 2000:
+        problems.append(f"latencija {lat} ms < 3 segmentai (HLS neatpažintas?)")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | latencija {lat} ms | " + summary_line(si, sv, a, r))]
+
+
+
+
+
+
+
+
 def ingest_overload_skip(out):
     if (why := ensure_clips()):
         return [F.result("ingest_overload_skip", "FAIL", why=why)]
@@ -962,4 +1040,5 @@ TESTS = {"ingest_av_offset": ingest_av_offset, "ingest_hevc": ingest_hevc, "inge
          "ingest_progressive_chroma": ingest_progressive_chroma, "ingest_bad_url": ingest_bad_url, "ingest_no_video": ingest_no_video,
          "ingest_format_change": ingest_format_change, "ingest_unsupported": ingest_unsupported,
          "ingest_hls_security": ingest_hls_security, "ingest_hls_recursion_live": ingest_hls_recursion_live,
-         "ingest_secrets_redacted": ingest_secrets_redacted, "ingest_audio_absent_reconnect": ingest_audio_absent_reconnect}
+         "ingest_secrets_redacted": ingest_secrets_redacted, "ingest_audio_absent_reconnect": ingest_audio_absent_reconnect,
+         "ingest_live_stats_fallback": ingest_live_stats_fallback, "ingest_hls_by_content": ingest_hls_by_content}

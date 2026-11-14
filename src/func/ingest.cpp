@@ -141,7 +141,7 @@ struct Source {
     // statistika (gijos)
     Counter pkts_v{0}, pkts_a{0}, frames_decoded{0}, late_frames{0}, slip_drop_frames{0}, store_drops{0}, vdec_errors{0},
         adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0},
-        prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0};
+        prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0}, decoder_fallbacks{0}, reconnects_live{0};
     std::atomic<std::int64_t> comp_abs{0};
     // tick gija
     AVFrame* cur = nullptr;   // dabartinis kadras (interlaced — abu laukai)
@@ -218,6 +218,7 @@ void demux_thread(Source& s, Shared& c) {
         s.name, c.stop,
         [&](std::string& why) -> bool {
             if (!first) {
+                s.reconnects_live = s.reconnects;  // ta pati (demux) gija didina reconnects — gyvai statistikai (B8)
                 std::string err;
                 if (!s.demux.open(s.spec, c.stop, 0, err)) {
                     why = err;
@@ -283,6 +284,7 @@ void demux_thread(Source& s, Shared& c) {
 }
 
 // --- video dekodavimo gija ----------------------------------------------------------------------------------------
+constexpr std::uint64_t kDecodeFailStreak = 100;  // ~4 s 25p: paketų iš eilės su klaida be nė vieno kadro → dekoderis laikomas sugedusiu
 void store_frame(Source& s, ig::DecodedFrame& df) {
     AVFrame* f = df.f;
     const bool want_dev = f->format == AV_PIX_FMT_CUDA;
@@ -343,14 +345,29 @@ void video_thread(Source& s, Shared& c) {
     // NVDEC paviršių atsarga virš DPB: kadrai iškart nukopijuojami į savo baseiną (VideoDecoder::compact), todėl dekoderiui
     // pakanka vieno papildomo (numatyta 1; anksčiau atsarga · kadrų dažnis + 8 — kiekvienas laikomas kadras kainavo du buferius)
     const int extra = c.o.surfaces > 0 ? c.o.surfaces : 1;
+    // B8: dekoderis šaltiniui — NVDEC / cuvid, nepavykus (atidaryti arba ilgai nedekoduoja) — programinis (tas pats H.264 / HEVC
+    // 8 bitų 4:2:0 kelias, G variante kadrai įkeliami į GPU), su žurnalo eilute ir skaitikliu decoder_fallbacks. Programinis irgi
+    // nepavyko — šaltinis sustabdomas matomai (vieneto gedimas, kiti tęsia).
+    ig::Decoder cur_dec = c.decoder;
+    const AVCodecParameters* cur_par = s.vpar0;
     auto open = [&](const AVCodecParameters* par) {
-        if (!dec.open(par, c.decoder, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) {
-            s.stop_format(s.name + ": " + err);
-            return false;
+        cur_par = par;
+        std::string e1;
+        const bool hw_test_fail = c.o.test_hw_decoder_fail && cur_dec != ig::Decoder::Sw;
+        if (!hw_test_fail && dec.open(par, cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, e1)) return true;
+        if (hw_test_fail) e1 = std::string(ig::decoder_name(cur_dec)) + " atidaryti nepavyko (--test-hw-decoder-fail)";
+        if (cur_dec != ig::Decoder::Sw) {
+            log_line("ingest", s.name + ": " + e1 + " — perjungiama į programinį dekoderį");
+            ++s.decoder_fallbacks;
+            cur_dec = ig::Decoder::Sw;
+            if (dec.open(par, cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) return true;
+            e1 += "; programinis: " + err;
         }
-        return true;
+        s.stop_format(s.name + ": dekoderis: " + e1);
+        return false;
     };
     if (!open(s.vpar0)) return;
+    std::uint64_t streak = 0;  // paketų iš eilės su dekoderio klaida ir be naujo kadro
     bool need_key = true;  // po (re)atidarymo — nuo rakto kadro (be atramos kadrų dekoderis išvestų iškraipytą vaizdą)
     ig::DecodedFrame df;
     auto drain = [&] {
@@ -391,6 +408,7 @@ void video_thread(Source& s, Shared& c) {
         if (flush) dec.flush();
         // testinis dekoderio sulėtinimas — tik siunčiamiems paketams (kaip tikra dekodavimo kaina)
         if (c.o.test_decode_delay_ms) std::this_thread::sleep_for(std::chrono::milliseconds(c.o.test_decode_delay_ms));
+        const std::uint64_t errs0 = dec.errors(), frames0 = s.frames_decoded.load();
         int e = dec.send(it.p.pkt);
         while (e == AVERROR(EAGAIN) && !c.stop.load()) {
             drain();
@@ -398,10 +416,29 @@ void video_thread(Source& s, Shared& c) {
         }
         PacketQueue::drop(it);
         drain();
+        // gyva statistika (B8): skaitikliai — iškart, ne gijos pabaigoje
+        s.skip_runs = skip.skip_runs();
+        s.skip_dropped = skip.dropped();
+        s.vdec_errors = dec.errors();  // kaupiamas per atidarymus
+        streak = dec.errors() > errs0 && s.frames_decoded.load() == frames0 ? streak + 1 : 0;
+        if (streak >= kDecodeFailStreak) {
+            streak = 0;
+            if (cur_dec == ig::Decoder::Sw) {
+                s.stop_format(s.name + ": dekoderis nedekoduoja (" + std::to_string(kDecodeFailStreak) + " paketų iš eilės su klaida)");
+                break;
+            }
+            log_line("ingest", s.name + ": " + ig::decoder_name(cur_dec) + " nedekoduoja (" + std::to_string(kDecodeFailStreak) +
+                                   " paketų iš eilės su klaida) — perjungiama į programinį dekoderį");
+            ++s.decoder_fallbacks;
+            cur_dec = ig::Decoder::Sw;
+            if (!dec.open(cur_par, cur_dec, c.hw, c.to_device, c.o.threads, extra, c.dev, err)) {
+                s.stop_format(s.name + ": programinis dekoderis: " + err);
+                break;
+            }
+            need_key = true;
+            skip.reset();
+        }
     }
-    s.skip_runs = skip.skip_runs();
-    s.skip_dropped = skip.dropped();
-    s.vdec_errors = dec.errors();
 }
 
 // --- garso dekodavimo gija ----------------------------------------------------------------------------------------
@@ -528,6 +565,52 @@ struct IngestFn final : engine::TickFunction {
     }
 
     vramflow::Rational unit_rate(std::uint32_t n) const { return {erate.num, erate.den * stride[n]}; }
+
+    // B8: gyva šaltinio statistika --stats-file eilutėse (flows[n].fn): skirtumai stumiami kiekvieną tick'ą (Σ eilučių == santrauka)
+    static constexpr const char* kLive[] = {"pkts_video",     "pkts_audio",        "frames_decoded",       "late_frames",
+                                            "missing_frames", "repeat_frames",     "decode_errors",        "queue_drops",
+                                            "skip_dropped_pkts", "audio_silent_samples", "audio_absent_pkts", "input_reconnects",
+                                            "drift_slips",    "relocks",           "decoder_fallbacks"};
+    static constexpr std::size_t kNLive = sizeof kLive / sizeof kLive[0];
+    engine::StatsHub* hub = nullptr;
+    std::vector<engine::CounterId> live_id;
+    std::vector<std::uint64_t> live_last;
+    void register_live(engine::StatsHub& h) {
+        hub = &h;
+        for (const char* k : kLive) live_id.push_back(h.register_counter(k));
+        live_last.assign(src.size() * kNLive, 0);
+    }
+    static std::uint64_t live_value(const Source& s, std::size_t c) {
+        const timing::ClockStats cs = s.clock->stats();
+        switch (c) {
+            case 0: return s.pkts_v;
+            case 1: return s.pkts_a;
+            case 2: return s.frames_decoded;
+            case 3: return s.late_frames;
+            case 4: return s.missing_frames;
+            case 5: return s.repeat_frames;
+            case 6: return s.vdec_errors + s.adec_errors;
+            case 7: return s.vq.dropped() + s.aq.dropped();
+            case 8: return s.skip_dropped;
+            case 9: return s.audio_silent_samples;
+            case 10: return s.audio_absent_pkts;
+            case 11: return s.reconnects_live;
+            case 12: return cs.drift_slips;
+            case 13: return cs.relock_fresh + cs.relock_cont;
+            case 14: return s.decoder_fallbacks;
+            default: return 0;
+        }
+    }
+    void push_live() {
+        if (!hub) return;
+        for (std::size_t n = 0; n < src.size(); ++n)
+            for (std::size_t c = 0; c < kNLive; ++c) {
+                const std::uint64_t v = live_value(*src[n], c);
+                std::uint64_t& last = live_last[n * kNLive + c];
+                if (v > last) hub->count(static_cast<std::uint32_t>(n), live_id[c], v - last);
+                last = std::max(last, v);
+            }
+    }
 
     // Kadro F paėmimas iš žemėlapio (tiksliai F). Nėra, bet kitas jau laukia ir paskutinis buvo tikras — vienas pakartojimas
     // (frame sync: video slydimas +1 kadras arba vienas prarastas kadras).
@@ -691,6 +774,7 @@ struct IngestFn final : engine::TickFunction {
 
     void end_tick(engine::Index i, engine::TickContext&) override {
         const mxlRational r = mxl_rate(erate);
+        push_live();
         const std::uint64_t t_done = now_tai();
         if (static_cast<double>(t_done) >= warm) {
             st.add_hist("split_ms", t_done - t_wake);
@@ -997,6 +1081,7 @@ int run_ingest(const Opts& o_in) {
     }
     // 5. Šaltinių gijos (demux, video, garsas) jau veikia nuo zondavimo
     IngestFn fn(o, st, src, stride, aout, inst, cpu, stream, pool, warm_tai_after(o.warmup_s), erate);
+    fn.register_live(hub);
     bool engine_loss = false;
     std::uint32_t failed = 0;
     engine::RunResult res;
@@ -1045,6 +1130,7 @@ int run_ingest(const Opts& o_in) {
         f.inc("audio_resyncs", s.audio_resyncs);
         f.inc("audio_absent", s.audio_absent);            // sesijos be garso (nėra srauto / dekoderis neatsidarė) — flow'e tyla (A2)
         f.inc("audio_absent_pkts", s.audio_absent_pkts);  // tų sesijų garso paketai — išmesti
+        f.inc("decoder_fallbacks", s.decoder_fallbacks);  // NVDEC / cuvid → programinis (B8)
         f.inc("audio_comp_samples", static_cast<std::uint64_t>(s.comp_abs.load()));
         f.inc("wraps", cs.wraps);
         f.inc("discontinuities", cs.discontinuities);

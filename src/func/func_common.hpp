@@ -173,7 +173,8 @@ struct Opts {
     double max_comp_ppm = 1000;
     std::uint32_t test_decode_delay_ms = 0;  // paslėpta: dirbtinis dekoderio sulėtinimas kiekvienam paketui (perkrovos testui)
     // A1: HLS #EXT-X-TARGETDURATION riba (s) ir garso žiedo riba šaltiniui (MB); viršijus — tas šaltinis atmetamas su aiškia klaida
-    bool test_audio_reopen_fail = false;  // paslėpta (A2 testui): kiekvienas garso dekoderio atidarymas po pirmo nepavyksta
+    bool test_audio_reopen_fail = false;
+    bool test_hw_decoder_fail = false;  // paslėpta (B8 testui): NVDEC / cuvid atidarymas nepavyksta → programinis  // paslėpta (A2 testui): kiekvienas garso dekoderio atidarymas po pirmo nepavyksta
     double hls_max_target_s = 30;
     std::uint32_t max_audio_ring_mb = 256;
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
