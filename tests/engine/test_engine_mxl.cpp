@@ -526,4 +526,11 @@ TEST_CASE("engine_mxl: prisijungimas ir atjungimas tick'o kelyje neblokuoja (ite
     CHECK(slot.reattached() == 10);
     CHECK(median(adopt_ms) < 0.15);
     CHECK(median(detach_ms) < 0.15);
+    // Round 9 (C): mediana praleistų ir 5 iš 11 blokuojančių (~18 ms) kvietimų — todėl ir blogiausias atvejis. Riba 5 ms: ≥ 3,5 karto
+    // mažiau nei vienas blokuojantis reader'io kūrimas / atvaizdavimas, bet su atsarga planuoklio išstūmimui lygiagrečiame ctest.
+    const double max_adopt = adopt_ms.empty() ? 1e9 : *std::max_element(adopt_ms.begin(), adopt_ms.end());
+    const double max_detach = detach_ms.empty() ? 1e9 : *std::max_element(detach_ms.begin(), detach_ms.end());
+    CHECK(max_adopt < 5.0);
+    CHECK(max_detach < 5.0);
+    CHECK(worst_attach_ms < 5.0);  // ir neprijungiantys attach_poll kvietimai
 }
