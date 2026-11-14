@@ -21,7 +21,8 @@
 namespace mxlv::func {
 
 // Flow rolės identifikatoriuose: 4d584c47-00RR-4000-8000-%012x
-enum Role : int { kRoleGen = 1, kRoleLogo = 2, kRoleAudio = 3, kRoleDec = 4, kRoleGfx = 5, kRoleComp = 6 };
+// 07 / 08 — ingest video / garsas (planas §P3): numeris = šaltinio eilės numeris + --flow-base.
+enum Role : int { kRoleGen = 1, kRoleLogo = 2, kRoleAudio = 3, kRoleDec = 4, kRoleGfx = 5, kRoleComp = 6, kRoleIngest = 7, kRoleIngestAudio = 8 };
 
 std::string flow_id(int role, std::uint32_t n);
 // extra_tags — papildomos flow aprašo žymos (briaunos sutartis V24: engine::timing_tags_json; prasideda kableliu).
@@ -37,6 +38,9 @@ std::string gfx_def(std::uint32_t n, std::uint32_t k, const vramflow::VideoForma
                     const std::string& extra_tags = {});
 std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint64_t run_seed, const std::string& extra_tags = {});
 std::string audio_def(std::uint32_t n, std::uint64_t run_seed, const std::string& extra_tags = {});
+// ingest garsas: flow_id(kRoleIngestAudio, n), channels kanalų; grouphint grupė — ta pati kaip šaltinio video
+// (video_def(kRoleIngest, n)), kad žemupys juos matytų kaip vieną rinkinį.
+std::string ingest_audio_def(std::uint32_t n, std::uint64_t run_seed, int channels, const std::string& extra_tags = {});
 // Flow aprašas (mxlGetFlowDef); klaida (flow'o nėra) — tuščia eilutė ir err.
 std::string read_flow_def(mxlInstance inst, const std::string& flow, std::string& err);
 
@@ -157,7 +161,8 @@ struct AudioOut {
     std::uint64_t last_end = 0;
     bool existed = false;  // create: flow jau egzistavo (gyvas kitas writer'is)
     // grain_rate — video grain'o ritmas: rašymo riba turi talpinti ilgiausią grain'ą (vramflow::max_samples_per_grain).
-    bool create(mxlInstance inst, const std::string& def, std::string& err, vramflow::Rational grain_rate = {50, 1});
+    // channels — laukiamas kanalų skaičius (flow aprašo channel_count; numatyta 2).
+    bool create(mxlInstance inst, const std::string& def, std::string& err, vramflow::Rational grain_rate = {50, 1}, int channels = 2);
     // Rašo count mėginių, kurių paskutinis (išskirtinis) indeksas = end. fill(ch, sample_index) → float.
     template <class F>
     mxlStatus write(std::uint64_t end, std::uint32_t count, F&& fill);

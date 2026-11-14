@@ -80,6 +80,18 @@ std::string audio_def(std::uint32_t n, std::uint64_t run_seed, const std::string
     return b;
 }
 
+std::string ingest_audio_def(std::uint32_t n, std::uint64_t run_seed, int channels, const std::string& extra_tags) {
+    char b[1024];
+    std::snprintf(b, sizeof b,
+                  R"({"id":"%s","description":"vramflow-func ingest audio %u","label":"vramflow-func %d/%u",)"
+                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:Audio %u"]%s},)"
+                  R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
+                  R"("channel_count":%d,"bit_depth":32,"parents":[]})",
+                  flow_id(kRoleIngestAudio, n).c_str(), n, kRoleIngestAudio, n, static_cast<unsigned long long>(run_seed), kRoleIngest, n,
+                  extra_tags.c_str(), channels);
+    return b;
+}
+
 std::uint64_t now_tai() { return mxlGetTime(); }
 
 bool ClockWatch::stepped() {
@@ -382,13 +394,16 @@ void VideoIn::release(mxlInstance inst) {
 }
 
 // --- Audio ------------------------------------------------------------------------------------------------------------
-bool AudioOut::create(mxlInstance inst, const std::string& def, std::string& err, vramflow::Rational grain_rate) {
+bool AudioOut::create(mxlInstance inst, const std::string& def, std::string& err, vramflow::Rational grain_rate, int channels) {
     mxlFlowConfigInfo cfg{};
     bool created = false;
     const mxlStatus st = mxlCreateFlowWriter(inst, def.c_str(), nullptr, &w, &cfg, &created);
     if (st != MXL_STATUS_OK) { w = nullptr; err = "audio mxlCreateFlowWriter status " + std::to_string(st); return false; }
     if (!created) { existed = true; err = "audio flow jau egzistavo (created=false)"; return false; }
-    if (cfg.continuous.channelCount != 2) { err = "audio kanalų ne 2"; return false; }
+    if (cfg.continuous.channelCount != static_cast<std::uint32_t>(channels)) {
+        err = "audio kanalų " + std::to_string(cfg.continuous.channelCount) + " ne " + std::to_string(channels);
+        return false;
+    }
     std::size_t maxw = 0;
     const std::uint32_t need = vramflow::max_samples_per_grain(grain_rate);
     if (need == 0) { err = "audio: netinkamas grain'o dažnis"; return false; }

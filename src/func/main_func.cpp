@@ -17,6 +17,7 @@ int run_composite(const Opts&);
 int run_verify(const Opts&);
 int run_enc(const Opts&);
 int run_dec(const Opts&);
+int run_ingest(const Opts&);
 int run_clip(const Opts&, std::uint32_t frames, std::uint64_t first_field);
 int run_ref_crc(const Opts&, const std::string& path);
 int run_split_raw(const Opts&, const std::string& in, const std::string& out, bool frame_chroma);
@@ -150,7 +151,7 @@ int main(int argc, char** argv) {
     auto* v = app.add_subcommand("verify", "išėjimo flow'ų patikra su CPU etalonu");
     common(v, o);
     inputs(v, o);
-    v->add_option("--mode", o.mode, "logo | gen | dec | composite | audio (gen garso flow'ai: garsas arba tyla)");
+    v->add_option("--mode", o.mode, "logo | gen | dec | composite | audio (gen garso flow'ai: garsas arba tyla) | ingest (A/V žymės)");
     // --mode composite: tie patys parametrai kaip gfxgen / composite (verify atkuria laukiamą išėjimą CPU etalonu)
     v->add_option("--layers", o.layers, "composite: sluoksnių skaičius išėjimui, 1…8")->check(CLI::Range(1u, 8u));
     v->add_option("--layer-geom", o.layer_geom, "composite: kaip gfxgen (logo,full,… arba WxH); turi sutapti su gfxgen");
@@ -164,6 +165,10 @@ int main(int argc, char** argv) {
     v->add_option("--every", o.every);
     v->add_option("--lag-fields", o.lag_fields);
     v->add_option("--ref", o.ref_crc);
+    v->add_option("--video", o.video, "ingest: tikrinti video flow'us (numatyta 1)");
+    v->add_option("--audio", o.audio, "ingest: tikrinti garso flow'us (numatyta 0)");
+    v->add_option("--dump-dir", o.dump_dir, "ingest: pirmų --dump-count galiojančių grain'ų v210 failai į šį katalogą");
+    v->add_option("--dump-count", o.dump_count, "ingest: kiek grain'ų išsaugoti (numatyta 0)");
     v->add_option("--min-chroma-db", o.min_chroma_db, "dec: Cb/Cr PSNR prieš gen etaloną (šaltinio indeksas iš barkodo) >= riba; 0 — netikrinama");
     auto* e = app.add_subcommand("enc", "MXL → H.264 + AAC MPEG-TS per UDP");
     common(e, o);
@@ -196,6 +201,25 @@ int main(int argc, char** argv) {
         ->check(CLI::Range(100u, 600000u));
     d->add_option("--chroma-siting", o.chroma_siting, "interlaced flow'ui: auto (pagal kadro žymę) | field | frame")
         ->check(CLI::IsMember({"auto", "field", "frame"}));
+    auto* ig = app.add_subcommand("ingest", "tikras šaltinis su garsu: MPEG-TS per UDP / RTP / SRT, HLS → video + garso MXL flow'ai (PTS)");
+    common(ig, o);
+    writers(ig, o);
+    ig->add_option("--input", o.inputs, "šaltinio URL (kartoti): udp://127.0.0.1:20000, rtp://…, srt://…, http://…/live.m3u8, failas")->required();
+    ig->add_option("--decoder", o.decoder, "nvdec (h264/hevc + hwaccel cuda; numatyta) | cuvid (h264_cuvid) | sw (programinis)")
+        ->check(CLI::IsMember({"nvdec", "cuvid", "sw"}));
+    ig->add_option("--latency-ms", o.latency_ms, "latencija: kadras rodomas tiek ms po atvykimo (numatyta 1000; HLS — ne mažiau kaip 3 segmentai)")
+        ->check(CLI::Range(50u, 60000u));
+    ig->add_option("--decode-lead-ms", o.decode_lead_ms, "paketas į dekoderį ne anksčiau kaip tiek ms prieš savo laiką (numatyta 400)")
+        ->check(CLI::Range(20u, 10000u));
+    ig->add_option("--surfaces", o.surfaces, "nvdec: papildomų kadrų baseinas (0 — auto)")->check(CLI::Range(0, 64));
+    ig->add_option("--audio", o.ingest_audio, "garso flow'as (numatyta 1)");
+    ig->add_option("--audio-channels", o.audio_channels, "garso kanalai MXL flow'e (numatyta 2)")->check(CLI::Range(1, 16));
+    ig->add_option("--input-wait-s", o.input_wait_s, "kiek laukti šaltinio duomenų paleidžiant, s (< 0 — neribotai; numatyta)");
+    ig->add_option("--input-silence-ms", o.input_silence_ms, "šaltinis tylus ilgiau nei tiek ms → jungiamasi iš naujo (numatyta 2000)")
+        ->check(CLI::Range(100u, 600000u));
+    ig->add_option("--max-comp-ppm", o.max_comp_ppm, "garso dreifo kompensacijos riba, ppm (K6: 1000 = ±0,1 %; numatyta)")
+        ->check(CLI::Range(10.0, 20000.0));
+    ig->add_option("--test-decode-delay-ms", o.test_decode_delay_ms)->group("");  // perkrovos testui
     std::uint32_t clip_frames = 250;
     std::uint64_t clip_first = 1000;
     auto* cl = app.add_subcommand("clip", "bandomojo klipo raw NV12 kadrai į stdout (CPU etalonas)");
@@ -229,7 +253,8 @@ int main(int argc, char** argv) {
         ->check(CLI::NonNegativeNumber);
     CLI11_PARSE(app, argc, argv);
     if (app.got_subcommand("keepwarm")) return run_keepwarm(kw, o.device_uuid);  // ne MXL funkcija: be domeno ir nuomos
-    {
+    if (app.got_subcommand("ingest") && ig->count("--format") == 0) o.format = "auto";  // ingest: formatas — iš srauto
+    if (!(app.got_subcommand("ingest") && o.format == "auto")) {
         std::string why;
         if (!vramflow::parse_format(o.format, o.fmt, why) || !vramflow::format_supported(o.fmt, why)) {
             std::fprintf(stderr, "--format: %s\n", why.c_str());
@@ -274,5 +299,6 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("verify")) return run_verify(o);
     if (app.got_subcommand("enc")) return run_enc(o);
     if (app.got_subcommand("dec")) return run_dec(o);
+    if (app.got_subcommand("ingest")) return run_ingest(o);
     return 1;
 }

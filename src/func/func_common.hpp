@@ -158,6 +158,23 @@ struct Opts {
     std::string chroma_siting = "auto";
     std::string ref_crc;
     double min_chroma_db = 0;  // verify --mode dec: chromos PSNR prieš gen etaloną (0 — netikrinama)
+    // ingest (planas §P3): šaltinių URL (udp:// rtp:// srt:// http(s)://….m3u8, failas); dekoderis nvdec | cuvid | sw; latencija
+    // (K7: TAI = atvykimas + latencija; HLS — ≥ 3 segmentai); dekodavimo atsarga (paketas į dekoderį ne anksčiau kaip tiek prieš
+    // DTS); NVDEC paviršių atsarga (0 — auto: atsarga · kadrų dažnis + 8); garsas ir kanalai; zondavimo laukimas (< 0 — neribotai);
+    // garso kompensacijos biudžetas (K6: 1000 ppm = ±0,1 %).
+    std::vector<std::string> inputs;
+    std::string decoder = "nvdec";
+    std::uint32_t latency_ms = 1000;
+    std::uint32_t decode_lead_ms = 400;
+    int surfaces = 0;
+    bool ingest_audio = true;
+    int audio_channels = 2;
+    double input_wait_s = -1;
+    double max_comp_ppm = 1000;
+    std::uint32_t test_decode_delay_ms = 0;  // paslėpta: dirbtinis dekoderio sulėtinimas kiekvienam paketui (perkrovos testui)
+    // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
+    std::string dump_dir;
+    std::uint32_t dump_count = 0;
 };
 
 // keepwarm (keepwarm.cpp): GPU laikoma virš P8 — užpildymas size_mb kas interval_ms; duration_s 0 — iki sustabdymo.
@@ -310,6 +327,6 @@ std::string exists_note(mxlInstance inst, const Opts& o, const std::string& flow
 bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const std::string& def, const std::string& options,
                    const vramflow::VideoFormat& f, const Opts& o, std::string& err);
 bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
-                   const Opts& o, std::string& err);
+                   const Opts& o, std::string& err, int channels = 2);
 
 }  // namespace mxlv::func

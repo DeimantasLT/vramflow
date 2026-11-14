@@ -386,7 +386,9 @@ void to_summary(const engine::StatsHub& hub, const engine::TickEngine& eng, cons
             continue;  // enc — be MXL išėjimų (spragų politika taikoma tik MXL rašytojams)
         }
         // K3: kiek spragų commit'inta kokiu veiksmu (išėjimo skaitikliai; vienas išėjimas vienetui). gap_startup — paleidimo
-        // spragos (įėjimas dar niekada neprisijungė, --start immediate) — ne praradimas.
+        // spragos (įėjimas dar niekada neprisijungė, --start immediate) — ne praradimas. Vienetas be video išėjimo (ingest tik
+        // garso šaltinis) — be jų.
+        if (!eng.unit_outputs(n)) continue;
         const engine::OutCounters& oc = hub.out(eng.out_id(n, 0));
         put(st.flows[n].c, "gap_invalid", oc.gap_invalid);
         put(st.flows[n].c, "gap_frozen", oc.gap_frozen);

@@ -129,8 +129,8 @@ bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const
 }
 
 bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
-                   const Opts& o, std::string& err) {
-    if (out.create(inst, def, err, grain_rate)) {
+                   const Opts& o, std::string& err, int channels) {
+    if (out.create(inst, def, err, grain_rate, channels)) {
         lease_output(id);
         return true;
     }

@@ -43,6 +43,7 @@
 namespace mxlv::func {
 
 bool load_logo(Opts& o, media::ref::Logo& logo, std::string& err);
+int verify_ingest(const Opts& o, Stats& st, std::string& extra);  // verify_ingest.cpp
 
 namespace {
 // Generatoriaus parametrai flow'ui (turinys priklauso nuo grain'o dažnio — sync blyksnis kartą per sekundę).
@@ -464,6 +465,14 @@ int run_verify(const Opts& o_in) {
     if (o.mode == "audio") {
         const int rc = verify_audio(o, st);
         return finish(rc ? rc : summarize(st));
+    }
+    if (o.mode == "ingest") {  // A/V žymės, žymių tolydumas, garso trūkiai (verify_ingest.cpp); santrauka su "ingest" masyvu
+        std::string extra;
+        const int rc = verify_ingest(o, st, extra);
+        st.exit_code = rc ? rc : summarize(st);
+        write_summary(o, "verify-ingest", st, extra);
+        std::fprintf(stderr, "[verify ingest] baigta, exit %d %s\n", st.exit_code, st.fatal.c_str());
+        return st.exit_code;
     }
     if (!logo_mode && !dec_mode && o.mode != "gen") { st.fatal = "nežinomas --mode " + o.mode; return finish(1); }
     // dec: etalonas barkodas → laukų CRC32C iš programinio dekoderio (ref-crc); be --ref tikrinamas tik barkodas
