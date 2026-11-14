@@ -104,3 +104,46 @@ TEST_CASE("engine: UntilA sluoksnis vienam indeksui vėluoja iki B — tik tas i
     CHECK(r.seen[1049].layer);
     CHECK_FALSE(res.any_loss);
 }
+
+// Item 0 (b): sluoksnio (UntilA) grain'as perrašytas apdorojimo metu (lap) — programa nepraranda indekso: tas kadras
+// sukomponuojamas iš naujo BE sluoksnio (process antrą kartą, sluoksnio ptr == nullptr) ir commit'inamas kaip turinys.
+TEST_CASE("engine: UntilA sluoksnio lap'as — tas kadras be sluoksnio, programa tęsia be spragos", "[engine][layers][lap]") {
+    LayerRig r(3'000'000);
+    r.layer.lapped_at = [](Index j) { return j == 1050; };
+    std::map<Index, int> calls;
+    auto rec = r.fn.on_process;
+    r.fn.on_process = [&](const Batch& b, TickContext& c) {
+        for (const UnitTick& ut : b.units) ++calls[ut.index];
+        rec(b, c);
+    };
+    const RunResult res = r.eng->run(r.fn);
+    REQUIRE(r.seen.count(1050) == 1);
+    CHECK_FALSE(r.seen[1050].layer);  // paskutinis apdorojimas — be sluoksnio
+    CHECK(calls[1050] == 2);          // pirmas su sluoksniu (lap), antras — be jo
+    CHECK(calls[1049] == 1);
+    CHECK(r.seen[1049].layer);
+    CHECK(r.seen[1051].layer);
+    const auto* g = r.out.find(1050);
+    REQUIRE(g != nullptr);
+    CHECK(g->kind == RecordingOutput::Kind::Commit);  // turinys, ne spraga
+    CHECK(r.hub.out(r.eng->out_id(r.id, 0)).lapped == 0);
+    CHECK(r.hub.unit(r.eng->unit_id(r.id)).lapped == 0);
+    CHECK(r.hub.in(r.eng->in_id(r.id, 1)).lost == 1);  // sluoksnio būsena: tam kadrui prarastas
+    CHECK_FALSE(res.any_loss);
+    bool ready = false;
+    for (const auto& e : r.fn.ends)
+        if (e.index == 1050) ready = e.outcome == Outcome::Ready;
+    CHECK(ready);
+}
+
+// Būtino įėjimo (bazės) lap'as — kaip anksčiau: atšaukiama, spraga pagal politiką (lapped).
+TEST_CASE("engine: bazės lap'as su sluoksniu — spraga kaip anksčiau", "[engine][layers][lap]") {
+    LayerRig r(3'000'000);
+    r.base.lapped_at = [](Index j) { return j == 1050; };
+    const RunResult res = r.eng->run(r.fn);
+    const auto* g = r.out.find(1050);
+    REQUIRE(g != nullptr);
+    CHECK(g->kind == RecordingOutput::Kind::Gap);
+    CHECK(r.hub.unit(r.eng->unit_id(r.id)).lapped == 1);
+    CHECK(res.any_loss);
+}

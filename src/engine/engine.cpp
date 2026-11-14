@@ -592,10 +592,55 @@ struct TickEngine::Impl {
                 if (in.spec.need == Need::Wanted && !in.done && in.st.live()) try_resolve(u, in);
             }
         }
-        const Index now_idx = due_index(clk.now_tai(), cfg.cuts);
         const std::int64_t done_at = now();
         for (const UnitTick& ut : batch) {
             Unit& u = units[ut.unit];
+            // T12 lap'as. Būtinas įėjimas perrašytas apdorojimo metu — indeksas atšaukiamas (spraga pagal politiką). Neprivalomas
+            // (sluoksnis: UntilA / Wanted / Optional) — tik jis tam kadrui nebenaudojamas: vienetas apdorojamas iš naujo be jo
+            // (ptr == nullptr; įėjimo lost++, ne vieneto praradimas), programa lieka be spragos (item 0 b). Perapdorojimų — ne
+            // daugiau nei neprivalomų įėjimų (kiekvienas atmetamas ne daugiau kaip kartą).
+            bool lap = false;
+            while (!u.failed && !ended) {
+                const Index now_idx = due_index(clk.now_tai(), cfg.cuts);
+                bool dropped = false;
+                for (std::uint32_t k = 0; k < u.nin && !lap; ++k) {
+                    In& in = ins[u.in0 + k];
+                    if (!in.ok) continue;
+                    const Index j = jidx(u, in);
+                    bool l = false;
+                    for (std::uint32_t g = 0; g < in.spec.grains; ++g)
+                        if (in.spec.port->lapped(j - (in.spec.grains - 1) + g, now_idx)) l = true;
+                    if (!l) continue;
+                    if (in.spec.need == Need::Required) {
+                        lap = true;
+                        break;
+                    }
+                    for (std::uint32_t g = 0; g < in.spec.grains; ++g) grefs[u.g0 + in.g + g] = GrainRef{};
+                    in.ok = false;
+                    in.done = true;
+                    ++hub.in(in.hub).lost;
+                    dropped = true;
+                }
+                if (lap || !dropped) break;
+                const UnitTick one = ut;
+                const bool again = fn->process(Batch{idx, phase, std::span<const UnitTick>(&one, 1)}, ctx);
+                ++r.calls;
+                ++hub.engine().process_calls;
+                if (!again) {
+                    for (const UnitTick& t : batch) {
+                        Unit& v = units[t.unit];
+                        v.busy = false;
+                        if (v.stage == Stage::None) continue;
+                        if (v.slots_open)
+                            for (std::uint32_t m = 0; m < v.nout; ++m) outs[v.out0 + m].port->cancel();
+                        v.slots_open = false;
+                        v.stage = Stage::None;
+                        --pending;
+                    }
+                    end_fatal(EndReason::Fatal, 2, "TickFunction::process grąžino false");
+                    return;
+                }
+            }
             count_inputs(u, r);
             if (u.failed) {  // fail_unit iš process(): išėjimai jau atšaukti ir atlaisvinti — tik užbaigiamas (vieną kartą)
                 ++hub.unit(u.hub).gaps;
@@ -603,14 +648,6 @@ struct TickEngine::Impl {
                 u.busy = false;
                 resolve_unit(u);
                 continue;
-            }
-            bool lap = false;  // T12
-            for (std::uint32_t k = 0; k < u.nin && !lap; ++k) {
-                const In& in = ins[u.in0 + k];
-                if (!in.ok) continue;
-                const Index j = jidx(u, in);
-                for (std::uint32_t g = 0; g < in.spec.grains; ++g)
-                    if (in.spec.port->lapped(j - (in.spec.grains - 1) + g, now_idx)) lap = true;
             }
             UnitCounters& uc = hub.unit(u.hub);
             Outcome oc = Outcome::Ready;
