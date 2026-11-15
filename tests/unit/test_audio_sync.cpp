@@ -163,3 +163,31 @@ TEST_CASE("audio_ring: B4 — senos ašies garsas atmetamas nuo „dabar“ su u
     CHECK(worst <= 0.5f / 240 + 1e-4f);  // tolygus užgesinimas, be šuolio
     CHECK(r.truncate(5000, 240) == 0);  // už head — nieko
 }
+TEST_CASE("audio_sync: M2 — perfiksavimo žymė: kitas kadras pririšamas tiksliai, ne kompensuojamas", "[ingest][audio_sync]") {
+    AudioSync s;
+    CHECK(s.on_frame(48000).resync);
+    s.produced(1024);
+    // be žymės: 500 mėginių (≤ hard_samples 960) — kompensacija, garsas liktų atsilikęs ~10 ms ilgai (1000 ppm — ~10 s)
+    {
+        AudioSync t = s;
+        const AudioSyncStep st = t.on_frame(49024 + 500);
+        CHECK_FALSE(st.resync);
+        CHECK(st.comp == 500);
+    }
+    s.realign();
+    const AudioSyncStep st = s.on_frame(49024 + 500);
+    CHECK(st.resync);
+    CHECK(s.next() == 49524);
+    CHECK(s.realigns() == 1);
+    CHECK(s.resyncs() == 0);  // perfiksavimo perinkaravimas skaičiuojamas atskirai (audio_resyncs — tik paties sekimo)
+    s.produced(1024);
+    // žymė, bet garsas tolydus (|err| ≤ deadband) — nieko nekeičiama, perėjimo nėra
+    s.realign();
+    const AudioSyncStep st2 = s.on_frame(50548);
+    CHECK_FALSE(st2.resync);
+    CHECK(st2.comp == 0);
+    CHECK(s.realigns() == 1);
+    // žymė vienkartinė
+    s.produced(1024);
+    CHECK_FALSE(s.on_frame(51572 + 300).resync);
+}

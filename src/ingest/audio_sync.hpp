@@ -49,6 +49,15 @@ public:
         }
         s.err = expected_next - next_;
         const std::int64_t a = s.err < 0 ? -s.err : s.err;
+        if (realign_) {  // M2: perfiksavimas — pririšama tiksliai (garsas ir video pjaunami ir sulyginami tame pačiame taške)
+            realign_ = false;
+            if (a > c_.deadband) {
+                next_ = expected_next;
+                s.resync = true;
+                ++realigns_;
+                return s;
+            }
+        }
         if (a > c_.hard_samples) {
             next_ = expected_next;
             s.resync = true;
@@ -64,13 +73,17 @@ public:
     std::int64_t next() const { return next_; }
     bool started() const { return started_; }
     void reset() { started_ = false; }
+    // M2: šaltinio laiko ašis perfiksuota — kitas kadras pririšamas tiksliai, jei |err| > deadband (ne kompensuojamas lėtai:
+    // ≤ hard_samples šuolis kitaip garsą paliktų pasislinkusį iki 20 ms dešimtis sekundžių)
+    void realign() { realign_ = true; }
     std::uint64_t resyncs() const { return resyncs_; }
+    std::uint64_t realigns() const { return realigns_; }
 
 private:
     AudioSyncConfig c_;
-    bool started_ = false;
+    bool started_ = false, realign_ = false;
     std::int64_t next_ = 0;
-    std::uint64_t resyncs_ = 0;
+    std::uint64_t resyncs_ = 0, realigns_ = 0;
 };
 
 class AudioRing {

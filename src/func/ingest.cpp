@@ -66,6 +66,9 @@ struct QItem {
     AVCodecParameters* par = nullptr;  // != nullptr — nauja sesija (dekoderis atidaromas iš naujo); savininkas — eilė / gija
     bool no_stream = false;            // nauja sesija be šio srauto (A2: garso nebėra po prisijungimo iš naujo)
     bool flush = false;                // B4: perfiksavimas — dekoderis išvalomas, laukę kadrai išmetami, pradedama nuo įėjimo taško
+    std::uint64_t cut_frame = 0;       // M2 (flush): išmetami kadrai, kurių indeksas ≥ šio (tas pats pjūvio momentas kaip garso)
+    bool resync = false;               // M2: perfiksavimas — garsas pririšamas prie naujos ašies (AudioSync::realign)
+    std::int64_t cut_sample = INT64_MIN;  // M2 (resync): garso žiedas nupjaunamas čia (INT64_MIN — nepjauti)
 };
 
 // Eilės elementų savybės (ingest/packet_queue.hpp): baitai — paketo dydis (žymės — 0), atlaisvinimas.
@@ -117,7 +120,7 @@ struct Source {
     Counter pkts_v{0}, pkts_a{0}, frames_decoded{0}, late_frames{0}, slip_drop_frames{0}, store_drops{0}, vdec_errors{0},
         adec_errors{0}, audio_resyncs{0}, skip_runs{0}, skip_dropped{0}, audio_chunks{0}, stamp_dropped{0}, flag_mismatch{0},
         prestart_dropped{0}, audio_absent{0}, audio_absent_pkts{0}, decoder_fallbacks{0}, reconnects_live{0}, entry_dropped{0},
-        no_entry_point{0}, probe_scan_dropped{0}, relock_events{0}, relock_flushed_pkts{0}, relock_flushed_frames{0}, audio_fades{0};
+        no_entry_point{0}, probe_scan_dropped{0}, relock_events{0}, relock_flushed_pkts{0}, relock_flushed_frames{0}, audio_fades{0}, audio_relock_resyncs{0};
     std::uint64_t relock_seen = 0;  // demux gija: paskutinis apdorotas RelockInfo::seq
     std::atomic<std::int64_t> comp_abs{0};
     // tick gija
@@ -192,6 +195,8 @@ std::string frame_desc(const AVFrame* f, bool inter) {
 // B4: perfiksavimas — aiškus įvykis: žurnalo eilutė su priežastimi ir dydžiu, skaitiklis (santrauka, gyva statistika). Jei poslinkis
 // pasikeitė ≥ pusę kadro, eilėje laukiantys video paketai (pažymėti SENU poslinkiu — kitaip jie liktų su juo, kai šuolis didesnis už
 // dekodavimo atsargą) išmetami ir video gija pradeda nuo įėjimo taško nauju poslinkiu; garsas perjungiamas su perėjimu (AudioRing).
+constexpr std::int64_t kRelockAbsorbNs = 20'000'000;  // M2: tiek sandūros šuolio sugeriama be pjūvio (AudioSync hard_samples 960 / 48 kHz)
+
 void on_relock(Source& s) {
     const timing::RelockInfo ri = s.clock->last_relock();
     if (ri.seq == s.relock_seen) return;  // epochą pradėjęs garsas — tik video tinklelio nustatymas, ne perfiksavimas
@@ -200,21 +205,41 @@ void on_relock(Source& s) {
     char b[96];
     std::snprintf(b, sizeof b, "%+.1f ms", static_cast<double>(ri.step_ns) / 1e6);
     std::string what = s.name + ": perfiksavimas — " + timing::relock_reason_name(ri.reason) + ", poslinkis " + b;
-    const std::int64_t tf = s.video ? timing::time_of(1, s.fmt.frame_rate) : 0;
-    // Šuolis ≥ pusė kadro (be video — ≥ 20 ms): kas senoje ašyje dar nepateikta, atmetama ABIEM srautams nuo „dabar“ (+ 2 grain'ai):
-    // eilės video ir garso paketai, dekoduoti kadrai (video gija, žymė flush), garso žiedas (su užgesinimu). Naujas turinys — nauju
-    // poslinkiu po latencijos; A/V santykis išlieka (anksčiau garsas šokdavo / tildavo, o eilės video likdavo su senu poslinkiu).
-    if (std::llabs(ri.step_ns) * 2 >= (tf > 0 ? tf : 40'000'000)) {
+    // M2: sandūros trūkis / persidengimas ≤ 20 ms (= AudioSync hard_samples, vienas 50 Hz garso blokas) sugeriamas vietoje: video —
+    // ≤ 1 kadras (frame sync: pakartojimas / slip_drop), garsas — pririšamas prie naujos ašies (žymė resync, 5 ms perėjimas).
+    // Anksčiau nuo Tf/2 viskas buvo išmetama ir likdavo ~latencijos tyla, o garsas dar ir nebūdavo perinkaruojamas (≤ 20 ms —
+    // tik lėta kompensacija). Didesnis šuolis: kas senoje ašyje dar nepateikta, atmetama ABIEM srautams nuo TO PATIES momento
+    // (dabar + 40 ms, video — kadro riboje; L2): eilės paketai, dekoduoti kadrai nuo pjūvio (žymė flush), garso žiedas nuo pjūvio (su
+    // užgesinimu). Naujas turinys — nauju poslinkiu; garsas visada perinkaruojamas tame pačiame taške kaip video.
+    const bool cut = std::llabs(ri.step_ns) > kRelockAbsorbNs;
+    std::int64_t cut_sample = INT64_MIN;
+    if (cut) {
+        auto cut_tai = static_cast<std::int64_t>(ig::tai_now()) + 40'000'000;
+        std::uint64_t cut_frame = 0;
+        if (s.video) {
+            cut_frame = timing::index_of(cut_tai, s.fmt.frame_rate) + 1;
+            cut_tai = timing::time_of(cut_frame, s.fmt.frame_rate);
+        }
+        cut_sample = static_cast<std::int64_t>(static_cast<long double>(cut_tai) * 48000.0L / 1e9L);
         const std::uint64_t nv = s.video ? s.vq.drop_packets() : 0, na = s.audio ? s.aq.drop_packets() : 0;
         s.relock_flushed_pkts += nv + na;
-        if (s.video) s.vq.push(QItem{{}, nullptr, false, true});
-        std::int64_t cut = 0;
-        if (s.audio) {
-            const auto now_s = static_cast<std::int64_t>((static_cast<long double>(ig::tai_now()) + 40'000'000.0L) * 48000.0L / 1e9L);
-            cut = s.ring.truncate(now_s, 240);
+        if (s.video) {
+            QItem fl;
+            fl.flush = true;
+            fl.cut_frame = cut_frame;
+            s.vq.push(fl);
         }
-        what += "; nepateikta sena ašis atmesta: video paketų " + std::to_string(nv) + ", garso paketų " + std::to_string(na) + ", garso " +
-                std::to_string(cut * 1000 / 48000) + " ms (su užgesinimu)";
+        const std::int64_t gone = s.audio ? s.ring.truncate(cut_sample, 240) : 0;
+        what += "; nepateikta sena ašis atmesta nuo to paties momento: video paketų " + std::to_string(nv) + ", garso paketų " +
+                std::to_string(na) + ", garso " + std::to_string(gone * 1000 / 48000) + " ms (su užgesinimu)";
+    } else {
+        what += "; ≤ " + std::to_string(kRelockAbsorbNs / 1'000'000) + " ms — sugerta vietoje (video ≤ 1 kadras, garsas perinkaruojamas)";
+    }
+    if (s.audio) {
+        QItem rs;
+        rs.resync = true;
+        rs.cut_sample = cut_sample;
+        s.aq.push(rs);
     }
     log_line("ingest", what);
 }
@@ -434,10 +459,13 @@ void video_thread(Source& s, Shared& c) {
             need_key = true;
             waited = 0;
             reset_scan();
+            // L2: tik nuo pjūvio kadro (tas pats momentas kaip garso žiedo pjūvis); ankstesni dar rodomi
             std::lock_guard g(s.fm);
-            s.relock_flushed_frames += s.frames.size();
-            for (auto& [k, f] : s.frames) av_frame_free(&f);
-            s.frames.clear();
+            for (auto f = s.frames.lower_bound(it.cut_frame); f != s.frames.end();) {
+                av_frame_free(&f->second);
+                f = s.frames.erase(f);
+                ++s.relock_flushed_frames;
+            }
             continue;
         }
         if (it.par) {
@@ -527,9 +555,10 @@ void audio_thread(Source& s, Shared& c) {
     ig::AudioDecoder dec;
     int sessions = 0;
     bool absent = false;
-    std::uint64_t resync_base = 0;
+    std::uint64_t resync_base = 0, realign_base = 0;
     auto open = [&](const AVCodecParameters* par) {
         resync_base += dec.resyncs();
+        realign_base += dec.realigns();
         std::string why;
         bool ok = false;
         if (par == nullptr) why = "sesijoje nėra garso srauto";
@@ -556,6 +585,11 @@ void audio_thread(Source& s, Shared& c) {
             avcodec_parameters_free(&it.par);
             continue;
         }
+        if (it.resync) {  // M2: perfiksavimas — pjūvis (ir vėl: per tą laiką gal įrašyta senos ašies) ir pririšimas prie naujos ašies
+            if (it.cut_sample != INT64_MIN) s.ring.truncate(it.cut_sample, 240);
+            dec.realign();
+            continue;
+        }
         if (absent) {
             ++s.audio_absent_pkts;
             PacketQueue::drop(it);
@@ -575,6 +609,7 @@ void audio_thread(Source& s, Shared& c) {
         PacketQueue::drop(it);
         while (dec.receive(ch)) put();
         s.audio_resyncs = resync_base + dec.resyncs();
+        s.audio_relock_resyncs = realign_base + dec.realigns();
         s.comp_abs = dec.comp_abs_samples();
         s.adec_errors = dec.errors();
     }
@@ -1227,6 +1262,7 @@ int run_ingest(const Opts& o_in) {
         f.inc("relock_flushed_pkts", s.relock_flushed_pkts);     // B4: senos ašies paketai, atmesti perfiksuojant
         f.inc("relock_flushed_frames", s.relock_flushed_frames);
         f.inc("audio_fades", s.audio_fades);                     // B4: garso perjungimai su perėjimu
+        f.inc("audio_relock_resyncs", s.audio_relock_resyncs);   // M2: garsas pririštas prie naujos ašies po perfiksavimo
         f.c["comp_ppm_abs_x1000"] = static_cast<std::uint64_t>(std::llround(std::abs(cs.comp_ppm) * 1000));  // B3: taikoma rampa
         f.c["margin_err_ms_abs"] = static_cast<std::uint64_t>(std::llabs(cs.margin_err_ns) / 1'000'000);     // B3: atsargos paklaida
         f.inc("audio_comp_samples", static_cast<std::uint64_t>(s.comp_abs.load()));

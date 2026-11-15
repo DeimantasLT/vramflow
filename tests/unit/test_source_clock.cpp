@@ -755,3 +755,21 @@ TEST_CASE("source_clock: B4 — perfiksavimo įvykis: priežastis ir dydis", "[t
     CHECK(ri.reason == RelockReason::LatencyGuard);
     CHECK(std::abs(ri.step_ns - 600'000'000) <= kTf / 2 + 1'000'000);  // + 600 ms (kvantuota iki kadro)
 }
+TEST_CASE("source_clock: M2 — PAFF sandūra: antras laukas be laikų pratęsia srauto pabaigą (žingsnis 0, ne −Tf/2)", "[timing][source_clock][paff]") {
+    // Laukais koduotas srautas: pirmas laukas — su laikais ir trukme Tf/2, antras — be laikų ir trukmės Tf/2. Sandūroje (PTS šuolis)
+    // tęsinys skaičiuojamas nuo srauto pabaigos; jei antras laukas jos nepratęsia, pabaiga trumpesnė pusę kadro ir perfiksavimo
+    // žingsnis = −Tf/2 (25p — 20 ms: anksčiau tai išmesdavo visą eilę ir palikdavo ~latencijos tylą).
+    SourceClock sc(cfg25());
+    sc.add_stream(0, kTb, true);
+    const std::int64_t jump = 100 * 90000;  // +100 s PTS šuolis (sandūra), atvykimas tolydus
+    for (int k = 0; k < 200; ++k) {
+        const std::int64_t raw = k * kFrame + (k >= 100 ? jump : 0);
+        const std::int64_t a = kA0 + k * kTf;
+        sc.observe(0, raw, raw, kFrame / 2, a);
+        sc.observe(0, kNoTimestamp, kNoTimestamp, kFrame / 2, a + kTf / 2);
+    }
+    const RelockInfo ri = sc.last_relock();
+    INFO("priežastis " << relock_reason_name(ri.reason) << ", žingsnis " << ri.step_ns / 1e6 << " ms");
+    CHECK(ri.reason == RelockReason::Splice);
+    CHECK(ri.step_ns == 0);
+}

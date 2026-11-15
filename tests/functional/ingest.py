@@ -266,6 +266,75 @@ def ingest_marker_continuity(out):
                      why="; ".join(problems) + f" | sandūros {splices}, šuoliai {a['jumps'][:6]} | " + summary_line(si, sv, a, ratio_ok(fv)), ingest=si)]
 
 
+def ts_edges(path):
+    """TS failo video ir garso pateikimo kraštai, s: v0 / a0 — mažiausias PTS, v1 / a1 — didžiausias PTS + trukmė (ffprobe)."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "packet=stream_index,pts_time,duration_time", "-of", "csv=p=0", str(path)],
+                       capture_output=True, text=True, check=True)
+    e = {}
+    for ln in r.stdout.splitlines():
+        x = ln.split(",")
+        if len(x) < 3 or x[1] in ("", "N/A"):
+            continue
+        k = "v" if x[0] == "0" else "a"
+        t, d = float(x[1]), float(x[2]) if x[2] not in ("", "N/A") else 0.0
+        e[k + "0"] = min(e.get(k + "0", t), t)
+        e[k + "1"] = max(e.get(k + "1", t + d), t + d)
+    return e
+
+
+def ingest_relock_audio_resync(out):
+    """M2 (round 10): sandūra, po kurios video PTS pusę kadro nuo DTS tinklelio (perfiksavimo žingsnis lygiai Tf/2 = 20 ms, langas
+    [Tf/2, 20 ms]) — 1080i50 ir 1080p25. Garsas ir video pjaunami ir sulyginami tame pačiame taške: verify — ilgiausia tyla
+    ≤ sandūros turinio tarpo (A garso pabaiga / B garso pradžia ne ties video riba, matuojama ffprobe) + vieno garso bloko (grain'o:
+    960 / 1920 mėginių), |A/V| ≤ ribos (20 / 40 ms) visame lange, indeksai be turinio ≤ 2."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_relock_audio_resync", "FAIL", why=why)]
+    import re
+    res = []
+    for k, (fmt, limit, block) in enumerate((("1080i50", 20.0, 960), ("1080p25", 40.0, 1920))):
+        tid = f"ingest_relock_audio_resync[{fmt}]"
+        work = pathlib.Path(out) / tid
+        work.mkdir(parents=True, exist_ok=True)
+        a_ts, b_ts, clip = work / "a.ts", work / "b.ts", work / "splice.ts"
+        ff = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(CLIPS / f"av_{fmt}.ts"), "-t", "15", "-c", "copy"]
+        subprocess.run(ff + ["-f", "mpegts", str(a_ts)], check=True)
+        # B: +100 s PTS šuolis (nutrūkimas → tęsinys) ir video PTS (ne DTS) bei viso garso laikai +20 ms: tęsinys skaičiuojamas pagal
+        # DTS, o kvantuojamas pagal PTS — lygiai pusė kadro nuo tinklelio, žingsnis ±20 ms; garsas kartu, todėl turinio A/V nepakinta
+        subprocess.run(ff + ["-output_ts_offset", "100", "-bsf:v", "setts=pts=PTS+1800", "-bsf:a", "setts=pts=PTS+1800:dts=DTS+1800",
+                             "-f", "mpegts", str(b_ts)], check=True)
+        clip.write_bytes(a_ts.read_bytes() + b_ts.read_bytes())
+        # Turinio tarpas sandūroje: A garsas baigiasi / B garsas prasideda ne ties video riba (AAC kadrai, -t kirpimas) — tiek tylos
+        # teisėta ir prieš perfiksavimą (kilpos sandūrose irgi); riba — šis tarpas + vienas garso blokas
+        ea, eb = ts_edges(a_ts), ts_edges(b_ts)
+        content_gap = max(0, round(((eb["a0"] - eb["v0"]) - (ea["a1"] - ea["v1"])) * 48000))
+        port = BASE_PORT + 55 + k
+        T = 22
+        si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"], [lambda p=port, c=clip, t=tid: Sender.ts(out, f"{t}/snd", c, p, "--pcr-continuous")], T, warm=6)
+        fi, fv = flow(si), flow(sv)
+        a = av_stats(sv)
+        problems = []
+        line = next((ln for ln in err.splitlines() if "perfiksavimas" in ln), "")
+        m = re.search(r"poslinkis ([+-][0-9.]+) ms", line)
+        step = abs(float(m.group(1))) if m else None
+        if step is None or not 10.0 <= step <= 20.0:
+            problems.append(f"sandūros žingsnis {step} ms ne lange [Tf/2 … 20 ms] (testo sąranka)")
+        if fv.get("audio_zero_max", 10**9) > content_gap + block:
+            problems.append(f"ilgiausia tyla {fv.get('audio_zero_max')} mėginių > turinio tarpas {content_gap} + blokas {block}")
+        if a["max_abs_ms"] is None or a["max_abs_ms"] > limit or a["pairs"] < int(T * 0.8):
+            problems.append(f"|A/V| maks. {a['max_abs_ms']} ms (riba {limit}), porų {a['pairs']}")
+        if fv.get("missing", 0) + fv.get("invalid", 0) > 2:
+            problems.append(f"indeksai be turinio: missing {fv.get('missing')} invalid {fv.get('invalid')}")
+        if fi.get("late_frames", 0):
+            problems.append(f"late_frames {fi.get('late_frames')}")
+        res.append(F.result(tid, "FAIL" if problems else "PASS",
+                            why="; ".join(problems) + f" | {line.strip()[-160:]} | tyla maks. {fv.get('audio_zero_max')} mėginių, "
+                            f"(turinio tarpas {content_gap}), relock_flushed_pkts {fi.get('relock_flushed_pkts')}, audio_relock_resyncs {fi.get('audio_relock_resyncs')} | " +
+                            summary_line(si, sv, a, ratio_ok(fv))))
+        for f in (a_ts, b_ts, clip):
+            f.unlink(missing_ok=True)
+    return res
+
+
 def ingest_pts_order_not_arrival(out):
     if (why := ensure_clips()):
         return [F.result("ingest_pts_order_not_arrival", "FAIL", why=why)]
@@ -1448,4 +1517,5 @@ TESTS["ingest_drift_default"] = ingest_drift_default
 TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe
 TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
 TESTS["ingest_forced_relock"] = ingest_forced_relock
+TESTS["ingest_relock_audio_resync"] = ingest_relock_audio_resync
 TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap

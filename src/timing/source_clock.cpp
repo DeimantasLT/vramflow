@@ -220,6 +220,12 @@ Stamp SourceClock::observe(int stream, std::int64_t pts_raw, std::int64_t dts_ra
         // (be jo dekoderis neturi kadro): PTS — „nežinoma“ (kadro laikas — dekoduoto kadro, t. y. pirmo lauko PTS), DTS — paskutinio
         // šio srauto paketo (tiekimo vartams). Fiksavimui ir dreifo langams nenaudojamas — jie tik pagal paketus su laikais (kadro ribos).
         if (!s.have_tai || !cur_.ready) return kDrop;
+        // M2: antras laukas pratęsia srauto pabaigą savo trukme (sandūros tęsiniui; kitaip pabaiga trumpesnė pusę kadro ir
+        // perfiksavimo žingsnis −Tf/2), bet video — ne toliau nei kadras nuo paskutinio DTS (pirmas laukas be trukmės jau skaitomas Tf)
+        if (s.have_end && dur_raw > 0) {
+            s.end_tai += to_ns(dur_raw, s.tb);
+            if (s.is_video && tf_ > 0) s.end_tai = std::min(s.end_tai, s.last_dts_tai + tf_);
+        }
         return Stamp{kNoTimestamp, s.last_dts_tai, Event::None};
     }
     const bool lock_kind = s.is_video || !has_video_;  // fiksavimo / dreifo srautas: video, o be video — bet kuris

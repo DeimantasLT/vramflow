@@ -17,6 +17,7 @@ Naudojimas: ts_burst.py FAILAS.ts --port 20000 [--speed 1.005] [--burst-s 2 --bu
             [--loop] [--duration 120] [--rtp] [--start-at TAI_UNIX_S] [--start-s 7.3] [--shift-at-s 20 --shift-ms 600]
   --start-s S           — siųsti nuo medijos sekundės S (prisijungimas vidury srauto: pirmas kadras — ne IDR);
   --shift-at-s T --shift-ms D — nuo sienos sekundės T visi paketai vėluoja D ms visam laikui (latencijos pokytis, perfiksavimas)
+  --pcr-continuous      — PCR šuolis > 1 s (sujungti TS) siunčiamas be pauzės / pliūpsnio: sandūra tik PTS / PCR reikšmėse
 """
 import argparse
 import json
@@ -43,8 +44,9 @@ def pcr_of(pkt):
     return base * 300 + ext
 
 
-def packet_times(data):
-    """Kiekvieno TS paketo laikas, s (nuo pirmo PCR), pagal vieno PID PCR su tiesine interpoliacija."""
+def packet_times(data, continuous=False):
+    """Kiekvieno TS paketo laikas, s (nuo pirmo PCR), pagal vieno PID PCR su tiesine interpoliacija. continuous — PCR šuolis
+    > 1 s (sujungti TS: sandūra) siuntimo laike nematomas: laikas tęsiasi paskutiniu PCR intervalu."""
     n = len(data) // TS
     pcr_pid = None
     marks = []  # (paketo nr., pcr 27 MHz, ištiesintas)
@@ -62,6 +64,9 @@ def packet_times(data):
             continue
         if last is not None and v < last and last - v > PCR_WRAP // 2:
             acc += PCR_WRAP
+        if continuous and marks and abs(v + acc - marks[-1][1]) > 27_000_000:
+            step = marks[-1][1] - marks[-2][1] if len(marks) > 1 else 0
+            acc += marks[-1][1] + step - (v + acc)
         last = v
         marks.append((k, v + acc))
     if len(marks) < 2:
@@ -96,12 +101,13 @@ def main():
     ap.add_argument("--start-s", type=float, default=0)  # pradėti nuo šios medijos sekundės (prisijungimas vidury srauto)
     ap.add_argument("--shift-at-s", type=float, default=0)  # nuo šios sienos sekundės visi paketai vėluoja --shift-ms visam laikui
     ap.add_argument("--shift-ms", type=float, default=0)
+    ap.add_argument("--pcr-continuous", action="store_true")  # sujungtas TS: PCR šuolis siuntimo ritmo nekeičia (sandūra)
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "localhost", "::1"):
         raise SystemExit("tik loopback")
     data = open(a.ts, "rb").read()
     data = data[:len(data) // TS * TS]
-    times, clip_s = packet_times(data)
+    times, clip_s = packet_times(data, a.pcr_continuous)
     period = clip_s + (times[1] - times[0] if len(times) > 1 else 0.001) if a.loop else None
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 << 20)

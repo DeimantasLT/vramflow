@@ -50,6 +50,7 @@ struct AudioScan {
     float best = 0;
     std::int64_t best_pos = 0, last_hot = 0, last_disc = -100000;
     std::vector<std::int64_t> pulses, disc, zero;
+    std::uint64_t zero_max = 0;  // M2: ilgiausias tylos tarpas (mėginiai) po pirmo signalo
     std::int64_t next_pos = -1;  // kito laukiamo mėginio pozicija; kitokia — verify pats praleido blokų (atsiliko)
     void feed(std::int64_t p, float x) {
         if (p != next_pos) {  // ne tolydu (verify_skipped): tolydumo būsena iš naujo — tai ne garso trūkis
@@ -74,6 +75,7 @@ struct AudioScan {
         } else {
             if (zero_run >= 48) {
                 if (seen_signal && zero.size() < 10000) zero.push_back(p - static_cast<std::int64_t>(zero_run));
+                if (seen_signal) zero_max = std::max(zero_max, zero_run);
                 since_gap = 0;  // tylos tarpas jau užskaitytas — jo kraštas nėra atskiras trūkis
             }
             zero_run = 0;
@@ -326,6 +328,7 @@ int verify_ingest(const Opts& o, Stats& st, std::string& extra) {
         f.c["av_pairs"] = sc.pairs.size();
         f.c["av_max_abs_us"] = static_cast<std::uint64_t>(worst);
         f.c["audio_zero_runs"] = sc.a.zero.size();
+        f.c["audio_zero_max"] = sc.a.zero_max;
         f.c["audio_disc"] = disc.size();
         extra += std::string(n ? "," : "") + "{\"flow\":" + std::to_string(n) + ",\"first_index\":" + std::to_string(i0) +
                  ",\"av_mean_us\":" + std::to_string(sc.pairs.empty() ? 0 : sum / static_cast<std::int64_t>(sc.pairs.size())) +

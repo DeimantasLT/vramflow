@@ -40,6 +40,9 @@ public:
     bool receive(AudioChunk& out);
     // Nauja įėjimo sesija: dekoderis ir resampleris išvalomi, sekimas iš naujo (pirmas kadras — perinkaravimas).
     void reset();
+    // M2: šaltinio ašis perfiksuota — kitas kadras pririšamas tiksliai (AudioSync::realign), dekoderis ir resampleris nekeičiami
+    void realign() { sync_.realign(); }
+    std::uint64_t realigns() const { return sync_.realigns(); }
     int channels() const { return out_ch_; }
     std::uint64_t errors() const { return errors_; }
     std::uint64_t resyncs() const { return sync_.resyncs(); }
