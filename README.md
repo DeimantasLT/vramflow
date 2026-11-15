@@ -523,6 +523,10 @@ local MPEG-TS file.
 | `--input-silence-ms N` | A source silent for longer reconnects with back-off 1, 2, 4 … ≤ 30 s (default 2000; HLS: at least 3 segments) |
 | `--max-comp-ppm X` | Audio drift compensation limit (default 1000 = ±0.1 %, inaudible) |
 | `--hls-max-target-s S` | Largest accepted HLS `#EXT-X-TARGETDURATION` (default 30); a longer one rejects that source with a clear message |
+| `--hls-max-playlist B` | Largest accepted HLS playlist in bytes (default 1048576); a larger one ends that session |
+| `--hls-same-host` | HLS: segments, keys, maps and variants only from the top-level playlist's host:port |
+| `--max-queue-mb N` | Packet queue cap per source and queue, MB (default 0 = (latency + 2.4 s) × 80 Mbit/s); oldest packets dropped and counted |
+| `--srt-passphrase-from env:NAME\|file:PATH` | SRT passphrase from an environment variable or a file, not from the command line |
 | `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
 | `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
 
@@ -530,13 +534,31 @@ local MPEG-TS file.
 `https` or a local file path; anything else (`file:`, `tcp:`, `concat:`, `data:`, `crypto+…` …) is a usage error (exit `1`).
 Every libavformat open, including nested ones (HLS segments, RTP → UDP, HTTP → TCP/TLS), gets an explicit
 `protocol_whitelist` and `format_whitelist` derived from that scheme (local file: `file` / `mpegts` only). An `http(s)`
-source is checked before libavformat: HLS is recognised by its content (`#EXTM3U`), not by the `.m3u8` suffix; a master
-playlist may point to media playlists only (no nesting, no loops); every URL a playlist names (variants, segments,
-`URI="…"` keys and maps) must resolve to `http`/`https`; playlists are limited to 1 MiB. While the source runs, every open
-libavformat makes is checked again (http/https only), and a master playlist appearing in place of a media playlist ends
-only that session (the source reconnects with back-off; the other sources are not affected). User info and all query
-values (`passphrase=…`, tokens) are replaced by `***` in log lines, error messages, the summary and the stats file,
-including libavformat's own log lines.
+source is fetched once before libavformat: HLS is recognised by its content (`#EXTM3U`), not by the `.m3u8` suffix, and
+libavformat is handed exactly that response (no second request that could answer differently). A source whose first
+response is not M3U8 is opened as MPEG-TS only (`format_whitelist mpegts`), with a single open per session; an M3U8
+answer on such a session is refused. For HLS, every playlist libavformat fetches while the source runs (variants,
+reloads) is read completely (at most `--hls-max-playlist` bytes, default 1 MiB), checked completely and then given to
+libavformat as the same bytes: a master playlist is allowed only at the top (no nesting, no loops), at most 15 variants
+and 10 000 entries per playlist, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`, and every URL it names (variants,
+segments, `URI="…"` keys and maps) must resolve to `http`/`https`. A violation ends only that session (the source reconnects
+with back-off; the other sources are not affected). HTTP reads time out after 10 s, and a reconnecting `http(s)` source
+gives up an open after `--input-wait-s` (default 30 s). Packet queues are capped in bytes (`--max-queue-mb`, default
+(latency + 2.4 s) × 80 Mbit/s per queue); at the cap the oldest media packets are dropped and counted (`queue_drops`,
+`queue_overflows`, one log line per episode), control markers are never dropped. User info and all query values
+(`passphrase=…`, tokens) are replaced by `***` in log lines, error messages, the summary and the stats file, including
+libavformat's own log lines (a quoted URL is redacted up to its closing quote). Not redacted: a query value that contains
+a space in an unquoted URL, and secrets carried in the URL path instead of the query. To keep the SRT passphrase out of
+`/proc/*/cmdline`, pass it with `--srt-passphrase-from env:NAME` or `--srt-passphrase-from file:/path` (added to `srt://`
+inputs without `passphrase=` in memory only).
+
+**Server-side request forgery (SSRF) caveat.** An HLS playlist decides which hosts the process connects to: by default it
+can point segments, keys and variants at any `http(s)` host and port the machine can reach, including loopback services
+and cloud metadata addresses (e.g. `169.254.169.254`). The responses are only parsed as playlists or media, never
+returned, but the requests are made. `--hls-same-host` restricts every URL a playlist names to the host:port of the
+top-level playlist (after redirects). libavformat's `https` does not verify certificates by default (`tls_verify=0`), so
+HTTPS protects against passive eavesdropping only. Use HLS sources you trust, or run ingest where it cannot reach
+sensitive internal addresses.
 
 **Timing model in plain words.** Every packet is stamped once, when the demuxer reads it: *output time = source timestamp
 + one offset per source*. The offset is fixed by the first video packet so that it is shown `--latency-ms` after it arrived,

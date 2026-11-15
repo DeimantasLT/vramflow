@@ -120,10 +120,17 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   flow'us (laukų tvarka — iš pirmo IDR); 4:2:2, 10 bitų, BFF atmetami su įvardytu formatu (exit `2`); formatas pasikeitė vidury
   srauto — tas šaltinis sustabdomas, kiti tęsia, exit `6`. 50 Hz ir 25p šaltiniai — viename procese, 59,94 šeima — atskirame.
   **Saugumas:** `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
-  libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`; HLS atpažįstamas pagal turinį, master →
-  media (be gylio ir kilpų), visos grojaraščio nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`
-  (numatyta 30), garso žiedas ≤ `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir
-  statistikoje — `***`. **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
+  libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`. HTTP(S) šaltinis atsisiunčiamas vieną kartą ir
+  libavformat gauna būtent tą atsakymą; HLS atpažįstamas pagal turinį, ne HLS — tik MPEG-TS (vienas atidarymas sesijai, M3U8 atsakymas
+  atmetamas). Kiekvienas libavformat atsisiunčiamas grojaraštis perskaitomas ir patikrinamas VISAS (≤ `--hls-max-playlist`, 1 MiB):
+  master tik viršuje, ≤ 15 variantų ir 10 000 nuorodų, nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`
+  (30); pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
+  Paketų eilės ribotos baitais (`--max-queue-mb`; perteklius išmetamas ir skaičiuojamas, žymės — niekada), garso žiedas ≤
+  `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir statistikoje — `***` (kabutėse — iki
+  uždarančios kabutės; neišvaloma: tarpas užklausos reikšmėje be kabučių, paslaptis URL kelyje). SRT slaptažodis — `--srt-passphrase-from
+  env:VARDAS | file:/kelias` (ne `/proc/*/cmdline`). **SSRF:** grojaraštis gali nukreipti procesą į bet kurį pasiekiamą http(s)
+  host:port (ir loopback, debesų metaduomenų adresus); `--hls-same-host` leidžia tik viršutinio grojaraščio serverį; libav `https`
+  numatytai sertifikatų netikrina (`tls_verify=0`). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
   slydimai — pateikimo tvarka, perfiksavimas — žurnale su priežastimi ir dydžiu, garsas — su 5 ms perėjimu; dekodavimas nuo
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
   naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
