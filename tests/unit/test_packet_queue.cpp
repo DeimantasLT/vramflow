@@ -81,3 +81,35 @@ TEST_CASE("packet_queue: drop_packets palieka žymes, baitai — 0", "[ingest][q
     CHECK(q.size() == 1);
     CHECK(pop_id(q) == 2);
 }
+
+TEST_CASE("packet_queue: L3 — perpildymas niekada neišmeta žymių (sesija, flush, no_stream), tik seniausią paketą", "[ingest][queue]") {
+    int freed = 0;
+    Q q(3, 1u << 20);
+    q.push(Item{0, 100, &freed});  // sesijos žymė eilės priekyje
+    q.push(Item{10, 1, &freed});
+    q.push(Item{10, 2, &freed});
+    q.push(Item{10, 3, &freed});  // riba 3 — išmetamas paketas 1, ne žymė
+    CHECK(q.dropped() == 1);
+    CHECK(pop_id(q) == 100);
+    CHECK(pop_id(q) == 2);
+    CHECK(pop_id(q) == 3);
+    // baitų riba, žymės tarp paketų lieka savo vietose
+    Q b(100, 30);
+    b.push(Item{10, 1, &freed});
+    b.push(Item{0, 200, &freed});
+    b.push(Item{10, 2, &freed});
+    b.push(Item{0, 201, &freed});
+    b.push(Item{10, 3, &freed});
+    b.push(Item{20, 4, &freed});  // reikia 20 B: išmetami 1 ir 2
+    CHECK(b.dropped() == 2);
+    CHECK(b.bytes() == 30);
+    CHECK(pop_id(b) == 200);
+    CHECK(pop_id(b) == 201);
+    CHECK(pop_id(b) == 3);
+    CHECK(pop_id(b) == 4);
+    // vien žymės — riba elementams jų neišstumia (žymė visada įdedama)
+    Q m(2, 100);
+    for (int k = 0; k < 4; ++k) m.push(Item{0, 300 + k, &freed});
+    CHECK(m.size() == 4);
+    CHECK(m.dropped() == 0);
+}

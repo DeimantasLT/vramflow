@@ -35,10 +35,15 @@ public:
             const std::uint64_t nb = Traits::bytes(it);
             if (nb > 0) {
                 bool over = false;
-                while (!q_.empty() && (q_.size() >= cap_ || bytes_ + nb > cap_bytes_)) {
-                    bytes_ -= Traits::bytes(q_.front());
-                    Traits::drop(q_.front());
-                    q_.pop_front();
+                // L3: išmetamas seniausias MEDIJOS paketas; žymės (sesija, flush, no_stream) niekada — be jų dekoderio gija
+                // liktų su senos sesijos parametrais
+                auto oldest = q_.begin();
+                while (q_.size() >= cap_ || bytes_ + nb > cap_bytes_) {
+                    while (oldest != q_.end() && Traits::bytes(*oldest) == 0) ++oldest;
+                    if (oldest == q_.end()) break;
+                    bytes_ -= Traits::bytes(*oldest);
+                    Traits::drop(*oldest);
+                    oldest = q_.erase(oldest);
                     ++dropped_;
                     over = true;
                 }
