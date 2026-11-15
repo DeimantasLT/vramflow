@@ -172,14 +172,15 @@ struct Opts {
     double input_wait_s = -1;
     double max_comp_ppm = 1000;
     std::uint32_t test_decode_delay_ms = 0;  // paslėpta: dirbtinis dekoderio sulėtinimas kiekvienam paketui (perkrovos testui)
-    // A1: HLS #EXT-X-TARGETDURATION riba (s) ir garso žiedo riba šaltiniui (MB); viršijus — tas šaltinis atmetamas su aiškia klaida
-    bool test_audio_reopen_fail = false;
-    bool test_hw_decoder_fail = false;  // paslėpta (B8 testui): NVDEC / cuvid atidarymas nepavyksta → programinis  // paslėpta (A2 testui): kiekvienas garso dekoderio atidarymas po pirmo nepavyksta
+    bool test_audio_reopen_fail = false;  // paslėpta (A2 testui): kiekvienas garso dekoderio atidarymas po pirmo nepavyksta
+    bool test_hw_decoder_fail = false;    // paslėpta (B8 testui): NVDEC / cuvid atidarymas nepavyksta → programinis
+    // A1 / H2 / M1: HLS #EXT-X-TARGETDURATION riba (s), grojaraščio dydžio riba (baitai), garso žiedo ir paketų eilių ribos šaltiniui
+    // (MB); viršijus — tas šaltinis atmetamas su aiškia klaida (eilėse — seniausi paketai išmetami ir skaičiuojami)
     double hls_max_target_s = 30;
-    std::size_t hls_max_playlist = std::size_t{1} << 20;  // H2: --hls-max-playlist, baitai
+    std::size_t hls_max_playlist = std::size_t{1} << 20;  // --hls-max-playlist
     std::uint32_t max_audio_ring_mb = 256;
-    std::uint32_t max_queue_mb = 0;
-    std::string srt_passphrase_from;  // L1: --srt-passphrase-from env:VARDAS | file:/kelias  // M1: --max-queue-mb (0 — pagal latenciją)
+    std::uint32_t max_queue_mb = 0;   // --max-queue-mb (0 — pagal latenciją)
+    std::string srt_passphrase_from;  // L1: --srt-passphrase-from env:VARDAS | file:/kelias
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
     std::string dump_dir;
     std::uint32_t dump_count = 0;
