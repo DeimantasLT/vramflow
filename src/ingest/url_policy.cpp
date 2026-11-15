@@ -292,7 +292,7 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
     for (const auto* v : {&pi.variants, &pi.refs})
         for (const std::string& x : *v) {
             if (!resolve_playlist_url(base, x, r, why)) return false;
-            if (!lim.only_authority.empty() && url_authority(r) != lim.only_authority) {
+            if (!lim.only_authority.empty() && canonical_authority(r) != lim.only_authority) {
                 why = "grojaraščio nuoroda į kitą serverį (--hls-same-host: tik " + lim.only_authority + "): " + redact_url(r);
                 return false;
             }
@@ -308,6 +308,33 @@ std::string url_authority(const std::string& url) {
     std::string auth = url.substr(a0, a1 - a0);
     if (const auto at = auth.rfind('@'); at != std::string::npos) auth = auth.substr(at + 1);
     return lower(auth);
+}
+
+std::string canonical_authority(const std::string& url) {
+    std::string s = url_scheme(url);
+    if (starts(s, "crypto+")) s = s.substr(7);
+    if (!is_http(s)) return {};
+    // url_authority: userinfo iki PASKUTINIO '@' (kaip av_url_split, utils.c n6.1:397-401), mažosios raidės
+    const std::string auth = url_authority(url);
+    std::string host, port;
+    bool has_port = false;
+    if (!auth.empty() && auth[0] == '[' && auth.find(']') != std::string::npos) {  // [IPv6]:prievadas (utils.c:403-407)
+        const auto b = auth.find(']');
+        host = auth.substr(0, b + 1);
+        has_port = b + 1 < auth.size() && auth[b + 1] == ':';
+        if (has_port) port = auth.substr(b + 2);
+    } else {  // prievadas po PIRMO ':' (utils.c:408-411)
+        const auto c = auth.find(':');
+        host = auth.substr(0, c);
+        has_port = c != std::string::npos;
+        if (has_port) port = auth.substr(c + 1);
+    }
+    if (!host.empty() && host.back() == '.') host.pop_back();  // FQDN šaknies taškas: "h." == "h"
+    if (!has_port) return host + (s == "https" ? ":443" : ":80");
+    // tik skaitmenys (≤ 5) — skaitinė reikšmė (":0080" == ":80"); kita paliekama kaip yra — nesutaps su leistinu, bus atmesta
+    if (!port.empty() && port.size() <= 5 && port.find_first_not_of("0123456789") == std::string::npos)
+        return host + ":" + std::to_string(std::stoi(port));
+    return host + ":" + port;
 }
 
 bool secret_from(const std::string& spec, std::string& out, std::string& why) {

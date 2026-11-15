@@ -290,7 +290,7 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
     hls = true;
     const std::string& base = top.location;  // nukreipus — santykinės nuorodos pagal galutinį URL (kaip libav)
     HlsLimits lim = lim_in;
-    if (same_host) lim.only_authority = url_authority(base);
+    if (same_host) lim.only_authority = canonical_authority(base);
     // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
     // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
     if (!check_playlist(base, pt, true, lim, err)) return false;
@@ -308,6 +308,11 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
             seen.push_back(vu);
             FetchedPlaylist fv;
             if (!fetch_playlist(vu, cb, lim.max_bytes, false, fv, err)) return false;
+            // D: varianto atsakymas po nukreipimų — irgi tik iš leistino serverio (nukreipimo užklausos jau padarytos — README)
+            if (!lim.only_authority.empty() && canonical_authority(fv.location) != lim.only_authority) {
+                err = "variantas nukreiptas į kitą serverį (--hls-same-host: tik " + lim.only_authority + "): " + redact_url(fv.location);
+                return false;
+            }
             const PlaylistInfo pv = parse_playlist(fv.text);
             if (!pv.m3u) {
                 err = "variantas ne M3U8 grojaraštis: " + redact_url(vu);
@@ -362,7 +367,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // atsakyti skirtingai (pirma TS, antra M3U8)
     guard_http_ = http;
     hls_ = hls;
-    if (hls && s.hls_same_host) lim_.only_authority = url_authority(top_.location);  // sargui — tas pats serveris kaip patikroje
+    if (hls && s.hls_same_host) lim_.only_authority = canonical_authority(top_.location);  // sargui — tas pats serveris kaip patikroje
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
         err = shown + ": " + what + ": " + why;
@@ -590,6 +595,14 @@ int Demux::pre_open(const std::string& u) {
                      sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
         return AVERROR(EPERM);
     }
+    // D: --hls-same-host — ir pats atidaromas URL (ne tik grojaraščio tekstas), prieš libav atidarymą
+    if (!lim_.only_authority.empty() && canonical_authority(u) != lim_.only_authority) {
+        ++refused_opens_;
+        if (!intr_.abort.exchange(true))
+            std::fprintf(stderr, "[ingest] %s: HLS: atidarymas į kitą serverį (--hls-same-host: tik %s): %s — atmesta, sesija nutraukiama\n",
+                         shown_.c_str(), lim_.only_authority.c_str(), redact_url(u).c_str());
+        return AVERROR(EPERM);
+    }
     if (!hls_ && opens_total_ > 0) {  // H1: tiesioginis MPEG-TS per HTTP — vienas atidarymas sesijai; daugiau — ne mūsų srautas
         ++refused_opens_;
         std::fprintf(stderr, "[ingest] %s: HTTP (ne HLS): papildomas libav atidarymas atmestas: %s\n", shown_.c_str(), redact_url(u).c_str());
@@ -634,6 +647,13 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
         if (!intr_.abort.exchange(true)) std::fprintf(stderr, "[ingest] %s: HLS: %s — atmesta, sesija nutraukiama\n", shown_.c_str(), why.c_str());
         return AVERROR(EPERM);
     };
+    // D: --hls-same-host — galutinis atsakymo URL po libav http nukreipimų (iki 8, http.c n6.1:54, 419-438; max_redirects parinkties
+    // 6.1 neturi), PRIEŠ skaitant turinį. Nukreipimų užklausos jau padarytos (README). crypto+ konteksto location nepasiekiamas
+    // (crypto klasė be child_next) — tada patikrinta tik prieš atidarymą.
+    if (!lim_.only_authority.empty())
+        if (const std::string loc = io_prop(*pb, "location"); !loc.empty() && canonical_authority(loc) != lim_.only_authority)
+            return refuse("atsakymas nukreiptas į kitą serverį (--hls-same-host: tik " + lim_.only_authority + "): " + redact_url(u) + " → " +
+                          redact_url(loc));
     // Turinio peržiūra (pirmi ≤ 4 KiB): M3U8 atpažįstamas iš pradžios (libav reikalauja #EXTM3U pirmoje eilutėje); ne M3U8 (segmentai,
     // raktai, tiesioginis TS) — peržiūrėti baitai atiduodami iš atminties (peek_io), tinklo kontekstas atgal negrąžinamas (A)
     unsigned char head[4096];

@@ -793,6 +793,86 @@ def hls_peek_case(out):
                      f"{flow(si, 1).get('frames_decoded')} | " + summary_line(si, sv, a, r))]
 
 
+class Redirect:
+    """HTTP 302 į to (kitas serveris); hits — kiek kartų nukreipta."""
+
+    def __init__(self, to):
+        self.to, self.hits = to, 0
+
+    def serve(self, h):
+        self.hits += 1
+        h.send_response(302)
+        h.send_header("Location", self.to)
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+
+
+def hls_live_swap_case(out, tid, port, extra, ingest_args=()):
+    """Gyvas HLS šaltinis (ffmpeg segmentuotojas) + UDP šaltinis 0. Po 18 s grojaraštis = dabartinis + extra(srv) (pvz. naujas
+    segmentas, kuris nukreipia ar grąžina M3U8). Grąžina (si, sv, ri, err, srv)."""
+    work = pathlib.Path(out) / tid.replace("[", "-").replace("]", "") / "live"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", str(CLIPS / "av_1080i50.ts"),
+                            "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work.parent / "seg.log", "w"))
+    srv = PlaylistServer(work)
+    T, SWAP = 30, 12
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+
+        def swap():
+            srv.routes["/live.m3u8"] = (work / "live.m3u8").read_bytes() + extra(srv)
+
+        si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", port, T, 6 + SWAP, swap, ingest_args)
+    finally:
+        seg.terminate()
+        seg.wait()
+        srv.close()
+    return si, sv, ri, err, srv
+
+
+def hls_redirect_case(out):
+    """D (round 11): --hls-same-host — segmento URL tame pačiame serveryje (grojaraščio tekstas tvarkingas) atsako 302 į kitą
+    loopback prievadą (kitas klipas, 1080p25). Sargas lygina atidaryto konteksto location su leistinu serveriu: atmesta, to segmento
+    medžiaga nenaudojama (1080p25 niekada nezonduojamas), procesas gyvena, UDP šaltinis — be praradimų. Nukreipimo užklausą libav
+    jau būna padaręs (http.c n6.1:419-438; max_redirects parinkties 6.1 neturi) — tai dokumentuota, ne tikrinama."""
+    tid = "ingest_hls_security[redirect]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    other = PlaylistServer()
+    other.routes["/seg.ts"] = StreamBody(CLIPS / "av_1080p25.ts", nbytes=188 * 7 * 2000)
+    red = Redirect(other.url("/seg.ts"))
+
+    def extra(srv):
+        srv.routes["/redir.ts"] = red
+        return b"#EXTINF:2.0,\nredir.ts\n"
+
+    try:
+        si, sv, ri, err, _ = hls_live_swap_case(out, tid, BASE_PORT + 62, extra, ("--hls-same-host",))
+    finally:
+        other.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    line = next((ln for ln in err.splitlines() if "--hls-same-host" in ln and "sesija nutraukiama" in ln), "")
+    if not line:
+        problems.append("žurnale nėra --hls-same-host atmetimo (sesija nutraukiama)")
+    if red.hits < 1:
+        problems.append("nukreipiantis segmentas neužklaustas (testo sąranka)")
+    if "1080p25" in err:
+        problems.append("kito serverio medžiaga (1080p25) pasiekė libav zondavimą")
+    if flow(si, 1).get("input_reconnects", 0) < 1:
+        problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | nukreipta {red.hits} k., kito serverio GET {other.hits.get('/seg.ts', 0)} | {line.strip()[:220]} | " +
+                     summary_line(si, sv, a, r))]
+
+
+
 def rss_kb(pid):
     try:
         for ln in open(f"/proc/{pid}/status"):
@@ -960,6 +1040,7 @@ def ingest_hls_security(out):
     try:
         res += hls_toctou_case(out)
         res += hls_peek_case(out)
+        res += hls_redirect_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:
             tid = f"ingest_hls_security[{name}]"

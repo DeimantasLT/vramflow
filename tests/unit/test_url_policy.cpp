@@ -212,6 +212,31 @@ TEST_CASE("url_policy: C — URI atributai kaip libav ff_parse_key_value (kabut�
     CHECK(why.find("169.254.169.254") != std::string::npos);
 }
 
+TEST_CASE("url_policy: D — autoritetas lyginamas normalizuotas (host raidės, numatytas prievadas, galinis taškas)", "[ingest][url]") {
+    // libav jungiasi pagal av_url_split (utils.c n6.1:358-411): paskutinis '@', [IPv6], prievadas po pirmo ':'; nėra — 80 / 443
+    CHECK(canonical_authority("http://Host.Example.:80/x") == "host.example:80");
+    CHECK(canonical_authority("http://h/x") == "h:80");
+    CHECK(canonical_authority("https://h/x") == "h:443");
+    CHECK(canonical_authority("HTTPS://h:443") == "h:443");
+    CHECK(canonical_authority("crypto+https://u:p@h/x.ts") == "h:443");
+    CHECK(canonical_authority("http://a@b@H:1/") == "h:1");
+    CHECK(canonical_authority("http://[::1]:8080/") == "[::1]:8080");
+    CHECK(canonical_authority("http://[::1]/") == "[::1]:80");
+    CHECK(canonical_authority("http://h:0080/") == "h:80");
+    CHECK(canonical_authority("http://h:80x/") == "h:80x");  // ne skaitmenys — paliekama (nesutaps → atmetama)
+    CHECK(canonical_authority("http://h:/") == "h:");
+    CHECK(canonical_authority("ftp://h/x").empty());
+    CHECK(canonical_authority("/local").empty());
+    HlsLimits lim;
+    lim.only_authority = canonical_authority("http://h/live/x.m3u8");
+    std::string why;
+    const std::string base = "http://h/live/x.m3u8";
+    CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXTINF:2,\nhttp://H.:80/s.ts\n#EXTINF:2,\nhttp://h:80/t.ts\n"), false, lim, why));
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXTINF:2,\nhttps://h/s.ts\n"), false, lim, why));  // 443 ≠ 80
+    CHECK(why.find("--hls-same-host") != std::string::npos);
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXTINF:2,\nhttp://h:8080/s.ts\n"), false, lim, why));
+}
+
 TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
     HlsLimits lim;
     std::string why;
