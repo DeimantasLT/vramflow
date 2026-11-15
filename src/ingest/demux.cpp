@@ -147,7 +147,10 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     if (url.rfind("udp://", 0) == 0 && url.find("fifo_size") == std::string::npos)
         url += std::string(url.find('?') == std::string::npos ? "?" : "&") + "fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608";
     shown_ = shown;
-    guard_http_ = hls;
+    // H1: sargas — kiekvienam HTTP(S) šaltiniui (ne tik HLS): patikra ir libav atidarymas — dvi atskiros užklausos, serveris gali
+    // atsakyti skirtingai (pirma TS, antra M3U8)
+    guard_http_ = scheme == "http" || scheme == "https";
+    hls_ = hls;
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
         err = shown + ": " + what + ": " + why;
@@ -177,8 +180,8 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         av_dict_set(&o, "probesize", std::to_string(2'000'000 << k).c_str(), 0);
         av_dict_set(&o, "analyzeduration", std::to_string(1'000'000 << k).c_str(), 0);
         // Baltieji sąrašai (A1): paveldi visi įdėti atidarymai (HLS segmentai ir jų demuxeriai, RTP → UDP, HTTP → TCP / TLS)
-        av_dict_set(&o, "protocol_whitelist", protocol_whitelist_for(scheme).c_str(), 0);
-        av_dict_set(&o, "format_whitelist", format_whitelist_for(scheme).c_str(), 0);
+        av_dict_set(&o, "protocol_whitelist", protocol_whitelist_for(scheme, hls).c_str(), 0);
+        av_dict_set(&o, "format_whitelist", format_whitelist_for(scheme, hls).c_str(), 0);
         if (hls) {
             av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
             av_dict_set(&o, "http_persistent", "0", 0);
@@ -342,6 +345,11 @@ int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, i
                          sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
             return AVERROR(EPERM);
         }
+        if (!hls_ && opens_total_ > 0) {  // H1: tiesioginis MPEG-TS per HTTP — vienas atidarymas sesijai; daugiau — ne mūsų srautas
+            ++refused_opens_;
+            std::fprintf(stderr, "[ingest] %s: HTTP (ne HLS): papildomas libav atidarymas atmestas: %s\n", shown_.c_str(), redact_url(u).c_str());
+            return AVERROR(EPERM);
+        }
         const std::uint64_t now = tai_now();
         if (now - open_win0_ >= 1'000'000'000ull) {
             open_win0_ = now;
@@ -362,9 +370,16 @@ int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, i
     const bool first_open = opens_total_++ == 0;
     unsigned char head[4096];
     const int n = avio_read(*pb, head, sizeof head);
-    if (n > 0 && !first_open) {
+    if (n > 0) {
         const PlaylistInfo pi = parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n)));
-        if (pi.m3u && pi.master) {
+        if (pi.m3u && !hls_) {  // H1: patikra matė ne M3U8, o libav gavo M3U8 — atmetama (format_whitelist vis tiek tik mpegts)
+            ff_close(s, pb);
+            if (!intr_.abort.exchange(true))
+                std::fprintf(stderr, "[ingest] %s: HTTP: atsakymas — M3U8 grojaraštis, nors patikra rado ne HLS — atmesta, sesija nutraukiama\n",
+                             shown_.c_str());
+            return AVERROR(EPERM);
+        }
+        if (pi.m3u && pi.master && !first_open) {
             ff_close(s, pb);
             if (!intr_.abort.exchange(true))
                 std::fprintf(stderr, "[ingest] %s: HLS: įdėtas master grojaraštis vidury sesijos (%s) — atmesta, sesija nutraukiama\n", shown_.c_str(),

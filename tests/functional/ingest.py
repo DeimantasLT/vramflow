@@ -376,6 +376,39 @@ def free_port():
         return s.getsockname()[1]
 
 
+class StreamBody:
+    """HTTP atsakymas iš failo: pirmi nbytes baitų (0 — visas failas) repeat kartų, rate baitų/s (0 — tinklo greičiu)."""
+
+    def __init__(self, path, nbytes=0, rate=0, repeat=1, ctype="video/mp2t"):
+        self.path, self.nbytes, self.rate, self.repeat, self.ctype = str(path), nbytes, rate, repeat, ctype
+
+    def serve(self, h):
+        size = os.path.getsize(self.path)
+        n = min(size, self.nbytes) if self.nbytes else size
+        h.send_response(200)
+        h.send_header("Content-Type", self.ctype)
+        h.send_header("Content-Length", str(n * self.repeat))
+        h.end_headers()
+        t0, sent = time.monotonic(), 0
+        try:
+            for _ in range(self.repeat):
+                with open(self.path, "rb") as f:
+                    left = n
+                    while left > 0:
+                        b = f.read(min(left, 188 * 700))
+                        if not b:
+                            break
+                        h.wfile.write(b)
+                        left -= len(b)
+                        sent += len(b)
+                        if self.rate:
+                            ahead = sent / self.rate - (time.monotonic() - t0)
+                            if ahead > 0:
+                                time.sleep(ahead)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
 class PlaylistServer:
     """Loopback HTTP (127.0.0.1, laisvas prievadas): virtualūs keliai (routes — bytes, keičiami testo metu) ir statiniai failai iš
     katalogo; hits — užklausų skaičius keliui."""
@@ -401,6 +434,8 @@ class PlaylistServer:
                     body = body()
                 if body is None:
                     return super().do_GET()
+                if isinstance(body, StreamBody):
+                    return body.serve(h)
                 h.send_response(200)
                 h.send_header("Content-Type", "application/vnd.apple.mpegurl")
                 h.send_header("Content-Length", str(len(body)))
@@ -482,6 +517,79 @@ class TcpCanary:
         self.s.close()
 
 
+def two_source_http(out, tid, srv, path, port, T, swap_at, swap, ingest_args=(), impl="gpu", watch=None):
+    """UDP šaltinis 0 (matuojamas verify) + HTTP šaltinis 1 (srv kelias path). Po swap_at s nuo paleidimo kviečiama swap() (serverio
+    elgsenos pakeitimas vidury darbo); watch(pid) — kas 0,1 s (pvz. RSS). Grąžina (ingest santrauka, verify santrauka, exit, stderr)."""
+    d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
+    ing = vf = snd = None
+    storage = "host" if impl == "cpu" else "cuda-linear"
+    try:
+        ing = F.FProc(out, tid, "ingest", d, "--input", f"udp://127.0.0.1:{port}", "--input", srv.url(path), "--duration", T + 14,
+                      "--warmup", 6, *F.vcommon(impl, storage), *ingest_args)
+        snd = Sender.ts(out, f"{tid}/snd", CLIPS / "av_1080i50.ts", port)
+        vf = F.FProc(out, tid, "verify", d, "--mode", "ingest", "--flows", 1, "--flow-base", 0, "--duration", T + 6, "--warmup", 6,
+                     "--lag-fields", 3, "--audio", 1, "--input-wait-ms", 30000, *F.vimpl(impl, storage))
+        t0 = time.monotonic()
+        swapped = False
+        while ing.p.poll() is None and time.monotonic() - t0 < T + 90:
+            if not swapped and time.monotonic() - t0 >= swap_at:
+                swap()
+                swapped = True
+            if watch is not None:
+                watch(ing.p.pid)
+            if vf.p.poll() is not None and ing.p.poll() is None and time.monotonic() - t0 > T + 30:
+                break
+            time.sleep(0.1)
+        vf.wait(timeout=T + 90)
+        ri = ing.wait(timeout=60)
+    finally:
+        for pr in (vf, ing):
+            if pr is not None:
+                pr.term()
+        if snd is not None:
+            snd.stop()
+    err = ing.err_path.read_text(errors="replace") if ing is not None and ing.err_path.exists() else ""
+    return F.vsummary(ing, "ingest"), F.vsummary(vf, "verify-ingest"), ri, err
+
+
+def hls_toctou_case(out):
+    """H1 (round 10): HTTP šaltinio patikra mato MPEG-TS, o libav paties atidarymas po prisijungimo iš naujo gauna įdėtą master
+    grojaraštį (rodo į save). Procesas gyvena iki galo, UDP šaltinis — be praradimų, HTTP šaltinio M3U8 atsakymas atmetamas."""
+    tid = "ingest_hls_security[toctou]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    T = 30
+    srv = PlaylistServer()
+    ts = StreamBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 9500, rate=1_250_000)  # ~10 s realiu laiku
+    master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\ntoctou\n"
+    srv.routes["/toctou"] = ts
+    n = [0]
+
+    def after():  # pirmas GET (patikra) — TS, visi kiti (libav atidarymas, kiti bandymai) — master
+        n[0] += 1
+        return StreamBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 2000) if n[0] == 1 else master
+
+    try:
+        si, sv, ri, err = two_source_http(out, tid, srv, "/toctou", BASE_PORT + 50, T, 6, lambda: srv.routes.update({"/toctou": after}))
+    finally:
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    if flow(si, 1).get("input_reconnects", 0) < 1:
+        problems.append(f"HTTP input_reconnects {flow(si, 1).get('input_reconnects')}")
+    if n[0] < 2:
+        problems.append(f"master grojaraštis neužklaustas (GET po pakeitimo: {n[0]})")
+    # prisijungimai iš naujo su atidėjimu 1, 2, 4 … s — per ~30 s keliolika užklausų; daugiau — libav HLS kilpa be sargo
+    if n[0] > 100:
+        problems.append(f"{n[0]} GET po pakeitimo — libav HLS demuxeris kilpoje be sargo")
+    line = next((ln for ln in err.splitlines() if "M3U8" in ln or "įdėtas master" in ln), "")
+    if not line:
+        problems.append("žurnale nėra M3U8 / įdėto master atmetimo")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | GET po pakeitimo {n[0]} | {line.strip()[:200]} | " + summary_line(si, sv, a, r))]
+
+
 def ingest_hls_security(out):
     """A1 (round 9): grojaraščio pateikti URL — tik http / https; įdėti master grojaraščiai (A→B→A) ir milžiniškas
     #EXT-X-TARGETDURATION atmetami su aiškia klaida (procesas baigiasi tvarkingai, ne signalu). file:// kanarėlė (FIFO) niekada
@@ -509,6 +617,7 @@ def ingest_hls_security(out):
     cases = (("file_variant", "neleidžiama"), ("file_segment", "neleidžiama"), ("key_file", "neleidžiama"), ("tcp_segment", "neleidžiama"),
              ("a", "įdėtas master"), ("huge", "TARGETDURATION"))
     try:
+        res += hls_toctou_case(out)
         for name, want in cases:
             tid = f"ingest_hls_security[{name}]"
             d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))

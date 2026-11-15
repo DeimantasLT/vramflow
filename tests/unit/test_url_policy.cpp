@@ -63,6 +63,19 @@ TEST_CASE("url_policy: libav baltieji sąrašai pagal schemą", "[ingest][url]")
     CHECK(format_whitelist_for("http").find("hls") != std::string::npos);
 }
 
+TEST_CASE("url_policy: HTTP šaltinis, kurio patikra rado ne HLS — tik mpegts (H1, TOCTOU)", "[ingest][url]") {
+    // patikra mato MPEG-TS, o libav atidarymas gauna M3U8: HLS demuxeris neturi būti pasiekiamas
+    for (const char* s : {"http", "https"}) {
+        INFO(s);
+        CHECK(format_whitelist_for(s, false) == "mpegts");
+        CHECK(protocol_whitelist_for(s, false) == "http,https,tcp,tls");  // be crypto (tik AES-128 HLS segmentams)
+        CHECK(format_whitelist_for(s, true).find("hls") != std::string::npos);
+        CHECK(protocol_whitelist_for(s, true) == "http,https,tcp,tls,crypto");
+    }
+    CHECK(format_whitelist_for("udp", false) == "mpegts");
+    CHECK(protocol_whitelist_for("srt", false) == "srt");
+}
+
 TEST_CASE("url_policy: grojaraščio nuorodos išsprendžiamos ir ribojamos http / https", "[ingest][url]") {
     std::string out, why;
     const std::string base = "http://127.0.0.1:8080/live/master.m3u8?tok=1";

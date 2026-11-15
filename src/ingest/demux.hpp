@@ -86,15 +86,16 @@ private:
     int key_field_order();
 
 public:
-    // libav io_open sargas (A1; viešas tik dėl C kabliuko): HLS — kiekvienas libav atidarymas (grojaraščiai, segmentai, raktai)
-    // tik http / https; atidarymų daugiau nei kMaxOpensPerSec per sekundę — grojaraščių kilpa (libav HLS demuxeris perkraunamą
+    // libav io_open sargas (A1, H1; viešas tik dėl C kabliuko), kiekvienam HTTP(S) šaltiniui: kiekvienas libav atidarymas (grojaraščiai,
+    // segmentai, raktai) tik http / https; ne HLS šaltinis — tik vienas atidarymas sesijai, o jo atsakymas M3U8 — atmetamas; atidarymų daugiau nei kMaxOpensPerSec per sekundę — grojaraščių kilpa (libav HLS demuxeris perkraunamą
     // media grojaraštį, tapusį master, kaupia be galo ir galiausiai griūva) → sesija nutraukiama, šaltinis jungiasi iš naujo.
     int guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, int flags, AVDictionary** opts);
     static constexpr int kMaxOpensPerSec = 50;
 
 private:
     int (*orig_io_open_)(AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) = nullptr;
-    bool guard_http_ = false;
+    bool guard_http_ = false;  // HTTP(S) šaltinis (H1: sargas visiems, ne tik HLS)
+    bool hls_ = false;         // patikra rado M3U8
     std::uint64_t open_win0_ = 0;
     int opens_in_win_ = 0;
     std::uint64_t opens_total_ = 0;  // sesijos libav atidarymai (pirmas — viršutinis URL)

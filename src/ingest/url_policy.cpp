@@ -54,19 +54,19 @@ bool source_url_allowed(const std::string& url, std::string& why) {
     return false;
 }
 
-std::string protocol_whitelist_for(const std::string& scheme) {
+std::string protocol_whitelist_for(const std::string& scheme, bool hls) {
     if (scheme == "udp") return "udp";
     if (scheme == "rtp") return "rtp,udp";
     if (scheme == "srt") return "srt";
     // HLS ir HTTP TS: http(s) virš tcp / tls; crypto — tik AES-128 HLS segmentams (crypto+http…, viduje vėl tik šis sąrašas)
-    if (is_http(scheme)) return "http,https,tcp,tls,crypto";
+    if (is_http(scheme)) return hls ? "http,https,tcp,tls,crypto" : "http,https,tcp,tls";
     return "file";
 }
 
-std::string format_whitelist_for(const std::string& scheme) {
+std::string format_whitelist_for(const std::string& scheme, bool hls) {
     if (scheme == "rtp") return "rtp,sdp,mpegts";
-    // HLS: grojaraštis ir segmentai (TS, fMP4, ADTS garsas); taip pat tiesioginis MPEG-TS per HTTP
-    if (is_http(scheme)) return "hls,mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac";
+    // HLS: grojaraštis ir segmentai (TS, fMP4, ADTS garsas); tiesioginis MPEG-TS per HTTP — tik mpegts (H1)
+    if (is_http(scheme)) return hls ? "hls,mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac" : "mpegts";
     return "mpegts";  // udp, srt, vietinis failas
 }
 
