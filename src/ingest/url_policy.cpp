@@ -115,12 +115,102 @@ std::string protocol_whitelist_for(const std::string& scheme, bool hls) {
     return "file";
 }
 
+std::string segment_format_whitelist() { return "mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac"; }
+
 std::string format_whitelist_for(const std::string& scheme, bool hls) {
     if (scheme == "rtp") return "rtp,sdp,mpegts";
     // HLS: grojaraštis ir segmentai (TS, fMP4, ADTS garsas); tiesioginis MPEG-TS per HTTP — tik mpegts (H1)
-    if (is_http(scheme)) return hls ? "hls,mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac" : "mpegts";
+    if (is_http(scheme)) return hls ? "hls," + segment_format_whitelist() : std::string("mpegts");
     return "mpegts";  // udp, srt, vietinis failas
 }
+
+namespace {
+
+// URL dalių ribos kaip libav ff_url_decompose (url.c n6.1:91-151): schema iki pirmo iš ":/?#", jei tai ':'; autoritetas — "//…" iki
+// "/?#"; kelias iki "?#"; užklausa iki '#'; likusi — fragmentas. Indeksai — kiekvienos dalies PABAIGA.
+struct UrlParts {
+    std::size_t scheme, auth, path, query;
+};
+
+UrlParts decompose(const std::string& u) {
+    UrlParts r{};
+    std::size_t cur = 0;
+    if (const auto p = u.find_first_of(":/?#"); p != std::string::npos && u[p] == ':') cur = p + 1;
+    r.scheme = cur;
+    if (u.compare(cur, 2, "//") == 0) cur = std::min(u.find_first_of("/?#", cur + 2), u.size());
+    r.auth = cur;
+    cur = std::min(u.find_first_of("?#", cur), u.size());
+    r.path = cur;
+    if (cur < u.size() && u[cur] == '?') cur = std::min(u.find('#', cur), u.size());
+    r.query = cur;
+    return r;
+}
+
+// Kelio segmentai [in, end) pridedami prie out, kurio šaknis (po pradinio '/') — root: "." praleidžiamas, ".." nuima paskutinį
+// segmentą (ne žemiau šaknies) — kaip libav append_path (url.c:166-193)
+void append_path(std::string& out, std::size_t root, const std::string& s, std::size_t in, std::size_t end) {
+    if (in < end && s[in] == '/') ++in;
+    while (in < end) {
+        const std::size_t d = std::min(s.find('/', in), end);
+        const std::size_t next = d + (d < end && s[d] == '/' ? 1 : 0);
+        if (d - in == 1 && s[in] == '.') {
+            // praleidžiama
+        } else if (d - in == 2 && s[in] == '.' && s[in + 1] == '.') {
+            if (out.size() - root > 1)
+                while (out.size() > root) {
+                    out.pop_back();
+                    if (out.back() == '/') break;
+                }
+        } else {
+            out.append(s, in, next - in);
+        }
+        in = next;
+    }
+}
+
+// E: santykinės nuorodos išsprendimas TIKSLIAI kaip libav ff_make_absolute_url2 (url.c n6.1:195-319; HAVE_DOS_PATHS = 0 Linux'e):
+// rezultatas turi sutapti iki simbolio su URL, kurį libav HLS perduoda io_open (žinomų grojaraščių sąrašas lyginamas eilutėmis)
+std::string absolute_like_libav(const std::string& base, const std::string& rel) {
+    const UrlParts b = decompose(base), c = decompose(rel);
+    std::size_t keep = 0;
+    bool simplify = false;
+    // KEEP: komponentai, kurių rel neturi nuo pradžios, imami iš bazės (jei bazė juos turi)
+    const auto keep_if = [&](std::size_t c_end, std::size_t b_end) {
+        if (c_end != 0 || b_end <= keep) return false;
+        keep = b_end;
+        return true;
+    };
+    keep_if(c.scheme, b.scheme);
+    if (keep_if(c.auth, b.auth)) simplify = true;
+    keep_if(c.path, b.path);
+    keep_if(c.query, b.query);
+    keep_if(rel.size(), base.size());
+    std::string out = base.substr(0, keep) + rel.substr(0, c.auth);
+    const bool c_path = c.path > c.auth;
+    bool use_base = b.path > b.auth && keep <= b.auth;
+    if (c.auth > 0) use_base = false;
+    if (c_path && rel[c.auth] == '/') use_base = false;
+    std::size_t bpe = b.path;
+    if (use_base && c_path)
+        while (bpe > b.auth && base[bpe - 1] != '/') --bpe;
+    if (keep > b.auth) simplify = false;
+    if (c.scheme > 0) simplify = false;
+    if (rel.compare(c.scheme, 2, "//") == 0) simplify = true;
+    if (!use_base && !c_path) simplify = false;
+    if (simplify) {
+        out += '/';
+        const std::size_t root = out.size();
+        if (use_base) append_path(out, root, base, b.auth, bpe);
+        if (c_path) append_path(out, root, rel, c.auth, c.path);
+    } else {
+        if (use_base) out.append(base, b.auth, bpe - b.auth);
+        out.append(rel, c.auth, c.path - c.auth);
+    }
+    out.append(rel, c.path, std::string::npos);
+    return out;
+}
+
+}  // namespace
 
 bool resolve_playlist_url(const std::string& base, const std::string& ref_in, std::string& out, std::string& why) {
     const std::string ref = trim(ref_in);
@@ -128,30 +218,11 @@ bool resolve_playlist_url(const std::string& base, const std::string& ref_in, st
         why = "tuščias grojaraščio URL";
         return false;
     }
-    std::string r;
-    if (!url_scheme(ref).empty()) {
-        r = ref;
-    } else {
-        const std::string bs = url_scheme(base);
-        const auto sep = base.find("://");
-        if (bs.empty() || sep == std::string::npos) {
-            why = "grojaraščio bazė be schemos: " + redact_url(base);
-            return false;
-        }
-        const std::size_t auth0 = sep + 3;
-        const std::size_t path0 = std::min(base.find_first_of("/?#", auth0), base.size());
-        if (starts(ref, "//")) {
-            r = bs + ":" + ref;
-        } else if (ref[0] == '/') {
-            r = base.substr(0, path0) + ref;
-        } else {
-            // santykinė: bazės kelias iki paskutinio '/' (be užklausos ir fragmento)
-            const std::size_t q = std::min(base.find_first_of("?#", path0), base.size());
-            const std::string path = base.substr(path0, q - path0);
-            const auto slash = path.rfind('/');
-            r = base.substr(0, path0) + (slash == std::string::npos ? std::string("/") : path.substr(0, slash + 1)) + ref;
-        }
+    if (url_scheme(ref).empty() && (url_scheme(base).empty() || base.find("://") == std::string::npos)) {
+        why = "grojaraščio bazė be schemos: " + redact_url(base);
+        return false;
     }
+    const std::string r = absolute_like_libav(base, ref);
     const std::string rs = url_scheme(r);
     if (!is_http(rs)) {
         why = "grojaraščio URL schema „" + (rs.empty() ? std::string("vietinis kelias") : rs) + "“ neleidžiama (tik http / https): " + redact_url(r);

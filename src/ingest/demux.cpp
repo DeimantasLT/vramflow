@@ -368,6 +368,15 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     guard_http_ = http;
     hls_ = hls;
     if (hls && s.hls_same_host) lim_.only_authority = canonical_authority(top_.location);  // sargui — tas pats serveris kaip patikroje
+    // E: URL, kuriuose libav gali gauti M3U8: viršutinis ir jo location (media grojaraščio perkrovimai — location, hls.c n6.1:782-783,
+    // 613-621), master variantai ir EXT-X-MEDIA grojaraščiai, išspręsti kaip libav (new_playlist → ff_make_absolute_url, hls.c:324)
+    playlist_urls_.clear();
+    if (hls) {
+        playlist_urls_ = {s.url, top_.location};
+        std::string r, why;
+        for (const std::string& v : parse_playlist(top_.text).variants)
+            if (resolve_playlist_url(top_.location, v, r, why)) playlist_urls_.push_back(r);
+    }
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
         err = shown + ": " + what + ": " + why;
@@ -424,6 +433,9 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         if (hls) {
             av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
             av_dict_set(&o, "http_persistent", "0", 0);
+            // E: segmentų demuxeris be hls — įdėtas kontekstas gauna šį format_whitelist (avformat_open_input taiko AVFormatContext
+            // parinktis iš žodyno po ff_copy_whiteblacklists, demux.c n6.1:251, hls.c:2141-2146; DICT tipas „k=v:k=v“, opt.c:459-464)
+            av_dict_set(&o, "seg_format_options", ("format_whitelist=" + segment_format_whitelist()).c_str(), 0);
         }
         // HTTP(S): sustojęs serveris (prisijungus, bet neatsakant) — skaitymo klaida po 10 s, ne amžinas laukimas (ir prisijungiant iš naujo)
         if (http) av_dict_set(&o, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
@@ -668,6 +680,10 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     }
     // H1: patikra matė ne M3U8, o libav gavo M3U8 — atmetama (format_whitelist vis tiek tik mpegts)
     if (!hls_) return refuse("HTTP atsakymas — M3U8 grojaraštis, nors patikra rado ne HLS");
+    // E: M3U8 priimamas tik iš žinomų grojaraščių URL; segmentas, raktas ar init sekcija, atsakę M3U8, — atmetami (ir libav segmentų
+    // demuxeriui hls neleidžiamas — seg_format_options)
+    if (std::find(playlist_urls_.begin(), playlist_urls_.end(), u) == playlist_urls_.end())
+        return refuse("M3U8 atsakymas ne grojaraščio URL (segmentas, raktas ar init sekcija): " + redact_url(u));
     // H2 / H3: M3U8 perskaitomas VISAS (≤ --hls-max-playlist), patikrinamas visas (master tik viršutinis — perkraunamas media
     // grojaraštis, tapęs master, libav HLS demuxeriui duoda „tuščius“ grojaraščius ir jis griūva; ribos; nuorodų schemos), o libav
     // gauna TUOS PAČIUS baitus per atminties kontekstą — jis niekada neanalizuoja to, ko sargas nematė.

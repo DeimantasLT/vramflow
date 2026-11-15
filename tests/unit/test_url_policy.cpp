@@ -237,6 +237,38 @@ TEST_CASE("url_policy: D — autoritetas lyginamas normalizuotas (host raidės, 
     CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXTINF:2,\nhttp://h:8080/s.ts\n"), false, lim, why));
 }
 
+TEST_CASE("url_policy: E — nuorodos išsprendžiamos kaip libav ff_make_absolute_url (taškų segmentai, užklausa, fragmentas)", "[ingest][url]") {
+    // libav (url.c n6.1:166-319): URL su schema ir autoritetu — taškų segmentai suprastinami; tik užklausa / fragmentas — bazės kelias
+    // išlieka; grojaraščių URL sąrašas (E) lyginamas su tuo, ką libav perduoda io_open, todėl turi sutapti iki simbolio
+    const std::string base = "http://h:8080/a/b/master.m3u8?tok=1";
+    const auto res = [&](const char* ref) {
+        std::string out, why;
+        return resolve_playlist_url(base, ref, out, why) ? out : "<klaida: " + why + ">";
+    };
+    CHECK(res("../v/x.m3u8") == "http://h:8080/a/v/x.m3u8");
+    CHECK(res("./x.m3u8") == "http://h:8080/a/b/x.m3u8");
+    CHECK(res("c/./d/../e.ts") == "http://h:8080/a/b/c/e.ts");
+    CHECK(res("../../../../x.ts") == "http://h:8080/x.ts");  // virš šaknies — lieka šaknyje
+    CHECK(res("/p/../q.ts") == "http://h:8080/q.ts");
+    CHECK(res("?q=2") == "http://h:8080/a/b/master.m3u8?q=2");
+    CHECK(res("#f") == "http://h:8080/a/b/master.m3u8?tok=1#f");
+    CHECK(res("//o/p/../q") == "http://o/q");
+    CHECK(res("http://o/a/../b?x=1") == "http://o/b?x=1");  // absoliutus su autoritetu — irgi suprastinamas
+    CHECK(res("x.ts?s=1#t") == "http://h:8080/a/b/x.ts?s=1#t");
+    std::string out, why;
+    REQUIRE(resolve_playlist_url("https://h", "seg.ts", out, why));
+    CHECK(out == "https://h/seg.ts");
+    REQUIRE(resolve_playlist_url("http://h/dir/", "a/.", out, why));
+    CHECK(out == "http://h/dir/a/");
+}
+
+TEST_CASE("url_policy: E — segmentų demuxeriui hls neleidžiamas (įdėtas grojaraštis vietoje segmento)", "[ingest][url]") {
+    const std::string seg = segment_format_whitelist();
+    CHECK(seg.find("hls") == std::string::npos);
+    CHECK(seg == "mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac");
+    CHECK(format_whitelist_for("http", true) == "hls," + seg);  // viršutinis — hls + tie patys segmentų formatai
+}
+
 TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
     HlsLimits lim;
     std::string why;

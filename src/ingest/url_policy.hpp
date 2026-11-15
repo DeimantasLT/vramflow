@@ -25,6 +25,8 @@ bool source_url_allowed(const std::string& url, std::string& why);
 // M3U8; false (H1) — tik MPEG-TS per HTTP: HLS demuxeris nepasiekiamas, net jei libav paties atidarymas gautų M3U8 (TOCTOU).
 std::string protocol_whitelist_for(const std::string& scheme, bool hls = true);
 std::string format_whitelist_for(const std::string& scheme, bool hls = true);
+// E: HLS segmentų (įdėto) demuxerio format_whitelist — be hls (segmentas negali būti grojaraštis).
+std::string segment_format_whitelist();
 
 // Grojaraščio nuoroda ref, išspręsta pagal grojaraščio URL base (RFC 3986 supaprastintai: absoliuti, "//host…", "/kelias",
 // santykinė). true — rezultatas http / https (out); kitaip why — aiški priežastis (schema išvalyta nuo paslapčių).

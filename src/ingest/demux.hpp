@@ -12,6 +12,7 @@ extern "C" {
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "common/format.hpp"
 #include "ingest/av_input.hpp"
@@ -133,6 +134,7 @@ private:
     static void ff_close(AVFormatContext* s, AVIOContext** pb);
     std::uint64_t refused_opens_ = 0;
     std::string shown_;  // šaltinio URL be paslapčių
+    std::vector<std::string> playlist_urls_;  // E: URL, kurių M3U8 atsakymas leidžiamas (viršutinis, location, variantai)
 };
 
 // HTTP(S) šaltinio patikra prieš libav (A1, B8): ar turinys — M3U8 (hls), ir jei taip — master → media (ne giliau, be kilpų),

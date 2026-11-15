@@ -873,6 +873,33 @@ def hls_redirect_case(out):
 
 
 
+def hls_segment_m3u8_case(out):
+    """E (round 11): media grojaraščio naujas segmentas atsako media grojaraščiu (M3U8 ne grojaraščio URL). Sargas M3U8 priima tik iš
+    žinomų grojaraščių URL (viršutinis ir jo location, master variantai) — čia atmesta; procesas gyvena, UDP šaltinis — be praradimų."""
+    tid = "ingest_hls_security[segment_m3u8]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+
+    def extra(srv):
+        srv.routes["/nested.ts"] = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2.0,\nlive0.ts\n"
+        return b"#EXTINF:2.0,\nnested.ts\n"
+
+    si, sv, ri, err, srv = hls_live_swap_case(out, tid, BASE_PORT + 63, extra)
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    line = next((ln for ln in err.splitlines() if "ne grojaraščio URL" in ln and "sesija nutraukiama" in ln), "")
+    if not line:
+        problems.append("žurnale nėra „M3U8 … ne grojaraščio URL“ atmetimo (sesija nutraukiama)")
+    if srv.hits.get("/nested.ts", 0) < 1:
+        problems.append("segmentas nested.ts neužklaustas (testo sąranka)")
+    if flow(si, 1).get("input_reconnects", 0) < 1:
+        problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | nested.ts GET {srv.hits.get('/nested.ts', 0)} | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
+
+
+
 def rss_kb(pid):
     try:
         for ln in open(f"/proc/{pid}/status"):
@@ -1041,6 +1068,7 @@ def ingest_hls_security(out):
         res += hls_toctou_case(out)
         res += hls_peek_case(out)
         res += hls_redirect_case(out)
+        res += hls_segment_m3u8_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:
             tid = f"ingest_hls_security[{name}]"
