@@ -207,3 +207,18 @@ TEST_CASE("url_policy: L1 — SRT slaptažodis iš aplinkos / failo, ne argv", "
     CHECK_FALSE(srt_passphrase_ok("Abcdefgh&mode=caller", why));     // užklausos skyrikliai sugadintų URL
     CHECK(why.find("Abcdefgh") == std::string::npos);
 }
+
+TEST_CASE("url_policy: --hls-same-host — nuorodos tik į grojaraščio serverį", "[ingest][url]") {
+    CHECK(url_authority("http://User:pw@Host.Example:8080/a?b") == "host.example:8080");
+    CHECK(url_authority("https://h/x") == "h");
+    HlsLimits lim;
+    lim.only_authority = "127.0.0.1:8080";
+    std::string why;
+    const std::string base = "http://127.0.0.1:8080/live/x.m3u8";
+    CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n#EXTINF:2,\n/abs/t.ts\n"), false, lim, why));
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://169.254.169.254/latest\n"), false, lim, why));
+    CHECK(why.find("--hls-same-host") != std::string::npos);
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1:9/k\"\n"), false, lim, why));
+    lim.only_authority.clear();  // numatyta — bet koks http(s) serveris (SSRF dokumentuota)
+    CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://169.254.169.254/latest\n"), false, lim, why));
+}

@@ -239,9 +239,24 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
     }
     std::string r;
     for (const auto* v : {&pi.variants, &pi.refs})
-        for (const std::string& x : *v)
+        for (const std::string& x : *v) {
             if (!resolve_playlist_url(base, x, r, why)) return false;
+            if (!lim.only_authority.empty() && url_authority(r) != lim.only_authority) {
+                why = "grojaraščio nuoroda į kitą serverį (--hls-same-host: tik " + lim.only_authority + "): " + redact_url(r);
+                return false;
+            }
+        }
     return true;
+}
+
+std::string url_authority(const std::string& url) {
+    const auto sep = url.find("://");
+    if (url_scheme(url).empty() || sep == std::string::npos) return {};
+    const std::size_t a0 = sep + 3;
+    const std::size_t a1 = std::min(url.find_first_of("/?#", a0), url.size());
+    std::string auth = url.substr(a0, a1 - a0);
+    if (const auto at = auth.rfind('@'); at != std::string::npos) auth = auth.substr(at + 1);
+    return lower(auth);
 }
 
 bool secret_from(const std::string& spec, std::string& out, std::string& why) {

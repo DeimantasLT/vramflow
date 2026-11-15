@@ -1001,6 +1001,7 @@ int run_ingest(const Opts& o_in) {
         s->spec.url = srt_pass.empty() ? o.inputs[k] : ig::with_srt_passphrase(o.inputs[k], srt_pass);
         s->spec.hls_max_target_s = o.hls_max_target_s;
         s->spec.hls_max_playlist = o.hls_max_playlist;
+        s->spec.hls_same_host = o.hls_same_host;
         s->spec.format = o.format;
         s->spec.audio = o.ingest_audio;
         s->spec.audio_channels = o.audio_channels;

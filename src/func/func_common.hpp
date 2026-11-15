@@ -181,6 +181,7 @@ struct Opts {
     std::uint32_t max_audio_ring_mb = 256;
     std::uint32_t max_queue_mb = 0;   // --max-queue-mb (0 — pagal latenciją)
     std::string srt_passphrase_from;  // L1: --srt-passphrase-from env:VARDAS | file:/kelias
+    bool hls_same_host = false;       // --hls-same-host
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
     std::string dump_dir;
     std::uint32_t dump_count = 0;

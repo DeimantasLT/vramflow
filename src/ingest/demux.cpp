@@ -198,15 +198,17 @@ bool fetch_playlist(const std::string& url, AVIOInterruptCB* cb, std::size_t max
 
 }  // namespace
 
-bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, FetchedPlaylist& top,
-                  std::string& err) {
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim_in, bool same_host, bool& hls, std::int64_t& target_ns,
+                  FetchedPlaylist& top, std::string& err) {
     hls = false;
     target_ns = 0;
-    if (!fetch_playlist(url, cb, lim.max_bytes, true, top, err)) return false;
+    if (!fetch_playlist(url, cb, lim_in.max_bytes, true, top, err)) return false;
     const PlaylistInfo pt = parse_playlist(top.text);
     if (!pt.m3u) return true;  // ne HLS (turinys nuspręstas, ne URL galūnė — B8)
     hls = true;
     const std::string& base = top.location;  // nukreipus — santykinės nuorodos pagal galutinį URL (kaip libav)
+    HlsLimits lim = lim_in;
+    if (same_host) lim.only_authority = url_authority(base);
     // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
     // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
     if (!check_playlist(base, pt, true, lim, err)) return false;
@@ -264,7 +266,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     if (http) {
         AVIOInterruptCB cb{interrupt_cb, &intr_};
         std::string why;
-        if (!hls_precheck(s.url, &cb, lim_, hls, hls_target_ns_, top_, why)) {
+        if (!hls_precheck(s.url, &cb, lim_, s.hls_same_host, hls, hls_target_ns_, top_, why)) {
             err = shown + ": HLS: " + (intr_.timed_out ? "nėra duomenų per --input-wait-s" : intr_.silent ? "įėjimas tylus" : why);
             return false;
         }
@@ -278,6 +280,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // atsakyti skirtingai (pirma TS, antra M3U8)
     guard_http_ = http;
     hls_ = hls;
+    if (hls && s.hls_same_host) lim_.only_authority = url_authority(top_.location);  // sargui — tas pats serveris kaip patikroje
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
         err = shown + ": " + what + ": " + why;

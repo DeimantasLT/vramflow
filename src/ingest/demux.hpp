@@ -29,6 +29,7 @@ struct SourceSpec {
     std::uint32_t silence_ms = 2000;  // --input-silence-ms
     double hls_max_target_s = 30;     // --hls-max-target-s (A1)
     std::size_t hls_max_playlist = 1u << 20;  // --hls-max-playlist, baitai (H2)
+    bool hls_same_host = false;               // --hls-same-host: segmentai / raktai / variantai tik iš grojaraščio serverio
 };
 
 // Atsisiųstas grojaraštis: tekstas ir HTTP atsakymo savybės (nukreipimo URL, mime tipas, slapukai) — libav gauna tuos pačius baitus.
@@ -125,7 +126,7 @@ private:
 // visos nuorodos tik http / https (check_playlist), #EXT-X-TARGETDURATION ≤ lim.max_target_s (target_ns — didžiausias iš variantų; 0 — nėra).
 // false — šaltinis netinkamas (err — aiški priežastis be paslapčių).
 // top — viršutinis atsakymas (HLS atveju libav gauna būtent jį, ne antrą užklausą — H1 / H2).
-bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, FetchedPlaylist& top,
-                  std::string& err);
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool same_host, bool& hls, std::int64_t& target_ns,
+                  FetchedPlaylist& top, std::string& err);
 
 }  // namespace mxlv::ingest
