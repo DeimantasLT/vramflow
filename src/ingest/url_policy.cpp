@@ -50,12 +50,43 @@ bool next_line(const std::string& t, std::size_t& p, std::string& line) {
     return true;
 }
 
-// URI="…" atributo reikšmė (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA, EXT-X-I-FRAME-STREAM-INF …); "" — nėra
+// C: URI atributo reikšmė žymės eilutėje (po pirmo ':') TIKSLIAI kaip libav ff_parse_key_value (utils.c n6.1:504-553) su
+// hls.c handle_*_args (raktas lyginamas strncmp(key, "URI=", key_len) — tik lygiai „URI=“): praleidžiami tarpai ir kableliai, raktas —
+// iki pirmo '=', reikšmė kabutėse (\x — x pažodžiui, be uždarančios — iki galo) arba be jų iki tarpo / kablelio, ≤ 4095 baitų
+// (char uri[MAX_URL_SIZE]); tas pats raktas vėl — paskutinė reikšmė. "" — nėra (libav tuščią URI irgi laiko „nėra“).
 std::string uri_attr(const std::string& line) {
-    const auto p = line.find("URI=\"");
-    if (p == std::string::npos) return {};
-    const auto e = line.find('"', p + 5);
-    return e == std::string::npos ? std::string{} : line.substr(p + 5, e - p - 5);
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) return {};
+    const std::size_t n = line.size();
+    std::size_t p = colon + 1;
+    std::string out;
+    for (;;) {
+        while (p < n && (av_space(line[p]) || line[p] == ',')) ++p;
+        if (p >= n) break;
+        const std::size_t k0 = p;
+        const auto eq = line.find('=', k0);
+        if (eq == std::string::npos) break;
+        p = eq + 1;
+        const bool uri = line.compare(k0, p - k0, "URI=") == 0;
+        std::string v;
+        if (p < n && line[p] == '"') {
+            ++p;
+            while (p < n && line[p] != '"') {
+                if (line[p] == '\\') {
+                    if (p + 1 >= n) break;
+                    v += line[p + 1];
+                    p += 2;
+                } else {
+                    v += line[p++];
+                }
+            }
+            if (p < n && line[p] == '"') ++p;
+        } else {
+            while (p < n && !av_space(line[p]) && line[p] != ',') v += line[p++];
+        }
+        if (uri) out = v.substr(0, kMaxLine);
+    }
+    return out;
 }
 
 }  // namespace

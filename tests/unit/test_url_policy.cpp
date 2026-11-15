@@ -181,6 +181,37 @@ TEST_CASE("url_policy: B — eilutės skaidomos kaip libav ff_get_chomp_line (CR
     CHECK_FALSE(parse_playlist(std::string(kTs, sizeof kTs - 1)).m3u);
 }
 
+TEST_CASE("url_policy: C — URI atributai kaip libav ff_parse_key_value (kabutėse ir be)", "[ingest][url]") {
+    // libav (utils.c n6.1:504-553): reikšmė kabutėse (\\ — kitas simbolis pažodžiui) arba be jų iki tarpo / kablelio; raktas — iki
+    // pirmo '=', lyginamas tiksliai; tas pats raktas vėl — paskutinė reikšmė
+    const PlaylistInfo b = parse_playlist(
+        "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=http://169.254.169.254/k\n#EXT-X-MAP:URI=init.mp4,BYTERANGE=10@0\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=a,URI=a.m3u8\n#EXTINF:2,\ns.ts\n");
+    REQUIRE(b.refs.size() == 3);
+    CHECK(b.refs[0] == "http://169.254.169.254/k");
+    CHECK(b.refs[1] == "init.mp4");
+    CHECK(b.refs[2] == "s.ts");
+    REQUIRE(b.variants.size() == 1);
+    CHECK(b.variants[0] == "a.m3u8");
+    const auto one = [](const std::string& tag) {
+        const PlaylistInfo p = parse_playlist("#EXTM3U\n" + tag + "\n");
+        return p.refs.empty() ? std::string("<nėra>") : p.refs.back();
+    };
+    CHECK(one("#EXT-X-KEY:METHOD=AES-128,URI=\"k\\\"x\\\\y\"") == "k\"x\\y");  // \" ir \\ kabutėse
+    CHECK(one("#EXT-X-KEY:URI=\"a\",URI=\"b\"") == "b");                        // paskutinė reikšmė
+    CHECK(one("#EXT-X-MAP: URI=m.mp4 BYTERANGE=1") == "m.mp4");                 // tarpas — skyriklis
+    CHECK(one("#EXT-X-MAP:URI=\"unterminated") == "unterminated");              // be uždarančios kabutės — iki galo
+    CHECK(one("#EXT-X-KEY:METHOD=AES-128,uri=\"x\"") == "<nėra>");             // raktas jautrus raidžių dydžiui
+    CHECK(one("#EXT-X-KEY:METHOD=NONE,FOO BAR,URI=x") == "<nėra>");            // libav raktas „FOO BAR,URI=“ — ne URI
+    CHECK(one("#EXT-X-SESSION-KEY:METHOD=AES-128,URI=sk.bin") == "sk.bin");     // libav neatidaro, bet tikrinama (griežčiau)
+    // --hls-same-host: be kabučių nurodytas kitas serveris atmetamas
+    HlsLimits lim;
+    lim.only_authority = "127.0.0.1:8080";
+    std::string why;
+    CHECK_FALSE(check_playlist("http://127.0.0.1:8080/live/x.m3u8", b, true, lim, why));
+    CHECK(why.find("169.254.169.254") != std::string::npos);
+}
+
 TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
     HlsLimits lim;
     std::string why;
