@@ -101,6 +101,7 @@ struct Source {
     std::unique_ptr<timing::SourceClock> clock;
     std::atomic<std::int64_t> pending_step{0};  // tick'o pastebėtas laikrodžio šuolis → demux gijai (SourceClock — viena gija)
     AVCodecParameters* vpar0 = nullptr;         // pirmos sesijos parametrai (perduodami dekoderio gijoms)
+    AVCodecID vcodec = AV_CODEC_ID_NONE;        // L5: dabartinės sesijos video kodekas (demux gija; žurnalui)
     AVCodecParameters* apar0 = nullptr;
     PacketQueue vq{40000, std::uint64_t{64} << 20}, aq{40000, std::uint64_t{64} << 20};  // baitų riba — nustatoma zondavus (M1)
     std::uint64_t queue_cap_bytes = 0;
@@ -293,6 +294,11 @@ void demux_thread(Source& s, Shared& c) {
                                            vramflow::format_name(s.fmt) + ") — laikomas įverčiu, šaltinis tęsiamas");
                 // nauja sesija: dekoderiai atidaromi iš naujo. Laikrodis — tas pats: siuntėjas pradėjo iš naujo (PTS šuolis) —
                 // nauja epocha ir fiksavimas; gyvo šaltinio PTS tęsiasi — tas pats PTS → TAI atvaizdis (indeksai nepasislenka)
+                if (s.video && in.vpar->codec_id != s.vcodec) {  // L5: kodekas pasikeitė, rastras tas pats — šaltinis tęsiamas
+                    log_line("ingest", s.name + ": kodekas pasikeitė po prisijungimo iš naujo: " + avcodec_get_name(s.vcodec) + " → " +
+                                           avcodec_get_name(in.vpar->codec_id) + " (rastras tas pats) — dekoderis atidaromas iš naujo, šaltinis tęsiamas");
+                    s.vcodec = in.vpar->codec_id;
+                }
                 if (s.video) s.vq.push(QItem{{}, par_copy(in.vpar)});
                 if (s.audio) s.aq.push(in.audio ? QItem{{}, par_copy(in.apar)} : QItem{{}, nullptr, true});
             }
@@ -432,7 +438,9 @@ void video_thread(Source& s, Shared& c) {
     };
     if (!open(s.vpar0)) return;
     std::uint64_t streak = 0;  // paketų iš eilės su dekoderio klaida ir be naujo kadro
-    const bool is_h264 = s.vpar0->codec_id == AV_CODEC_ID_H264;
+    // L5: įėjimo taško skeneris (recovery point SEI / I pjūvis) — tik H.264 ir tik pagal DABARTINĖS sesijos kodeką (po prisijungimo
+    // iš naujo H.264 ↔ HEVC tuo pačiu rastru — ne formato pasikeitimas: dekoderis atidaromas iš naujo, skeneris seka kodeką)
+    auto is_h264 = [&] { return cur_par && cur_par->codec_id == AV_CODEC_ID_H264; };
     ig::H264Scan entry_scan;
     std::uint64_t waited = 0;
     auto reset_scan = [&] {
@@ -480,7 +488,7 @@ void video_thread(Source& s, Shared& c) {
             // B7: įėjimo taškas — rakto paketas ARBA (H.264) recovery point SEI / I pjūvis (atviras GOP, intra atnaujinimas: IDR
             // gali niekada neateiti). Išmesti paketai skaičiuojami; per ilgai be įėjimo taško — matoma būsena (žurnalas, skaitiklis).
             bool entry = it.p.key;
-            if (!entry && is_h264 && it.p.pkt) entry = entry_scan.feed(it.p.pkt->data, static_cast<std::size_t>(it.p.pkt->size));
+            if (!entry && is_h264() && it.p.pkt) entry = entry_scan.feed(it.p.pkt->data, static_cast<std::size_t>(it.p.pkt->size));
             if (!entry) {
                 ++s.entry_dropped;
                 if (++waited == kNoEntryPkts) {
@@ -1032,6 +1040,7 @@ int run_ingest(const Opts& o_in) {
         if (s->video) s->clock->add_stream(ig::kVideoStream, {in.video_tb.num, in.video_tb.den}, true);
         if (s->audio) s->clock->add_stream(ig::kAudioStream, {in.audio_tb.num, in.audio_tb.den}, false);
         s->vpar0 = par_copy(in.vpar);
+        if (s->video) s->vcodec = in.vpar->codec_id;
         s->apar0 = par_copy(in.apar);
         const double ring_s = static_cast<double>(s->latency_ns + sh.gate.lead_ns + 3'000'000'000LL) / 1e9;
         const auto ring_n = static_cast<std::size_t>(ring_s * 48000.0);

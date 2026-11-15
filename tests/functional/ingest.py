@@ -335,6 +335,45 @@ def ingest_relock_audio_resync(out):
     return res
 
 
+def ingest_codec_change_reconnect(out):
+    """L5 (round 10): po prisijungimo iš naujo tas pats rastras, bet kitas kodekas (HEVC 1080p25 → H.264 1080p25 atviru GOP, prisijungta
+    vidury — IDR neateina): tai ne formato pasikeitimas — dekoderis atidaromas iš naujo šiam kodekui, įėjimo taško paieška seka
+    DABARTINĖS sesijos kodeką (anksčiau — pirmos sesijos: H.264 recovery point / I pjūvis po HEVC sesijos nebuvo ieškomi ir vaizdas
+    negrįždavo), šaltinis tęsiasi: format_changed == 0, žurnale — kodeko pakeitimas, po jo kadrai dekoduojami ir |A/V| ≤ 1 kadras."""
+    tid = "ingest_codec_change_reconnect"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    if not (CLIPS / "hevc_1080p25.ts").exists():
+        return [F.result(tid, "SKIP", why="nėra hevc_1080p25.ts (FFmpeg be libx265)")]
+    port = BASE_PORT + 57
+    T, FIRST, GAP = 34, 12, 4
+    tb = [sys.executable, str(PERF / "ts_burst.py")]
+    q = lambda xs: " ".join(f"'{x}'" for x in xs)
+    cmd = (f"{q(tb + [str(CLIPS / 'hevc_1080p25.ts'), '--port', str(port), '--duration', str(FIRST)])}; sleep {GAP}; "
+           f"exec {q(tb + [str(CLIPS / 'open_gop_1080p25.ts'), '--port', str(port), '--start-s', '2.3'])}")
+    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"], [lambda: Sender(out, f"{tid}/snd", ["bash", "-c", cmd])], T, warm=6)
+    fi = flow(si)
+    a = av_stats(sv)
+    problems = []
+    if ri is None or ri < 0 or ri == 6 or si is None:
+        problems.append(f"exit {ri} (laukta ne 6 ir ne signalas)")
+    if fi.get("format_changed", 0):
+        problems.append("format_changed — šaltinis sustabdytas")
+    if fi.get("input_reconnects", 0) < 1:
+        problems.append(f"input_reconnects {fi.get('input_reconnects')}")
+    line = next((ln for ln in err.splitlines() if "kodekas pasikeitė" in ln), "")
+    if "h264" not in line:
+        problems.append("žurnale nėra kodeko pakeitimo hevc → h264")
+    if fi.get("no_entry_point", 0):
+        problems.append(f"no_entry_point {fi.get('no_entry_point')} (H.264 įėjimo taškas po HEVC sesijos neieškotas)")
+    i0 = a["raw"][0][0] if a["raw"] else 0
+    after = [p[1] / 1000.0 for p in a["raw"] if (p[0] - i0) / 25 > FIRST + GAP + 4]
+    if len(after) < 5 or max(abs(x) for x in after) > 40:
+        problems.append(f"po kodeko pakeitimo A/V porų {len(after)}, maks. {max((abs(x) for x in after), default=None)} ms")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | {line.strip()[-120:]} | po pakeitimo porų {len(after)} | " + summary_line(si, sv, a, ratio_ok(flow(sv))))]
+
+
 def ingest_pts_order_not_arrival(out):
     if (why := ensure_clips()):
         return [F.result("ingest_pts_order_not_arrival", "FAIL", why=why)]
@@ -1518,4 +1557,5 @@ TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe
 TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
 TESTS["ingest_forced_relock"] = ingest_forced_relock
 TESTS["ingest_relock_audio_resync"] = ingest_relock_audio_resync
+TESTS["ingest_codec_change_reconnect"] = ingest_codec_change_reconnect
 TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap
