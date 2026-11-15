@@ -122,15 +122,23 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   **Saugumas:** `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
   libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`. HTTP(S) šaltinis atsisiunčiamas vieną kartą ir
   libavformat gauna būtent tą atsakymą; HLS atpažįstamas pagal turinį, ne HLS — tik MPEG-TS (vienas atidarymas sesijai, M3U8 atsakymas
-  atmetamas). Kiekvienas libavformat atsisiunčiamas grojaraštis perskaitomas ir patikrinamas VISAS (≤ `--hls-max-playlist`, 1 MiB):
-  master tik viršuje, ≤ 15 variantų ir 10 000 nuorodų, nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`
-  (30); pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
-  Paketų eilės ribotos baitais (`--max-queue-mb`; perteklius išmetamas ir skaičiuojamas, žymės — niekada), garso žiedas ≤
+  atmetamas). Kiekvienas libavformat atidaromas atsakymas peržiūrimas (pirmi 4 KiB) be pakartotinės užklausos (peržiūrėti baitai
+  atiduodami iš atminties). M3U8 priimamas tik iš grojaraščio URL (viršutinis ir jo galutinis URL, patikrinto master variantai,
+  jų perkrovimai); segmentas, raktas ar init sekcija, atsakę grojaraščiu, — atmetami, segmentų demuxeriui `hls` neleidžiamas.
+  Kiekvienas toks grojaraštis perskaitomas ir patikrinamas VISAS (≤ `--hls-max-playlist`, 1 MiB) taip, kaip jį skaito libavformat
+  (eilutės baigiasi LF, CR, CR LF arba NUL; atributai kabutėse ir be jų): master tik viršuje, ≤ 15 variantų, 10 000 nuorodų ir 4
+  `#EXT-X-MAP` eilutės, nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s` (30); libavformat init sekcijų
+  (`#EXT-X-MAP`) neatlaisvina iki sesijos pabaigos — jų sąmata ≤ 16 MiB sesijai; pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
+  Paketų eilės ribotos baitais (`--max-queue-mb` — kiekvienai eilei, šaltinis turi dvi: video ir garso; perteklius išmetamas ir skaičiuojamas, žymės — niekada), garso žiedas ≤
   `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir statistikoje — `***` (kabutėse — iki
   uždarančios kabutės; neišvaloma: tarpas užklausos reikšmėje be kabučių, paslaptis URL kelyje). SRT slaptažodis — `--srt-passphrase-from
-  env:VARDAS | file:/kelias` (ne `/proc/*/cmdline`). **SSRF:** grojaraštis gali nukreipti procesą į bet kurį pasiekiamą http(s)
-  host:port (ir loopback, debesų metaduomenų adresus); `--hls-same-host` leidžia tik viršutinio grojaraščio serverį; libav `https`
-  numatytai sertifikatų netikrina (`tls_verify=0`). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
+  env:VARDAS | file:/kelias` (ne `/proc/*/cmdline`; `+` neleidžiamas — libavformat jį paverčia tarpu). **SSRF:** grojaraštis gali nukreipti procesą į bet kurį pasiekiamą http(s)
+  host:port (ir loopback, debesų metaduomenų adresus), o bet kuris segmentas, raktas ar grojaraštis — HTTP nukreipimu (libavformat
+  seka iki 8, FFmpeg 6.1 to išjungti neleidžia). `--hls-same-host` leidžia tik viršutinio grojaraščio serverį (host be raidžių dydžio
+  ir galinio taško, numatytas prievadas 80 / 443): tikrinamas tekstas, URL prieš atidarymą ir galutinis URL po nukreipimų prieš
+  skaitant turinį — kitas serveris baigia sesiją, jo atsakymas nenaudojamas. Neužkertama: pačios nukreipimų užklausos (padaromos
+  prieš grįžtant atidarymui) ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas — tikrinamas tik URL prieš atidarymą).
+  libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
   slydimai — pateikimo tvarka, perfiksavimas — žurnale su priežastimi ir dydžiu, garsas — su 5 ms perėjimu; dekodavimas nuo
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
   naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
