@@ -46,12 +46,18 @@ struct PlaylistInfo {
 };
 PlaylistInfo parse_playlist(const std::string& text);
 
-// HLS ribos (A1).
+// HLS ribos (A1, H2 / H3).
 struct HlsLimits {
-    double max_target_s = 30;          // --hls-max-target-s
-    std::size_t max_playlists = 16;    // master + variantai, kuriuos tikrinam
-    std::size_t max_bytes = 1u << 20;  // grojaraščio dydis
+    double max_target_s = 30;           // --hls-max-target-s
+    std::size_t max_playlists = 16;     // master + variantai, kuriuos tikrinam
+    std::size_t max_bytes = 1u << 20;   // grojaraščio dydis (--hls-max-playlist); daugiau — šaltinis atmetamas
+    std::size_t max_segments = 10000;   // media grojaraščio nuorodų (segmentų, raktų, EXT-X-MAP) riba
 };
+
+// H2: VISO grojaraščio patikra (ir patikroje prieš libav, ir sarge kiekvienam libav atsisiųstam M3U8): master leidžiamas tik
+// viršutiniam (allow_master), variantų ≤ max_playlists − 1, nuorodų ≤ max_segments, #EXT-X-TARGETDURATION ≤ max_target_s, kiekviena
+// nuoroda (išspręsta pagal base) — tik http / https. false — why (be paslapčių).
+bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_master, const HlsLimits& lim, std::string& why);
 
 // Garso žiedo dydis baitais (talpa apvalinama aukštyn iki 2 laipsnio, float32, kanalai) — tikrinama prieš --max-audio-ring-mb.
 std::uint64_t audio_ring_bytes(int channels, std::uint64_t samples);

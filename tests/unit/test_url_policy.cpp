@@ -135,6 +135,37 @@ TEST_CASE("url_policy: grojaraščio analizė — master, media, TARGETDURATION,
     CHECK(parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:100000\n").target_s == 100000.0);
 }
 
+TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
+    HlsLimits lim;
+    std::string why;
+    const std::string base = "http://127.0.0.1:8080/live/x.m3u8";
+    // > 4 KiB komentarų, tada master eilutė (anksčiau sargas matė tik pirmus 4 KiB)
+    const std::string padded = "#EXTM3U\n" + std::string(6000, '#') + "\n#EXT-X-STREAM-INF:BANDWIDTH=1\nx.m3u8\n";
+    const PlaylistInfo pp = parse_playlist(padded);
+    CHECK(pp.master);
+    CHECK_FALSE(check_playlist(base, pp, false, lim, why));
+    CHECK(why.find("įdėtas master") != std::string::npos);
+    CHECK(check_playlist(base, pp, true, lim, why));  // viršutinis master — leidžiamas
+    // variantų riba
+    std::string many_v = "#EXTM3U\n";
+    for (int k = 0; k < 40; ++k) many_v += "#EXT-X-STREAM-INF:BANDWIDTH=1\nv" + std::to_string(k) + ".m3u8\n";
+    CHECK_FALSE(check_playlist(base, parse_playlist(many_v), true, lim, why));
+    CHECK(why.find("variantų") != std::string::npos);
+    // segmentų riba
+    std::string many_s = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n";
+    for (std::size_t k = 0; k <= lim.max_segments; ++k) many_s += "#EXTINF:2,\ns" + std::to_string(k) + ".ts\n";
+    CHECK_FALSE(check_playlist(base, parse_playlist(many_s), false, lim, why));
+    CHECK(why.find("nuorodų") != std::string::npos);
+    // TARGETDURATION ir nuorodų schema — visame tekste, ne tik pradžioje
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:31\n#EXTINF:2,\ns.ts\n"), false, lim, why));
+    CHECK(why.find("TARGETDURATION") != std::string::npos);
+    const std::string late_file = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n" + std::string(8000, '#') + "\n#EXTINF:2,\nfile:///etc/passwd\n";
+    CHECK_FALSE(check_playlist(base, parse_playlist(late_file), false, lim, why));
+    CHECK(why.find("neleidžiama") != std::string::npos);
+    CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\ns.ts\n"), false, lim, why));
+    CHECK_FALSE(check_playlist(base, parse_playlist("not m3u"), true, lim, why));
+}
+
 TEST_CASE("url_policy: garso žiedo dydis baitais (2 laipsnis × kanalai × float)", "[ingest][url]") {
     CHECK(audio_ring_bytes(2, 211200) == 262144ull * 2 * 4);
     CHECK(audio_ring_bytes(16, 93 * 48000) == 8388608ull * 16 * 4);  // HLS 30 s segmentai, 16 kanalų — 512 MB

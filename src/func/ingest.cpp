@@ -204,6 +204,7 @@ struct Shared {
     ig::FeedGateConfig gate;
     ig::AudioSyncConfig async;
     const std::atomic<bool>& stop;
+    std::int64_t open_ns = 0;  // --input-wait-s, ns (0 — neribotai)
 };
 
 // libav žurnalas be paslapčių (A1): HLS / HTTP / SRT moduliai į žurnalą rašo URL (segmentų žetonai, passphrase) — kiekviena eilutė
@@ -269,7 +270,11 @@ void demux_thread(Source& s, Shared& c) {
             if (!first) {
                 s.reconnects_live = s.reconnects;  // ta pati (demux) gija didina reconnects — gyvai statistikai (B8)
                 std::string err;
-                if (!s.demux.open(s.spec, c.stop, 0, err)) {
+                // H3: HTTP(S) — ir prisijungiant iš naujo atidarymas ribotas (--input-wait-s, numatyta 30 s): serveris, kuris priima
+                // ryšį, bet neatsako, kitaip laikytų šaltinį amžinai. UDP / RTP / SRT laukia paketų be ribos (šaltinis grįš pats).
+                const std::string sc = ig::url_scheme(s.spec.url);
+                const std::int64_t reopen_ns = sc == "http" || sc == "https" ? (c.open_ns > 0 ? c.open_ns : 30'000'000'000LL) : 0;
+                if (!s.demux.open(s.spec, c.stop, reopen_ns, err)) {
                     why = err;
                     return false;
                 }
@@ -960,7 +965,7 @@ int run_ingest(const Opts& o_in) {
         }
         cudaFree(nullptr);
     }
-    Shared sh{o, decoder, !cpu, hw, dev, {}, {}, stop};
+    Shared sh{o, decoder, !cpu, hw, dev, {}, {}, stop, 0};
     sh.gate.lead_ns = static_cast<std::int64_t>(o.decode_lead_ms) * 1'000'000;
     sh.gate.min_ns = 0;
     sh.async.max_ppm = o.max_comp_ppm;
@@ -973,6 +978,7 @@ int run_ingest(const Opts& o_in) {
     std::vector<int> prc(N, 0);
     std::atomic<bool> failed_probe{false};
     const std::int64_t open_ns = o.input_wait_s > 0 ? static_cast<std::int64_t>(o.input_wait_s * 1e9) : 0;
+    sh.open_ns = open_ns;
     auto probe = [&](std::size_t k) {
         auto& s = src[k];
         s = std::make_unique<Source>();
@@ -980,6 +986,7 @@ int run_ingest(const Opts& o_in) {
         s->name = "šaltinis " + std::to_string(k) + " (" + ig::redact_url(o.inputs[k]) + ")";  // vardas eina į visus žurnalus
         s->spec.url = o.inputs[k];
         s->spec.hls_max_target_s = o.hls_max_target_s;
+        s->spec.hls_max_playlist = o.hls_max_playlist;
         s->spec.format = o.format;
         s->spec.audio = o.ingest_audio;
         s->spec.audio_channels = o.audio_channels;

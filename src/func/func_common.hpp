@@ -176,6 +176,7 @@ struct Opts {
     bool test_audio_reopen_fail = false;
     bool test_hw_decoder_fail = false;  // paslėpta (B8 testui): NVDEC / cuvid atidarymas nepavyksta → programinis  // paslėpta (A2 testui): kiekvienas garso dekoderio atidarymas po pirmo nepavyksta
     double hls_max_target_s = 30;
+    std::size_t hls_max_playlist = std::size_t{1} << 20;  // H2: --hls-max-playlist, baitai
     std::uint32_t max_audio_ring_mb = 256;
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
     std::string dump_dir;

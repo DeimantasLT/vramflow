@@ -28,7 +28,18 @@ struct SourceSpec {
     int audio_channels = 2;
     std::uint32_t silence_ms = 2000;  // --input-silence-ms
     double hls_max_target_s = 30;     // --hls-max-target-s (A1)
+    std::size_t hls_max_playlist = 1u << 20;  // --hls-max-playlist, baitai (H2)
 };
+
+// Atsisiųstas grojaraštis: tekstas ir HTTP atsakymo savybės (nukreipimo URL, mime tipas, slapukai) — libav gauna tuos pačius baitus.
+struct FetchedPlaylist {
+    std::string text, location, mime, cookies;
+};
+// H2: atminties AVIOContext su grojaraščio tekstu ir HTTP savybėmis (av_opt_get location / mime_type / cookies / rw_timeout veikia);
+// atlaisvinamas TIK free_mem_playlist_io (ne avio_close).
+AVIOContext* mem_playlist_io(const FetchedPlaylist& f);
+bool is_mem_playlist_io(const AVIOContext* io);
+void free_mem_playlist_io(AVIOContext** io);
 
 enum class Kind : std::uint8_t { Video, Audio };
 constexpr int kVideoStream = 0, kAudioStream = 1;  // SourceClock srautų numeriai (ne libav indeksai)
@@ -90,10 +101,16 @@ public:
     // segmentai, raktai) tik http / https; ne HLS šaltinis — tik vienas atidarymas sesijai, o jo atsakymas M3U8 — atmetamas; atidarymų daugiau nei kMaxOpensPerSec per sekundę — grojaraščių kilpa (libav HLS demuxeris perkraunamą
     // media grojaraštį, tapusį master, kaupia be galo ir galiausiai griūva) → sesija nutraukiama, šaltinis jungiasi iš naujo.
     int guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, int flags, AVDictionary** opts);
+    int guarded_close(AVFormatContext* s, AVIOContext* pb);
     static constexpr int kMaxOpensPerSec = 50;
 
 private:
     int (*orig_io_open_)(AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) = nullptr;
+    int (*orig_io_close2_)(AVFormatContext*, AVIOContext*) = nullptr;
+    HlsLimits lim_;
+    FetchedPlaylist top_;            // H2: viršutinis grojaraštis — tie patys baitai patikrai ir libav (AVFMT_FLAG_CUSTOM_IO)
+    AVIOContext* top_pb_ = nullptr;  // jo atminties kontekstas (mūsų; libav jo neuždaro)
+    void free_top_pb();
     bool guard_http_ = false;  // HTTP(S) šaltinis (H1: sargas visiems, ne tik HLS)
     bool hls_ = false;         // patikra rado M3U8
     std::uint64_t open_win0_ = 0;
@@ -105,8 +122,10 @@ private:
 };
 
 // HTTP(S) šaltinio patikra prieš libav (A1, B8): ar turinys — M3U8 (hls), ir jei taip — master → media (ne giliau, be kilpų),
-// visos nuorodos tik http / https, #EXT-X-TARGETDURATION ≤ lim.max_target_s (target_ns — didžiausias iš variantų; 0 — nėra).
+// visos nuorodos tik http / https (check_playlist), #EXT-X-TARGETDURATION ≤ lim.max_target_s (target_ns — didžiausias iš variantų; 0 — nėra).
 // false — šaltinis netinkamas (err — aiški priežastis be paslapčių).
-bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, std::string& err);
+// top — viršutinis atsakymas (HLS atveju libav gauna būtent jį, ne antrą užklausą — H1 / H2).
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, FetchedPlaylist& top,
+                  std::string& err);
 
 }  // namespace mxlv::ingest

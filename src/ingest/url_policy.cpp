@@ -3,6 +3,7 @@
 #include "ingest/url_policy.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -204,6 +205,36 @@ PlaylistInfo parse_playlist(const std::string& text) {
     }
     if (!pi.variants.empty() && !pi.master) pi.master = true;  // tik EXT-X-MEDIA — vis tiek master lygmuo
     return pi;
+}
+
+bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_master, const HlsLimits& lim, std::string& why) {
+    if (!pi.m3u) {
+        why = "ne M3U8 grojaraštis: " + redact_url(base);
+        return false;
+    }
+    if (pi.master && !allow_master) {
+        why = "įdėtas master grojaraštis (gylis > 1: master → media): " + redact_url(base);
+        return false;
+    }
+    if (pi.variants.size() + 1 > lim.max_playlists) {
+        why = "master grojaraštyje " + std::to_string(pi.variants.size()) + " variantų > " + std::to_string(lim.max_playlists - 1);
+        return false;
+    }
+    if (pi.refs.size() > lim.max_segments) {
+        why = "grojaraštyje " + std::to_string(pi.refs.size()) + " nuorodų (segmentų, raktų) > riba " + std::to_string(lim.max_segments);
+        return false;
+    }
+    if (pi.target_s > lim.max_target_s) {
+        char b[160];
+        std::snprintf(b, sizeof b, "#EXT-X-TARGETDURATION %.0f s > riba %.0f s (--hls-max-target-s)", pi.target_s, lim.max_target_s);
+        why = b;
+        return false;
+    }
+    std::string r;
+    for (const auto* v : {&pi.variants, &pi.refs})
+        for (const std::string& x : *v)
+            if (!resolve_playlist_url(base, x, r, why)) return false;
+    return true;
 }
 
 std::uint64_t audio_ring_bytes(int channels, std::uint64_t samples) {

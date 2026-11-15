@@ -6,10 +6,13 @@
 
 extern "C" {
 #include <libavutil/dict.h>
+#include <libavutil/mem.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -19,13 +22,159 @@ namespace mxlv::ingest {
 
 namespace {
 
-// Grojaraščio tekstas per avio — TIK http / https (protocol_whitelist; įdėti tcp / tls — HTTP transportas), skaitymo riba
-// rw_timeout 10 s (prisijungus iš naujo atidarymo ribos nėra — sustojęs serveris kitaip laikytų šaltinį amžinai).
-// sniff — pirmiausia tik ≤ 4 KiB: ne M3U8 (pvz. tiesioginis MPEG-TS per HTTP) — toliau neskaitoma. false — klaida (err).
-bool fetch_playlist(const std::string& url, AVIOInterruptCB* cb, std::size_t max_bytes, bool sniff, std::string& text, std::string& err) {
+// H2 / H3: libav gauna TIKSLIAI tuos grojaraščio baitus, kuriuos patikrino sargas (atminties AVIOContext, ne antra HTTP užklausa).
+// AVIOContext::av_class — mūsų klasė be parinkčių, kurios vaikas (opaque) — MemIo su location / mime_type / cookies / rw_timeout:
+// av_opt_get(..., AV_OPT_SEARCH_CHILDREN) juos randa kaip tikro HTTP konteksto (libav HLS: nukreipimo URL — santykinėms nuorodoms,
+// mime — zondavimui, rw_timeout — įdėtiems atidarymams). Uždaro tik mūsų io_close2 kabliukas (avio_close tokio konteksto nepalaiko).
+struct MemIo {
+    const AVClass* cls;
+    char* location;
+    char* mime_type;
+    char* cookies;
+    std::int64_t rw_timeout;
+    std::uint8_t* data;
+    std::int64_t size, pos;
+};
+
+constexpr std::int64_t kRwTimeoutUs = 10'000'000;  // HTTP skaitymo riba (rw_timeout, µs): sustojęs serveris — klaida, ne kabojimas
+
+const AVClass* mem_io_class() {
+    static const AVOption opts[] = {
+        {"location", "", offsetof(MemIo, location), AV_OPT_TYPE_STRING, {0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, nullptr},
+        {"mime_type", "", offsetof(MemIo, mime_type), AV_OPT_TYPE_STRING, {0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, nullptr},
+        {"cookies", "", offsetof(MemIo, cookies), AV_OPT_TYPE_STRING, {0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, nullptr},
+        {"rw_timeout", "", offsetof(MemIo, rw_timeout), AV_OPT_TYPE_INT64, {kRwTimeoutUs}, -1, INT64_MAX, AV_OPT_FLAG_DECODING_PARAM, nullptr},
+        {},
+    };
+    static const AVClass c = [] {
+        AVClass k{};
+        k.class_name = "vramflow-playlist";
+        k.item_name = av_default_item_name;
+        k.option = opts;
+        k.version = LIBAVUTIL_VERSION_INT;
+        return k;
+    }();
+    return &c;
+}
+
+const AVClass* mem_pb_class() {
+    static const AVClass c = [] {
+        AVClass k{};
+        k.class_name = "vramflow-playlist-io";
+        k.item_name = av_default_item_name;
+        k.version = LIBAVUTIL_VERSION_INT;
+        k.child_next = [](void* obj, void* prev) -> void* { return prev ? nullptr : static_cast<AVIOContext*>(obj)->opaque; };
+        return k;
+    }();
+    return &c;
+}
+
+int mem_read(void* op, std::uint8_t* buf, int n) {
+    auto* m = static_cast<MemIo*>(op);
+    const std::int64_t left = m->size - m->pos;
+    if (left <= 0) return AVERROR_EOF;
+    const int k = static_cast<int>(std::min<std::int64_t>(n, left));
+    std::memcpy(buf, m->data + m->pos, static_cast<std::size_t>(k));
+    m->pos += k;
+    return k;
+}
+
+std::int64_t mem_seek(void* op, std::int64_t off, int whence) {
+    auto* m = static_cast<MemIo*>(op);
+    if (whence & AVSEEK_SIZE) return m->size;
+    whence &= ~AVSEEK_FORCE;
+    const std::int64_t p = whence == SEEK_SET ? off : whence == SEEK_CUR ? m->pos + off : whence == SEEK_END ? m->size + off : -1;
+    if (p < 0 || p > m->size) return AVERROR(EINVAL);
+    m->pos = p;
+    return p;
+}
+
+void free_mem(MemIo* m) {
+    if (!m) return;
+    av_free(m->location);
+    av_free(m->mime_type);
+    av_free(m->cookies);
+    av_free(m->data);
+    av_free(m);
+}
+
+}  // namespace
+
+AVIOContext* mem_playlist_io(const FetchedPlaylist& f) {
+    auto* m = static_cast<MemIo*>(av_mallocz(sizeof(MemIo)));
+    auto* buf = static_cast<std::uint8_t*>(av_malloc(32768));
+    if (!m || !buf) {
+        av_free(m);
+        av_free(buf);
+        return nullptr;
+    }
+    m->cls = mem_io_class();
+    m->location = av_strdup(f.location.c_str());  // tuščios eilutės, ne nullptr: libav kai kur skaito buf[0] be patikros
+    m->mime_type = av_strdup(f.mime.c_str());
+    m->cookies = av_strdup(f.cookies.c_str());
+    m->rw_timeout = kRwTimeoutUs;
+    m->size = static_cast<std::int64_t>(f.text.size());
+    m->data = static_cast<std::uint8_t*>(av_malloc(f.text.size() + 1));
+    if (!m->location || !m->mime_type || !m->cookies || !m->data) {
+        free_mem(m);
+        av_free(buf);
+        return nullptr;
+    }
+    std::memcpy(m->data, f.text.data(), f.text.size());
+    AVIOContext* io = avio_alloc_context(buf, 32768, 0, m, mem_read, nullptr, mem_seek);
+    if (!io) {
+        free_mem(m);
+        av_free(buf);
+        return nullptr;
+    }
+    io->av_class = mem_pb_class();
+    return io;
+}
+
+bool is_mem_playlist_io(const AVIOContext* io) { return io != nullptr && io->read_packet == mem_read; }
+
+void free_mem_playlist_io(AVIOContext** io) {
+    if (!io || !*io) return;
+    free_mem(static_cast<MemIo*>((*io)->opaque));
+    av_freep(&(*io)->buffer);
+    avio_context_free(io);
+}
+
+namespace {
+
+// HTTP atsakymo savybė (location, mime_type, cookies) iš libav konteksto; "" — nėra
+std::string io_prop(AVIOContext* io, const char* name) {
+    std::uint8_t* v = nullptr;
+    if (av_opt_get(io, name, AV_OPT_SEARCH_CHILDREN, &v) < 0 || v == nullptr) return {};
+    std::string r(reinterpret_cast<const char*>(v));
+    av_free(v);
+    return r;
+}
+
+// Likęs grojaraščio tekstas iš io (jau perskaityta — text) iki max_bytes. false — per didelis (err) arba skaitymo klaida.
+bool read_rest(AVIOContext* io, std::size_t max_bytes, const std::string& shown, std::string& text, std::string& err) {
+    char buf[4096];
+    for (int n; (n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof buf)) != 0;) {
+        if (n < 0) {
+            if (n == AVERROR_EOF) break;
+            err = "grojaraščio skaityti nepavyko: " + averr(n) + ": " + shown;
+            return false;
+        }
+        text.append(buf, static_cast<std::size_t>(n));
+        if (text.size() > max_bytes) {
+            err = "grojaraštis didesnis nei " + std::to_string(max_bytes >> 10) + " KiB (--hls-max-playlist): " + shown;
+            return false;
+        }
+    }
+    return true;
+}
+
+// Grojaraštis per avio — TIK http / https (protocol_whitelist; įdėti tcp / tls — HTTP transportas), skaitymo riba rw_timeout 10 s.
+// sniff — pirmiausia tik ≤ 4 KiB: ne M3U8 (pvz. tiesioginis MPEG-TS per HTTP) — toliau neskaitoma. M3U8 — visas (≤ max_bytes).
+bool fetch_playlist(const std::string& url, AVIOInterruptCB* cb, std::size_t max_bytes, bool sniff, FetchedPlaylist& f, std::string& err) {
     AVDictionary* d = nullptr;
     av_dict_set(&d, "protocol_whitelist", "http,https,tcp,tls", 0);
-    av_dict_set(&d, "rw_timeout", "10000000", 0);
+    av_dict_set(&d, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
     AVIOContext* io = nullptr;
     const int e = avio_open2(&io, url.c_str(), AVIO_FLAG_READ, cb, &d);
     av_dict_free(&d);
@@ -33,81 +182,56 @@ bool fetch_playlist(const std::string& url, AVIOInterruptCB* cb, std::size_t max
         err = "grojaraščio atidaryti nepavyko: " + averr(e) + ": " + redact_url(url);
         return false;
     }
-    text.clear();
+    f = FetchedPlaylist{};
     char buf[4096];
-    bool checked = !sniff;
-    for (int n; (n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof buf)) > 0;) {
-        text.append(buf, static_cast<std::size_t>(n));
-        if (!checked) {
-            checked = true;
-            if (!parse_playlist(text.substr(0, 4096)).m3u) break;  // ne grojaraštis — tiek pakanka
-        }
-        if (text.size() > max_bytes) {
-            avio_closep(&io);
-            err = "grojaraštis didesnis nei " + std::to_string(max_bytes >> 10) + " KiB: " + redact_url(url);
-            return false;
-        }
-    }
+    const int n = avio_read(io, reinterpret_cast<unsigned char*>(buf), sizeof buf);
+    if (n > 0) f.text.assign(buf, static_cast<std::size_t>(n));
+    bool ok = true;
+    if (n > 0 && (!sniff || parse_playlist(f.text).m3u)) ok = read_rest(io, max_bytes, redact_url(url), f.text, err);
+    f.location = io_prop(io, "location");
+    if (f.location.empty()) f.location = url;
+    f.mime = io_prop(io, "mime_type");
+    f.cookies = io_prop(io, "cookies");
     avio_closep(&io);
-    return true;
-}
-
-bool check_refs(const std::string& base, const std::vector<std::string>& refs, std::string& err) {
-    std::string r;
-    for (const std::string& x : refs)
-        if (!resolve_playlist_url(base, x, r, err)) return false;
-    return true;
+    return ok;
 }
 
 }  // namespace
 
-bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, std::string& err) {
+bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& lim, bool& hls, std::int64_t& target_ns, FetchedPlaylist& top,
+                  std::string& err) {
     hls = false;
     target_ns = 0;
-    std::string text;
-    if (!fetch_playlist(url, cb, lim.max_bytes, true, text, err)) return false;
-    const PlaylistInfo top = parse_playlist(text);
-    if (!top.m3u) return true;  // ne HLS (turinys nuspręstas, ne URL galūnė — B8)
+    if (!fetch_playlist(url, cb, lim.max_bytes, true, top, err)) return false;
+    const PlaylistInfo pt = parse_playlist(top.text);
+    if (!pt.m3u) return true;  // ne HLS (turinys nuspręstas, ne URL galūnė — B8)
     hls = true;
-    double target = top.target_s;
-    if (top.master) {
-        // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
-        // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
-        if (top.variants.size() + 1 > lim.max_playlists) {
-            err = "master grojaraštyje " + std::to_string(top.variants.size()) + " variantų > " + std::to_string(lim.max_playlists - 1);
-            return false;
-        }
-        std::vector<std::string> seen{url};
-        for (const std::string& v : top.variants) {
+    const std::string& base = top.location;  // nukreipus — santykinės nuorodos pagal galutinį URL (kaip libav)
+    // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
+    // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
+    if (!check_playlist(base, pt, true, lim, err)) return false;
+    double target = pt.target_s;
+    if (pt.master) {
+        std::vector<std::string> seen{url, base};
+        for (const std::string& v : pt.variants) {
             std::string vu;
-            if (!resolve_playlist_url(url, v, vu, err)) return false;
-            if (vu == url) {
+            if (!resolve_playlist_url(base, v, vu, err)) return false;
+            if (vu == url || vu == base) {
                 err = "įdėtas master grojaraštis (variantas rodo į save): " + redact_url(vu);
                 return false;
             }
             if (std::find(seen.begin(), seen.end(), vu) != seen.end()) continue;
             seen.push_back(vu);
-            std::string vt;
-            if (!fetch_playlist(vu, cb, lim.max_bytes, false, vt, err)) return false;
-            const PlaylistInfo pv = parse_playlist(vt);
+            FetchedPlaylist fv;
+            if (!fetch_playlist(vu, cb, lim.max_bytes, false, fv, err)) return false;
+            const PlaylistInfo pv = parse_playlist(fv.text);
             if (!pv.m3u) {
                 err = "variantas ne M3U8 grojaraštis: " + redact_url(vu);
                 return false;
             }
-            if (pv.master) {
-                err = "įdėtas master grojaraštis (gylis > 1: master → media): " + redact_url(vu);
-                return false;
-            }
-            if (!check_refs(vu, pv.refs, err)) return false;
+            if (!check_playlist(fv.location, pv, false, lim, err)) return false;
             target = std::max(target, pv.target_s);
         }
-    }
-    if (!check_refs(url, top.refs, err)) return false;  // media segmentai arba master EXT-X-SESSION-KEY
-    if (target > lim.max_target_s) {
-        char b[160];
-        std::snprintf(b, sizeof b, "#EXT-X-TARGETDURATION %.0f s > riba %.0f s (--hls-max-target-s)", target, lim.max_target_s);
-        err = b;
-        return false;
     }
     target_ns = target > 0 ? static_cast<std::int64_t>(target * 1e9) : 0;
     return true;
@@ -132,12 +256,15 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     hls_target_ns_ = 0;
     entry_ = Entry::None;
     entry_discarded_ = 0;
-    if (scheme == "http" || scheme == "https") {
+    lim_ = HlsLimits{};
+    lim_.max_target_s = s.hls_max_target_s;
+    lim_.max_bytes = s.hls_max_playlist;
+    top_ = FetchedPlaylist{};
+    const bool http = scheme == "http" || scheme == "https";
+    if (http) {
         AVIOInterruptCB cb{interrupt_cb, &intr_};
-        HlsLimits lim;
-        lim.max_target_s = s.hls_max_target_s;
         std::string why;
-        if (!hls_precheck(s.url, &cb, lim, hls, hls_target_ns_, why)) {
+        if (!hls_precheck(s.url, &cb, lim_, hls, hls_target_ns_, top_, why)) {
             err = shown + ": HLS: " + (intr_.timed_out ? "nėra duomenų per --input-wait-s" : intr_.silent ? "įėjimas tylus" : why);
             return false;
         }
@@ -149,7 +276,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     shown_ = shown;
     // H1: sargas — kiekvienam HTTP(S) šaltiniui (ne tik HLS): patikra ir libav atidarymas — dvi atskiros užklausos, serveris gali
     // atsakyti skirtingai (pirma TS, antra M3U8)
-    guard_http_ = scheme == "http" || scheme == "https";
+    guard_http_ = http;
     hls_ = hls;
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
@@ -168,10 +295,24 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         open_win0_ = 0;
         opens_total_ = 0;
         orig_io_open_ = ic_->io_open;
+        orig_io_close2_ = ic_->io_close2;
         ic_->opaque = this;
         ic_->io_open = [](AVFormatContext* c, AVIOContext** pb, const char* u, int fl, AVDictionary** op) {
             return static_cast<Demux*>(c->opaque)->guarded_open(c, pb, u, fl, op);
         };
+        ic_->io_close2 = [](AVFormatContext* c, AVIOContext* pb) { return static_cast<Demux*>(c->opaque)->guarded_close(c, pb); };
+        // H2: HLS viršutinis grojaraštis — TIE PATYS patikrinti baitai (atminties kontekstas, AVFMT_FLAG_CUSTOM_IO), ne antra HTTP
+        // užklausa, kurios atsakymas galėtų skirtis (H1)
+        if (hls) {
+            free_top_pb();
+            top_pb_ = mem_playlist_io(top_);
+            if (!top_pb_) {
+                avformat_free_context(ic_);
+                ic_ = nullptr;
+                return fail("atidaryti nepavyko", AVERROR(ENOMEM));
+            }
+            ic_->pb = top_pb_;
+        }
         // Zondavimo metu perskaityti paketai NEgrąžinami vėliau: jie jau sekundės senumo, o atvykimo laikas žymimas skaitant —
         // SourceClock fiksavimas (atvykimas + latencija − PTS) būtų pasislinkęs tiek, kiek truko zondavimas
         ic_->flags |= AVFMT_FLAG_NOBUFFER;
@@ -186,6 +327,8 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
             av_dict_set(&o, "live_start_index", "-1", 0);  // nuo paskutinio segmento: pradžios pliūpsnis — vienas segmentas
             av_dict_set(&o, "http_persistent", "0", 0);
         }
+        // HTTP(S): sustojęs serveris (prisijungus, bet neatsakant) — skaitymo klaida po 10 s, ne amžinas laukimas (ir prisijungiant iš naujo)
+        if (http) av_dict_set(&o, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
         int e = avformat_open_input(&ic_, url.c_str(), nullptr, &o);  // klaidoje ic_ atlaisvinamas
         av_dict_free(&o);
         if (e < 0) {
@@ -201,6 +344,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         if (!unknown || k == 3) break;
         std::fprintf(stderr, "[ingest] %s: video parametrų dar nėra (%d) — zonduojama iš naujo, langas %d ms\n", shown.c_str(), k + 1, 1000 << (k + 1));
         avformat_close_input(&ic_);
+        free_top_pb();
     }
     vs_ = av_find_best_stream(ic_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     as_ = s.audio ? av_find_best_stream(ic_, AVMEDIA_TYPE_AUDIO, -1, vs_, nullptr, 0) : -1;
@@ -276,6 +420,7 @@ int Demux::key_field_order() {
 void Demux::close() {
     if (ic_) avformat_close_input(&ic_);
     ic_ = nullptr;
+    free_top_pb();
     vs_ = as_ = -1;
     info_ = StreamInfo{};
 }
@@ -364,35 +509,62 @@ int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, i
     }
     int r = orig_io_open_(s, pb, url, flags, opts);
     if (r < 0 || !guard_http_) return r;
-    // Turinio peržiūra (pirmi ≤ 4 KiB, grąžinama atgal buferio ribose): master grojaraštis leidžiamas tik pirmam sesijos atidarymui
-    // (viršutinis URL). Perkraunamas media grojaraštis, tapęs master, libav HLS demuxeriui duoda „tuščius“ grojaraščius, ir jis
-    // griūva (išmatuota: SIGSEGV, visas procesas) — todėl atmetama ANKSČIAU, nei libav jį perskaito, ir sesija nutraukiama.
-    const bool first_open = opens_total_++ == 0;
+    ++opens_total_;
+    // Sesija nutraukiama su priežastimi žurnale (vieną kartą); šaltinis jungiasi iš naujo
+    auto refuse = [&](const std::string& why) {
+        if (*pb) ff_close(s, pb);
+        if (!intr_.abort.exchange(true)) std::fprintf(stderr, "[ingest] %s: HLS: %s — atmesta, sesija nutraukiama\n", shown_.c_str(), why.c_str());
+        return AVERROR(EPERM);
+    };
+    // Turinio peržiūra (pirmi ≤ 4 KiB): M3U8 atpažįstamas iš pradžios (libav reikalauja #EXTM3U pirmoje eilutėje); ne M3U8 (segmentai,
+    // raktai, tiesioginis TS) — grąžinama atgal buferio ribose ir perduodama nepakeista
     unsigned char head[4096];
-    const int n = avio_read(*pb, head, sizeof head);
-    if (n > 0) {
-        const PlaylistInfo pi = parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n)));
-        if (pi.m3u && !hls_) {  // H1: patikra matė ne M3U8, o libav gavo M3U8 — atmetama (format_whitelist vis tiek tik mpegts)
-            ff_close(s, pb);
-            if (!intr_.abort.exchange(true))
-                std::fprintf(stderr, "[ingest] %s: HTTP: atsakymas — M3U8 grojaraštis, nors patikra rado ne HLS — atmesta, sesija nutraukiama\n",
-                             shown_.c_str());
-            return AVERROR(EPERM);
-        }
-        if (pi.m3u && pi.master && !first_open) {
-            ff_close(s, pb);
-            if (!intr_.abort.exchange(true))
-                std::fprintf(stderr, "[ingest] %s: HLS: įdėtas master grojaraštis vidury sesijos (%s) — atmesta, sesija nutraukiama\n", shown_.c_str(),
-                             redact_url(u).c_str());
-            return AVERROR(EPERM);
-        }
+    int n = avio_read(*pb, head, sizeof head);
+    bool m3u = n > 0 && parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n))).m3u;
+    if (!m3u) {
+        if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
+        if (n < 0 && n != AVERROR_EOF) return 0;  // klaidą pamatys skaitytojas
+        // peržiūra netilpo buferyje — atidaroma iš naujo; ir antras atsakymas neturi būti M3U8 (kitaip — tikrinimo apėjimas)
+        ff_close(s, pb);
+        if ((r = orig_io_open_(s, pb, url, flags, opts)) < 0) return r;
+        n = avio_read(*pb, head, sizeof head);
+        if (n > 0 && parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n))).m3u)
+            return refuse("atsakymas pakartotinai atidarius tapo M3U8: " + redact_url(u));
+        if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
+        if (n < 0 && n != AVERROR_EOF) return 0;
+        ff_close(s, pb);
+        return AVERROR(EIO);
     }
-    if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
-    if (n < 0 && n != AVERROR_EOF) return 0;  // klaidą pamatys skaitytojas
-    // peržiūra netilpo buferyje — atidaroma iš naujo
+    // H1: patikra matė ne M3U8, o libav gavo M3U8 — atmetama (format_whitelist vis tiek tik mpegts)
+    if (!hls_) return refuse("HTTP atsakymas — M3U8 grojaraštis, nors patikra rado ne HLS");
+    // H2 / H3: M3U8 perskaitomas VISAS (≤ --hls-max-playlist), patikrinamas visas (master tik viršutinis — perkraunamas media
+    // grojaraštis, tapęs master, libav HLS demuxeriui duoda „tuščius“ grojaraščius ir jis griūva; ribos; nuorodų schemos), o libav
+    // gauna TUOS PAČIUS baitus per atminties kontekstą — jis niekada neanalizuoja to, ko sargas nematė.
+    FetchedPlaylist f;
+    f.text.assign(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n));
+    std::string why;
+    if (!read_rest(*pb, lim_.max_bytes, redact_url(u), f.text, why)) return refuse(why);
+    f.location = io_prop(*pb, "location");
+    if (f.location.empty()) f.location = u;
+    f.mime = io_prop(*pb, "mime_type");
+    f.cookies = io_prop(*pb, "cookies");
     ff_close(s, pb);
-    return orig_io_open_(s, pb, url, flags, opts);
+    if (!check_playlist(f.location, parse_playlist(f.text), false, lim_, why)) return refuse(why);
+    *pb = mem_playlist_io(f);
+    return *pb ? 0 : AVERROR(ENOMEM);
 }
+
+int Demux::guarded_close(AVFormatContext* s, AVIOContext* pb) {
+    if (is_mem_playlist_io(pb)) {
+        if (pb != top_pb_) free_mem_playlist_io(&pb);  // viršutinį atlaisvina Demux (AVFMT_FLAG_CUSTOM_IO)
+        return 0;
+    }
+    if (orig_io_close2_) return orig_io_close2_(s, pb);
+    avio_close(pb);
+    return 0;
+}
+
+void Demux::free_top_pb() { free_mem_playlist_io(&top_pb_); }
 
 void Demux::ff_close(AVFormatContext* s, AVIOContext** pb) {
     if (s->io_close2) s->io_close2(s, *pb);

@@ -590,6 +590,137 @@ def hls_toctou_case(out):
                      why="; ".join(problems) + f" | GET po pakeitimo {n[0]} | {line.strip()[:200]} | " + summary_line(si, sv, a, r))]
 
 
+def rss_kb(pid):
+    try:
+        for ln in open(f"/proc/{pid}/status"):
+            if ln.startswith("VmRSS:"):
+                return int(ln.split()[1])
+    except OSError:
+        pass
+    return 0
+
+
+def hls_reload_cases(out):
+    """H2 / H3 (round 10): gyvas HLS šaltinis (+ UDP šaltinis 0); vidury darbo media grojaraščio perkrovimas (libav paties užklausa,
+    ne patikra) tampa priešiškas: > 4 KiB komentarų ir tada master eilutė į save; 100 000 variantų (> 1 MiB); 50 000 segmentų
+    (< 1 MiB). Kiekvienas atmetamas visame tekste, procesas gyvena, UDP šaltinis — be praradimų, RSS po pakeitimo auga ≤ 64 MB."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_hls_security[reload]", "FAIL", why=why)]
+    work = pathlib.Path(out) / "ingest_hls_security" / "live"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", str(CLIPS / "av_1080i50.ts"),
+                            "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work.parent / "seg.log", "w"))
+    srv = PlaylistServer(work)
+    hdr = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
+    pad = b"#" + b"x" * 6000 + b"\n"  # > 4 KiB: anksčiau sargas matė tik pradžią (media antraštę)
+    cases = (("padding", hdr + pad + b"#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n", "įdėtas master"),
+             ("variants100k", hdr + pad + b"".join(b"#EXT-X-STREAM-INF:BANDWIDTH=1\nv%d.m3u8\n" % k for k in range(100000)), "didesnis nei"),
+             ("segments50k", hdr + b"#EXTINF:2.0,\ns.ts\n" * 50000, "nuorodų"))
+    res = []
+    T, SWAP = 30, 12
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+        for k, (name, body, want) in enumerate(cases):
+            tid = f"ingest_hls_security[{name}]"
+            srv.routes.pop("/live.m3u8", None)  # statinis failas (segmentuotojas)
+            rss = {"before": 0, "max_after": 0, "swapped": False}
+
+            def swap(b=body):
+                rss["before"] = rss["last"]
+                rss["swapped"] = True
+                srv.routes["/live.m3u8"] = b
+
+            def watch(pid):
+                v = rss_kb(pid)
+                rss["last"] = v
+                if rss["swapped"]:
+                    rss["max_after"] = max(rss["max_after"], v)
+
+            rss["last"] = 0
+            si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", BASE_PORT + 51 + k, T, 6 + SWAP, swap, watch=watch)
+            problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
+            if ri is None or ri < 0 or si is None:
+                problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+            # sargo (libav užklausos) atmetimas — ne vėlesnės patikros prisijungiant iš naujo
+            line = next((ln for ln in err.splitlines() if want in ln and "sesija nutraukiama" in ln), "")
+            if not line:
+                problems.append(f"žurnale nėra sargo atmetimo „{want}“ (sesija nutraukiama)")
+            if flow(si, 1).get("input_reconnects", 0) < 1:
+                problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
+            grow = (rss["max_after"] - rss["before"]) / 1024
+            if rss["before"] == 0 or grow > 64:
+                problems.append(f"RSS po pakeitimo +{grow:.0f} MB (riba 64 MB; prieš {rss['before'] // 1024} MB)")
+            res.append(F.result(tid, "FAIL" if problems else "PASS",
+                                why="; ".join(problems) + f" | RSS prieš {rss['before'] // 1024} MB, maks. po +{grow:.0f} MB | {line.strip()[:200]} | " +
+                                summary_line(si, sv, a, r)))
+    finally:
+        seg.terminate()
+        seg.wait()
+        srv.close()
+    return res
+
+
+def ingest_queue_byte_cap(out):
+    """M1 (round 10): HLS serveris tinklo greičiu atiduoda vieną ilgą didelės spartos segmentą (~750 MB, 10 min. medžiagos):
+    paketų eilės ribojamos baitais (--max-queue-mb 32), perteklius išmetamas ir skaičiuojamas (queue_drops, žurnalo eilutė), RSS
+    po segmento pradžios auga ≤ 2 × riba + 64 MB = 128 MB; procesas gyvena, UDP šaltinis — be praradimų."""
+    tid = "ingest_queue_byte_cap"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    work = pathlib.Path(out) / tid / "live"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", str(CLIPS / "av_1080i50.ts"),
+                            "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work.parent / "seg.log", "w"))
+    srv = PlaylistServer(work)
+    srv.routes["/big.ts"] = StreamBody(CLIPS / "av_1080i50.ts", repeat=4)
+    T, SWAP, CAP = 30, 12, 32
+    rss = {"before": 0, "max_after": 0, "swapped": False, "last": 0}
+
+    def swap():  # grojaraštis + naujas „segmentas“ big.ts (libav jį parsisiunčia tinklo greičiu)
+        rss["before"] = rss["last"]
+        rss["swapped"] = True
+        srv.routes["/live.m3u8"] = (work / "live.m3u8").read_bytes() + b"#EXTINF:2.0,\nbig.ts\n"
+
+    def watch(pid):
+        rss["last"] = rss_kb(pid)
+        if rss["swapped"]:
+            rss["max_after"] = max(rss["max_after"], rss["last"])
+
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+        si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", BASE_PORT + 54, T, 6 + SWAP, swap, ("--max-queue-mb", CAP), watch=watch)
+    finally:
+        seg.terminate()
+        seg.wait()
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    grow = (rss["max_after"] - rss["before"]) / 1024
+    if rss["before"] == 0 or grow > 2 * CAP + 64:
+        problems.append(f"RSS po segmento +{grow:.0f} MB > {2 * CAP + 64} MB")
+    if flow(si, 1).get("queue_drops", 0) < 1:
+        problems.append(f"HLS queue_drops {flow(si, 1).get('queue_drops')}")
+    line = next((ln for ln in err.splitlines() if "eilės riba" in ln), "")
+    if not line:
+        problems.append("žurnale nėra eilės ribos eilutės")
+    if srv.hits.get("/big.ts", 0) < 1:
+        problems.append("big.ts neparsisiųstas")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | RSS prieš {rss['before'] // 1024} MB, maks. po +{grow:.0f} MB, queue_drops "
+                     f"{flow(si, 1).get('queue_drops')} | {line.strip()[:200]} | " + summary_line(si, sv, a, r))]
+
+
 def ingest_hls_security(out):
     """A1 (round 9): grojaraščio pateikti URL — tik http / https; įdėti master grojaraščiai (A→B→A) ir milžiniškas
     #EXT-X-TARGETDURATION atmetami su aiškia klaida (procesas baigiasi tvarkingai, ne signalu). file:// kanarėlė (FIFO) niekada
@@ -618,6 +749,7 @@ def ingest_hls_security(out):
              ("a", "įdėtas master"), ("huge", "TARGETDURATION"))
     try:
         res += hls_toctou_case(out)
+        res += hls_reload_cases(out)
         for name, want in cases:
             tid = f"ingest_hls_security[{name}]"
             d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
@@ -1312,3 +1444,4 @@ TESTS["ingest_drift_default"] = ingest_drift_default
 TESTS["ingest_reconnect_reprobe"] = ingest_reconnect_reprobe
 TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
 TESTS["ingest_forced_relock"] = ingest_forced_relock
+TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap

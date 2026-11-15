@@ -221,6 +221,9 @@ int main(int argc, char** argv) {
         ->check(CLI::Range(10.0, 20000.0));
     ig->add_option("--hls-max-target-s", o.hls_max_target_s, "HLS: didžiausias leidžiamas #EXT-X-TARGETDURATION, s (numatyta 30; daugiau — šaltinis atmetamas)")
         ->check(CLI::Range(1.0, 600.0));
+    ig->add_option("--hls-max-playlist", o.hls_max_playlist,
+                   "HLS: didžiausias grojaraščio dydis, baitai (numatyta 1048576; didesnis — tas šaltinis atmetamas, jungiamasi iš naujo)")
+        ->check(CLI::Range(std::size_t{4096}, std::size_t{64} << 20));
     ig->add_option("--max-audio-ring-mb", o.max_audio_ring_mb, "garso žiedo riba šaltiniui, MB (numatyta 256; daugiau — šaltinis atmetamas)")
         ->check(CLI::Range(1u, 4096u));
     ig->add_option("--test-decode-delay-ms", o.test_decode_delay_ms)->group("");  // perkrovos testui
