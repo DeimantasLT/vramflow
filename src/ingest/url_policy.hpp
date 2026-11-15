@@ -36,6 +36,14 @@ std::string redact_url(const std::string& url);
 // Tekste kiekvienas „schema://…“ (iki tarpo ar kabučių) išvalomas redact_url (libav žurnalo eilutėms, klaidų tekstams).
 std::string redact_urls_in(const std::string& text);
 
+// L1: slapta reikšmė ne iš argv (/proc/*/cmdline mato visi naudotojai): "env:VARDAS" — aplinkos kintamasis, "file:/kelias" — pirma failo
+// eilutė (be CR / LF). Kitaip (pvz. pats slaptažodis) — false, why be reikšmės.
+bool secret_from(const std::string& spec, std::string& out, std::string& why);
+// SRT slaptažodis: 10–79 simbolių (libsrt), be URL užklausos skyriklių ir tarpų (&, #, ?, %, tarpai) — kitaip sugadintų URL.
+bool srt_passphrase_ok(const std::string& pass, std::string& why);
+// srt:// URL be passphrase= — pridedama &passphrase=… (tik proceso atmintyje); jau su passphrase arba ne srt — nekeičiamas.
+std::string with_srt_passphrase(const std::string& url, const std::string& pass);
+
 // HLS grojaraščio (M3U8) santrauka.
 struct PlaylistInfo {
     bool m3u = false;     // prasideda #EXTM3U

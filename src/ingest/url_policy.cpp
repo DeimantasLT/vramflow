@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 
 namespace mxlv::ingest {
 
@@ -156,7 +157,13 @@ std::string redact_urls_in(const std::string& text) {
         std::size_t a = sep;
         while (a > p && std::strchr(kSchemeChars, text[a - 1]) != nullptr) --a;
         std::size_t b = sep + 3;
-        while (b < text.size() && !std::isspace(static_cast<unsigned char>(text[b])) && std::strchr("'\"<>`", text[b]) == nullptr) ++b;
+        if (a > 0 && (text[a - 1] == '\'' || text[a - 1] == '"')) {
+            // L1: kabutėse (libav „Opening '<URL>' for reading“) URL gali turėti tarpų — iki uždarančios kabutės ar eilutės galo
+            const char qc = text[a - 1];
+            while (b < text.size() && text[b] != qc && text[b] != '\n') ++b;
+        } else {
+            while (b < text.size() && !std::isspace(static_cast<unsigned char>(text[b])) && std::strchr("'\"<>`", text[b]) == nullptr) ++b;
+        }
         out.append(text, p, a - p);
         out += a == sep ? text.substr(a, b - a) : redact_url(text.substr(a, b - a));
         p = b;
@@ -235,6 +242,60 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
         for (const std::string& x : *v)
             if (!resolve_playlist_url(base, x, r, why)) return false;
     return true;
+}
+
+bool secret_from(const std::string& spec, std::string& out, std::string& why) {
+    out.clear();
+    if (starts(spec, "env:")) {
+        const std::string name = spec.substr(4);
+        const char* v = name.empty() ? nullptr : std::getenv(name.c_str());
+        if (v == nullptr || *v == 0) {
+            why = "aplinkos kintamasis „" + name + "“ nenustatytas arba tuščias";
+            return false;
+        }
+        out = v;
+        return true;
+    }
+    if (starts(spec, "file:")) {
+        const std::string path = spec.substr(5);
+        std::ifstream f(path, std::ios::binary);
+        if (!f || !std::getline(f, out)) {
+            why = "slaptažodžio failo „" + path + "“ perskaityti nepavyko";
+            return false;
+        }
+        while (!out.empty() && (out.back() == '\r' || out.back() == '\n')) out.pop_back();
+        if (out.empty()) {
+            why = "slaptažodžio failas „" + path + "“ tuščias";
+            return false;
+        }
+        return true;
+    }
+    why = "laukta env:VARDAS arba file:/kelias (slaptažodis komandinėje eilutėje matomas /proc/*/cmdline)";
+    return false;
+}
+
+bool srt_passphrase_ok(const std::string& pass, std::string& why) {
+    if (pass.size() < 10 || pass.size() > 79) {
+        why = "SRT slaptažodis turi būti 10–79 simbolių (dabar " + std::to_string(pass.size()) + ")";
+        return false;
+    }
+    for (const char c : pass)
+        if (c == 0 || std::strchr("&#?% \t\r\n", c) != nullptr || static_cast<unsigned char>(c) < 0x20) {
+            why = "SRT slaptažodyje neleistinas simbolis (&, #, ?, %, tarpai — sugadintų URL)";
+            return false;
+        }
+    return true;
+}
+
+std::string with_srt_passphrase(const std::string& url, const std::string& pass) {
+    if (url_scheme(url) != "srt") return url;
+    const auto q = url.find('?');
+    if (q != std::string::npos) {
+        const std::string query = "&" + url.substr(q + 1);
+        if (query.find("&passphrase=") != std::string::npos) return url;
+        return url + "&passphrase=" + pass;
+    }
+    return url + "?passphrase=" + pass;
 }
 
 std::uint64_t audio_ring_bytes(int channels, std::uint64_t samples) {

@@ -982,6 +982,110 @@ def ingest_secrets_redacted(out):
     return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + " | " + summary_line(si, sv, a, r))]
 
 
+def ingest_hls_token_redacted(out):
+    """L1 (round 10): HLS segmentų URL su žetonu (?token=SECRET, kelyje — tarpas) — libav HLS „Opening '…' for reading“ INFO eilutės
+    eina per av_log valymo kabliuką: SECRET nėra nei stderr, nei santraukoje, nei --stats-file, o „Opening“ eilutės su token=*** yra."""
+    tid = "ingest_hls_token_redacted"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    secret = "Tk7SecretSeg93"
+    T = dur(20)
+    work = pathlib.Path(out) / tid / "hls"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    stats = pathlib.Path(out) / tid / "stats.jsonl"
+    stats.unlink(missing_ok=True)
+    seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-i", str(CLIPS / "av_1080i50.ts"), "-c", "copy",
+                            "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
+                            "-hls_segment_filename", str(work / "live seg%d.ts"), str(work / "live.m3u8")],
+                           stdout=subprocess.DEVNULL, stderr=open(work / "seg.log", "w"))
+    srv = PlaylistServer(work)
+
+    def playlist():  # segmentų eilutės — su žetonu (serveris užklausą atmeta, failą randa pagal kelią)
+        t = (work / "live.m3u8").read_text() if (work / "live.m3u8").exists() else ""
+        return "".join(ln.replace(" ", "%20") + f"?token={secret}\n" if ln.endswith(".ts") else ln + "\n" for ln in t.splitlines()).encode()
+
+    srv.routes["/live.m3u8"] = playlist
+    try:
+        t0 = time.monotonic()
+        while not (work / "live.m3u8").exists() and time.monotonic() - t0 < 20:
+            time.sleep(0.2)
+        time.sleep(4.5)
+        si, sv, ri, err, _ = run_case(out, tid, [srv.url("/live.m3u8")], [], T, ("--stats-file", stats), warm=10)
+    finally:
+        seg.terminate()
+        seg.wait()
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    leaks = []
+    for f in [pathlib.Path(out) / tid / "ingest.err", pathlib.Path(out) / tid / "summary-ingest.json", stats]:
+        if not f.exists():
+            leaks.append(f"{f.name}: nėra")
+        elif secret in f.read_text(errors="replace"):
+            leaks.append(f.name)
+    if leaks:
+        problems.append(f"žetonas matomas / failo nėra: {leaks}")
+    opening = [ln for ln in err.splitlines() if "Opening" in ln and "token=***" in ln]
+    if len(opening) < 3:
+        problems.append(f"„Opening … token=***“ eilučių {len(opening)} (< 3: valymo kabliukas nepatikrintas)")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | {opening[0].strip()[:160] if opening else ''} | " + summary_line(si, sv, a, r))]
+
+
+def ingest_srt_passphrase_file(out):
+    """L1 (round 10): SRT slaptažodis iš failo (--srt-passphrase-from file:…), ne iš argv: srautas veikia (A/V, ≥ 99,8 %), slaptažodžio
+    nėra nei proceso /proc/<pid>/cmdline, nei stderr, santraukoje ar --stats-file; stderr — passphrase=*** (įdėtas URL išvalytas)."""
+    tid = "ingest_srt_passphrase_file"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    protos = subprocess.run(["ffmpeg", "-hide_banner", "-protocols"], capture_output=True, text=True).stdout.split()
+    if "srt" not in protos:
+        return [F.result(tid, "SKIP", why="sisteminis FFmpeg be srt protokolo")]
+    T = dur(20)
+    secret = "Qw8FilePass55z"
+    port = free_port()
+    url = f"srt://127.0.0.1:{port}"
+    d = pathlib.Path(out) / tid
+    d.mkdir(parents=True, exist_ok=True)
+    pf = d / "srt.pass"
+    pf.write_text(secret + "\n")
+    os.chmod(pf, 0o600)
+    stats = d / "stats.jsonl"
+    stats.unlink(missing_ok=True)
+    cmdlines = []
+
+    class Snd(Sender):  # siuntėjas (ffmpeg) slaptažodį gauna URL — tai siuntėjas, ne ingest; ingest cmdline tikrinama atskirai
+        pass
+
+    snd = lambda: Snd(out, f"{tid}/snd", ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-i", str(CLIPS / "av_1080i50.ts"),
+                                          "-c", "copy", "-f", "mpegts", f"{url}?mode=caller&latency=120000&passphrase={secret}&pbkeylen=16"])
+
+    def grab():  # ingest proceso komandinė eilutė (pid — naujausias vramflow-func ingest su šiuo prievadu)
+        import glob
+        for c in glob.glob("/proc/[0-9]*/cmdline"):
+            try:
+                b = open(c, "rb").read().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                continue
+            if "ingest" in b and f":{port}" in b and "vramflow-func" in b:
+                cmdlines.append(b)
+        return Snd(out, f"{tid}/noop", ["true"])
+
+    si, sv, ri, err, _ = run_case(out, tid, [f"{url}?mode=listener&latency=120000&pbkeylen=16"], [snd, grab], T,
+                                  ("--stats-file", stats, "--srt-passphrase-from", f"file:{pf}"))
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    leaks = [f.name for f in (d / "ingest.err", d / "summary-ingest.json", stats) if not f.exists() or secret in f.read_text(errors="replace")]
+    if leaks:
+        problems.append(f"slaptažodis matomas / failo nėra: {leaks}")
+    if not cmdlines:
+        problems.append("ingest /proc/<pid>/cmdline nerasta")
+    elif any(secret in c for c in cmdlines):
+        problems.append("slaptažodis ingest komandinėje eilutėje")
+    if "passphrase=***" not in err:
+        problems.append("stderr be išvalyto URL (passphrase=***)")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | cmdline tikrinta {len(cmdlines)} | " + summary_line(si, sv, a, r))]
+
+
 def ingest_hls(out):
     if (why := ensure_clips()):
         return [F.result("ingest_hls", "FAIL", why=why)]
@@ -1558,4 +1662,6 @@ TESTS["ingest_no_idr_entry"] = ingest_no_idr_entry
 TESTS["ingest_forced_relock"] = ingest_forced_relock
 TESTS["ingest_relock_audio_resync"] = ingest_relock_audio_resync
 TESTS["ingest_codec_change_reconnect"] = ingest_codec_change_reconnect
+TESTS["ingest_hls_token_redacted"] = ingest_hls_token_redacted
+TESTS["ingest_srt_passphrase_file"] = ingest_srt_passphrase_file
 TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap

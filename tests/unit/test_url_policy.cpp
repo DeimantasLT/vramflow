@@ -4,6 +4,7 @@
 // grojaraščio analizė, garso žiedo dydis.
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <string>
 
 #include "ingest/url_policy.hpp"
@@ -170,4 +171,39 @@ TEST_CASE("url_policy: garso žiedo dydis baitais (2 laipsnis × kanalai × floa
     CHECK(audio_ring_bytes(2, 211200) == 262144ull * 2 * 4);
     CHECK(audio_ring_bytes(16, 93 * 48000) == 8388608ull * 16 * 4);  // HLS 30 s segmentai, 16 kanalų — 512 MB
     CHECK(audio_ring_bytes(1, 1) == 4);
+}
+
+TEST_CASE("url_policy: L1 — kabutėse URL su tarpu kelyje išvalomas iki uždarančios kabutės", "[ingest][url]") {
+    // libav HLS rašo „Opening '<URL>' for reading“: URL kelyje gali būti tarpas, po jo — užklausa su žetonu
+    const std::string r = redact_urls_in("[hls @ 0x1] Opening 'http://h/live seg 1.ts?token=SECRET9' for reading\n");
+    CHECK(r.find("SECRET9") == std::string::npos);
+    CHECK(r.find("token=***' for reading") != std::string::npos);
+    const std::string q = redact_urls_in("url \"srt://h:1?x=1 &passphrase=PW77\" end");
+    CHECK(q.find("PW77") == std::string::npos);
+    CHECK(q.find("\" end") != std::string::npos);
+    // be kabučių — kaip iki šiol (iki tarpo); neuždaryta kabutė — iki eilutės galo
+    CHECK(redact_urls_in("a http://h/p?t=1 b") == "a http://h/p?t=*** b");
+    CHECK(redact_urls_in("'http://h/p q?t=S1\nnext").find("S1") == std::string::npos);
+}
+
+TEST_CASE("url_policy: L1 — SRT slaptažodis iš aplinkos / failo, ne argv", "[ingest][url]") {
+    std::string v, why;
+    ::setenv("VRAMFLOW_TEST_SRT_PASS", "Abcdefgh12345", 1);
+    REQUIRE(secret_from("env:VRAMFLOW_TEST_SRT_PASS", v, why));
+    CHECK(v == "Abcdefgh12345");
+    ::unsetenv("VRAMFLOW_TEST_SRT_PASS");
+    CHECK_FALSE(secret_from("env:VRAMFLOW_TEST_SRT_PASS", v, why));
+    CHECK(why.find("VRAMFLOW_TEST_SRT_PASS") != std::string::npos);
+    CHECK_FALSE(secret_from("file:/nonexistent/vramflow-pass", v, why));
+    CHECK_FALSE(secret_from("Abcdefgh12345", v, why));  // pats slaptažodis argumente — neleidžiama (būtų /proc/*/cmdline)
+    CHECK(why.find("Abcdefgh12345") == std::string::npos);
+    // srt URL papildomas tik atmintyje; jau su passphrase — nekeičiamas; ne srt — nekeičiamas
+    CHECK(with_srt_passphrase("srt://h:1?mode=listener", "Abcdefgh12345") == "srt://h:1?mode=listener&passphrase=Abcdefgh12345");
+    CHECK(with_srt_passphrase("srt://h:1", "Abcdefgh12345") == "srt://h:1?passphrase=Abcdefgh12345");
+    CHECK(with_srt_passphrase("srt://h:1?passphrase=X1234567890", "Abcdefgh12345") == "srt://h:1?passphrase=X1234567890");
+    CHECK(with_srt_passphrase("udp://h:1", "Abcdefgh12345") == "udp://h:1");
+    CHECK(srt_passphrase_ok("Abcdefgh12345", why));
+    CHECK_FALSE(srt_passphrase_ok("short", why));                    // SRT: 10–79 simbolių
+    CHECK_FALSE(srt_passphrase_ok("Abcdefgh&mode=caller", why));     // užklausos skyrikliai sugadintų URL
+    CHECK(why.find("Abcdefgh") == std::string::npos);
 }

@@ -221,6 +221,8 @@ int main(int argc, char** argv) {
         ->check(CLI::Range(10.0, 20000.0));
     ig->add_option("--hls-max-target-s", o.hls_max_target_s, "HLS: didžiausias leidžiamas #EXT-X-TARGETDURATION, s (numatyta 30; daugiau — šaltinis atmetamas)")
         ->check(CLI::Range(1.0, 600.0));
+    ig->add_option("--srt-passphrase-from", o.srt_passphrase_from,
+                   "SRT slaptažodis iš env:VARDAS arba file:/kelias (ne komandinėje eilutėje — ją mato /proc/*/cmdline); pridedamas srt:// įėjimams be passphrase=");
     ig->add_option("--hls-max-playlist", o.hls_max_playlist,
                    "HLS: didžiausias grojaraščio dydis, baitai (numatyta 1048576; didesnis — tas šaltinis atmetamas, jungiamasi iš naujo)")
         ->check(CLI::Range(std::size_t{4096}, std::size_t{64} << 20));

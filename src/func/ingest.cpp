@@ -935,6 +935,16 @@ int run_ingest(const Opts& o_in) {
             st.fatal = "--input: " + why;
             return finish(1);
         }
+    // L1: SRT slaptažodis ne iš argv (/proc/*/cmdline): --srt-passphrase-from env:VARDAS | file:/kelias — pridedamas srt:// įėjimams be
+    // passphrase= tik proceso atmintyje (žurnaluose — passphrase=***)
+    std::string srt_pass;
+    if (!o.srt_passphrase_from.empty()) {
+        std::string why;
+        if (!ig::secret_from(o.srt_passphrase_from, srt_pass, why) || !ig::srt_passphrase_ok(srt_pass, why)) {
+            st.fatal = "--srt-passphrase-from: " + why;
+            return finish(1);
+        }
+    }
     install_redacting_av_log();
     ig::Decoder decoder{};
     if (!ig::parse_decoder(o.decoder, decoder)) {
@@ -988,7 +998,7 @@ int run_ingest(const Opts& o_in) {
         s = std::make_unique<Source>();
         s->idx = static_cast<int>(k);
         s->name = "šaltinis " + std::to_string(k) + " (" + ig::redact_url(o.inputs[k]) + ")";  // vardas eina į visus žurnalus
-        s->spec.url = o.inputs[k];
+        s->spec.url = srt_pass.empty() ? o.inputs[k] : ig::with_srt_passphrase(o.inputs[k], srt_pass);
         s->spec.hls_max_target_s = o.hls_max_target_s;
         s->spec.hls_max_playlist = o.hls_max_playlist;
         s->spec.format = o.format;

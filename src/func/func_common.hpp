@@ -178,7 +178,8 @@ struct Opts {
     double hls_max_target_s = 30;
     std::size_t hls_max_playlist = std::size_t{1} << 20;  // H2: --hls-max-playlist, baitai
     std::uint32_t max_audio_ring_mb = 256;
-    std::uint32_t max_queue_mb = 0;  // M1: --max-queue-mb (0 — pagal latenciją)
+    std::uint32_t max_queue_mb = 0;
+    std::string srt_passphrase_from;  // L1: --srt-passphrase-from env:VARDAS | file:/kelias  // M1: --max-queue-mb (0 — pagal latenciją)
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
     std::string dump_dir;
     std::uint32_t dump_count = 0;
