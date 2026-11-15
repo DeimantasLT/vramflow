@@ -820,7 +820,10 @@ def hls_reload_cases(out):
     pad = b"#" + b"x" * 6000 + b"\n"  # > 4 KiB: anksčiau sargas matė tik pradžią (media antraštę)
     cases = (("padding", hdr + pad + b"#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n", "įdėtas master"),
              ("variants100k", hdr + pad + b"".join(b"#EXT-X-STREAM-INF:BANDWIDTH=1\nv%d.m3u8\n" % k for k in range(100000)), "didesnis nei"),
-             ("segments50k", hdr + b"#EXTINF:2.0,\ns.ts\n" * 50000, "nuorodų"))
+             ("segments50k", hdr + b"#EXTINF:2.0,\ns.ts\n" * 50000, "nuorodų"),
+             # B (round 11): tik CR skyrikliai — libav ff_get_line eilutę baigia ir '\r' (aviobuf.c n6.1:825), sargas turi matyti tą patį
+             ("cr_master", (hdr + b"#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n").replace(b"\n", b"\r"), "įdėtas master"))
+    ports = (51, 52, 53, 59, 60, 61)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
     res = []
     T, SWAP = 30, 12
     try:
@@ -845,7 +848,7 @@ def hls_reload_cases(out):
                     rss["max_after"] = max(rss["max_after"], v)
 
             rss["last"] = 0
-            si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", BASE_PORT + 51 + k, T, 6 + SWAP, swap, watch=watch)
+            si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", BASE_PORT + ports[k], T, 6 + SWAP, swap, watch=watch)
             problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
             if ri is None or ri < 0 or si is None:
                 problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")

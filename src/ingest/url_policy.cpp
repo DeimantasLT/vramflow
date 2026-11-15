@@ -31,6 +31,25 @@ std::string trim(const std::string& s) {
 
 bool starts(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
+// av_isspace (libavutil/avstring.h): ' ', \t, \n, \v, \f, \r
+bool av_space(char c) { return c == ' ' || (c >= '\t' && c <= '\r'); }
+
+// libav HLS eilutės buferis: char line[MAX_URL_SIZE] (hls.c n6.1:737, MAX_URL_SIZE 4096) → ff_get_line ≤ 4095 baitų
+constexpr std::size_t kMaxLine = 4095;
+
+// B: kita eilutė TIKSLIAI kaip libav ff_get_chomp_line (aviobuf.c n6.1:816-839): pabaiga '\n', '\r' arba NUL, CR+LF — vienas
+// skyriklis, ilgesnė nei 4095 baitų nukerpama (likusi dalis praleidžiama iki skyriklio), gale nukerpami av_isspace; pradžioje — ne.
+bool next_line(const std::string& t, std::size_t& p, std::string& line) {
+    if (p >= t.size()) return false;
+    std::size_t e = p;
+    while (e < t.size() && t[e] != '\n' && t[e] != '\r' && t[e] != '\0') ++e;
+    line.assign(t, p, std::min(e - p, kMaxLine));
+    if (e < t.size()) e += t[e] == '\r' && e + 1 < t.size() && t[e + 1] == '\n' ? 2 : 1;
+    p = e;
+    while (!line.empty() && av_space(line.back())) line.pop_back();
+    return true;
+}
+
 // URI="…" atributo reikšmė (EXT-X-KEY, EXT-X-MAP, EXT-X-MEDIA, EXT-X-I-FRAME-STREAM-INF …); "" — nėra
 std::string uri_attr(const std::string& line) {
     const auto p = line.find("URI=\"");
@@ -176,15 +195,16 @@ PlaylistInfo parse_playlist(const std::string& text) {
     PlaylistInfo pi;
     std::size_t p = 0;
     bool first = true, want_variant = false;
-    while (p < text.size()) {
-        const std::size_t e = std::min(text.find('\n', p), text.size());
-        std::string line = trim(text.substr(p, e - p));
-        p = e + 1;
+    std::string line;
+    while (next_line(text, p, line)) {
         if (first) {
-            if (starts(line, "\xEF\xBB\xBF")) line = line.substr(3);  // UTF-8 BOM
-            if (line.empty()) continue;
+            // #EXTM3U atpažinimas platesnis nei libav (pirma eilutė == "#EXTM3U", hls.c n6.1:786-787): BOM, tušti priekyje, tarpai —
+            // vis tiek M3U8; viskas, ką libav laiko M3U8, laikoma M3U8 ir čia (peržiūra, patikra ir sargas — tas pats skaidymas)
+            std::string h = trim(line);
+            if (starts(h, "\xEF\xBB\xBF")) h = h.substr(3);  // UTF-8 BOM
+            if (h.empty()) continue;
             first = false;
-            pi.m3u = starts(line, "#EXTM3U");
+            pi.m3u = starts(h, "#EXTM3U");
             if (!pi.m3u) return pi;
             continue;
         }

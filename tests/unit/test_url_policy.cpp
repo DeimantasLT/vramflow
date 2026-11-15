@@ -136,6 +136,51 @@ TEST_CASE("url_policy: grojaraščio analizė — master, media, TARGETDURATION,
     CHECK(parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:100000\n").target_s == 100000.0);
 }
 
+TEST_CASE("url_policy: B — eilutės skaidomos kaip libav ff_get_chomp_line (CR, LF, CRLF, NUL)", "[ingest][url]") {
+    // libav (aviobuf.c n6.1:816-839) eilutę baigia '\n', '\r' arba NUL; CR+LF — vienas skyriklis; gale nukerpami tarpai
+    const PlaylistInfo cr = parse_playlist("#EXTM3U\r#EXT-X-STREAM-INF:BANDWIDTH=1\rv0.m3u8\r#EXT-X-STREAM-INF:BANDWIDTH=2\rv1.m3u8\r");
+    CHECK(cr.m3u);
+    CHECK(cr.master);
+    REQUIRE(cr.variants.size() == 2);
+    CHECK(cr.variants[0] == "v0.m3u8");
+    CHECK(cr.variants[1] == "v1.m3u8");
+    CHECK(cr.refs.empty());
+    static const char kNul[] = "#EXTM3U\0#EXT-X-STREAM-INF:BANDWIDTH=1\0v0.m3u8\0";
+    const PlaylistInfo nul = parse_playlist(std::string(kNul, sizeof kNul - 1));
+    CHECK(nul.m3u);
+    CHECK(nul.master);
+    REQUIRE(nul.variants.size() == 1);
+    CHECK(nul.variants[0] == "v0.m3u8");
+    static const char kMixed[] = "#EXTM3U\r\n#EXT-X-TARGETDURATION:2\r#EXTINF:2,\n\rseg0.ts\0#EXT-X-KEY:METHOD=AES-128,URI=\"k.bin\"\n\r"
+                                 "#EXTINF:2,\r\nseg1.ts \t\r#EXT-X-STREAM-INF:BANDWIDTH=1\r\nx.m3u8";
+    const PlaylistInfo mx = parse_playlist(std::string(kMixed, sizeof kMixed - 1));
+    CHECK(mx.m3u);
+    CHECK(mx.master);
+    CHECK(mx.target_s == 2.0);
+    REQUIRE(mx.refs.size() == 3);
+    CHECK(mx.refs[0] == "seg0.ts");
+    CHECK(mx.refs[1] == "k.bin");
+    CHECK(mx.refs[2] == "seg1.ts");  // gale tarpai nukirpti
+    REQUIRE(mx.variants.size() == 1);
+    CHECK(mx.variants[0] == "x.m3u8");
+    // pradžios tarpai NEnukerpami (kaip libav): eilutė su tarpu priekyje — URI, ne žymė
+    const PlaylistInfo lead = parse_playlist("#EXTM3U\n #EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n");
+    CHECK_FALSE(lead.master);
+    REQUIRE(lead.refs.size() == 2);
+    CHECK(lead.refs[0] == " #EXT-X-STREAM-INF:BANDWIDTH=1");
+    // libav eilutės buferis MAX_URL_SIZE = 4096: ilgesnė eilutė nukerpama iki 4095 baitų, likusi dalis praleidžiama iki skyriklio
+    const PlaylistInfo lng = parse_playlist("#EXTM3U\n#EXTINF:2,\n" + std::string(5000, 'a') + "\nb.ts\n");
+    REQUIRE(lng.refs.size() == 2);
+    CHECK(lng.refs[0].size() == 4095);
+    CHECK(lng.refs[1] == "b.ts");
+    // #EXTM3U atpažinimas (peržiūra ir patikra) — tas pats skaidymas: CR-only ir NUL pirmoje eilutėje
+    CHECK(parse_playlist("#EXTM3U\r#EXTINF:2,\rs.ts\r").m3u);
+    static const char kNulHead[] = "#EXTM3U\0junk";
+    CHECK(parse_playlist(std::string(kNulHead, sizeof kNulHead - 1)).m3u);
+    static const char kTs[] = "\x47\x00#EXTM3U\n";
+    CHECK_FALSE(parse_playlist(std::string(kTs, sizeof kTs - 1)).m3u);
+}
+
 TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
     HlsLimits lim;
     std::string why;
