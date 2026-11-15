@@ -465,9 +465,11 @@ bool srt_passphrase_ok(const std::string& pass, std::string& why) {
         why = "SRT slaptažodis turi būti 10–79 simbolių (dabar " + std::to_string(pass.size()) + ")";
         return false;
     }
+    // G: libsrt passphrase ima av_find_info_tag (libsrt.c n6.1:548-550), kuris '+' verčia tarpu (parseutils.c n6.1:774-775); '%'
+    // nedekoduojamas, bet draudžiamas (vienareikšmiškumui)
     for (const char c : pass)
-        if (c == 0 || std::strchr("&#?% \t\r\n", c) != nullptr || static_cast<unsigned char>(c) < 0x20) {
-            why = "SRT slaptažodyje neleistinas simbolis (&, #, ?, %, tarpai — sugadintų URL)";
+        if (c == 0 || std::strchr("&#?%+ \t\r\n", c) != nullptr || static_cast<unsigned char>(c) < 0x20) {
+            why = "SRT slaptažodyje neleistinas simbolis (&, #, ?, %, +, tarpai — sugadintų URL; libav '+' paverčia tarpu)";
             return false;
         }
     return true;

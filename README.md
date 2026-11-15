@@ -525,8 +525,8 @@ local MPEG-TS file.
 | `--hls-max-target-s S` | Largest accepted HLS `#EXT-X-TARGETDURATION` (default 30); a longer one rejects that source with a clear message |
 | `--hls-max-playlist B` | Largest accepted HLS playlist in bytes (default 1048576); a larger one ends that session |
 | `--hls-same-host` | HLS: segments, keys, maps and variants only from the top-level playlist's host:port |
-| `--max-queue-mb N` | Packet queue cap per source and queue, MB (default 0 = (latency + 2.4 s) × 80 Mbit/s); oldest packets dropped and counted |
-| `--srt-passphrase-from env:NAME\|file:PATH` | SRT passphrase from an environment variable or a file, not from the command line |
+| `--max-queue-mb N` | Packet queue cap per queue, MB; each source has two queues (video and audio), so up to 2 × N MB per source (default 0 = (latency + 2.4 s) × 80 Mbit/s per queue); oldest packets dropped and counted |
+| `--srt-passphrase-from env:NAME\|file:PATH` | SRT passphrase from an environment variable or a file, not from the command line; 10–79 characters without `&`, `#`, `?`, `%`, `+` or spaces (libavformat turns `+` into a space) |
 | `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
 | `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
 

@@ -370,6 +370,15 @@ TEST_CASE("url_policy: L1 — SRT slaptažodis iš aplinkos / failo, ne argv", "
     CHECK(why.find("Abcdefgh") == std::string::npos);
 }
 
+TEST_CASE("url_policy: G — SRT slaptažodyje '+' neleidžiamas (libav jį verčia tarpu)", "[ingest][url]") {
+    // libsrt.c n6.1:548-550 passphrase ima av_find_info_tag, kuris '+' pakeičia tarpu (parseutils.c n6.1:774-775); % nedekoduojamas
+    std::string why;
+    CHECK_FALSE(srt_passphrase_ok("Abcdefgh+12345", why));
+    CHECK(why.find('+') != std::string::npos);
+    CHECK(why.find("Abcdefgh") == std::string::npos);
+    CHECK(srt_passphrase_ok("Abcdefgh-12345_x", why));
+}
+
 TEST_CASE("url_policy: --hls-same-host — nuorodos tik į grojaraščio serverį", "[ingest][url]") {
     CHECK(url_authority("http://User:pw@Host.Example:8080/a?b") == "host.example:8080");
     CHECK(url_authority("https://h/x") == "h");
