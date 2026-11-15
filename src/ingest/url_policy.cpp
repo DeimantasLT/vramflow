@@ -297,7 +297,7 @@ PlaylistInfo parse_playlist(const std::string& text) {
     PlaylistInfo pi;
     std::size_t p = 0;
     bool first = true, want_variant = false;
-    std::string line;
+    std::string line, key;
     while (next_line(text, p, line)) {
         if (first) {
             // #EXTM3U atpažinimas platesnis nei libav (pirma eilutė == "#EXTM3U", hls.c n6.1:786-787): BOM, tušti priekyje, tarpai —
@@ -320,8 +320,12 @@ PlaylistInfo parse_playlist(const std::string& text) {
             } else if (starts(line, "#EXT-X-MEDIA:") || starts(line, "#EXT-X-I-FRAME-STREAM-INF")) {
                 pi.master = pi.master || starts(line, "#EXT-X-I-FRAME-STREAM-INF");
                 if (const std::string u = uri_attr(line); !u.empty()) pi.variants.push_back(u);
-            } else if (const std::string u = uri_attr(line); !u.empty()) {
-                pi.refs.push_back(u);  // EXT-X-KEY, EXT-X-MAP, EXT-X-SESSION-KEY, EXT-X-PART …
+            } else {
+                const std::string u = uri_attr(line);
+                if (!u.empty()) pi.refs.push_back(u);  // EXT-X-KEY, EXT-X-MAP, EXT-X-SESSION-KEY, EXT-X-PART …
+                // F: libav rakto URI laiko iki kito EXT-X-KEY (hls.c n6.1:809-823); kiekviena EXT-X-MAP eilutė — nauja init sekcija
+                if (starts(line, "#EXT-X-KEY:")) key = u;
+                else if (starts(line, "#EXT-X-MAP:")) pi.maps.emplace_back(u, key);
             }
             continue;
         }
@@ -349,6 +353,11 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
         why = "master grojaraštyje " + std::to_string(pi.variants.size()) + " variantų > " + std::to_string(lim.max_playlists - 1);
         return false;
     }
+    if (pi.maps.size() > lim.max_maps) {
+        why = "grojaraštyje " + std::to_string(pi.maps.size()) + " #EXT-X-MAP eilučių > riba " + std::to_string(lim.max_maps) +
+              " (libav init sekcijų neatlaisvina iki sesijos pabaigos)";
+        return false;
+    }
     if (pi.refs.size() > lim.max_segments) {
         why = "grojaraštyje " + std::to_string(pi.refs.size()) + " nuorodų (segmentų, raktų) > riba " + std::to_string(lim.max_segments);
         return false;
@@ -369,6 +378,19 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
             }
         }
     return true;
+}
+
+std::size_t init_section_bytes(const std::string& base, const PlaylistInfo& pi) {
+    // libav vienai EXT-X-MAP: av_mallocz(struct segment) + dynarray + av_strdup(absoliutus URL) + av_strdup(rakto URL), jei raktas
+    // (hls.c n6.1:417-457, 880-891); URL buferis tmp_str[MAX_URL_SIZE] — ≤ 4096 baitų
+    const auto len = [&](const std::string& ref) -> std::size_t {
+        if (ref.empty()) return 0;
+        std::string r, why;
+        return std::min<std::size_t>(4096, (resolve_playlist_url(base, ref, r, why) ? r.size() : base.size() + ref.size()) + 1);
+    };
+    std::size_t n = 0;
+    for (const auto& [map, key] : pi.maps) n += 256 + len(map) + len(key);
+    return n;
 }
 
 std::string url_authority(const std::string& url) {

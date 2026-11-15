@@ -371,8 +371,10 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // E: URL, kuriuose libav gali gauti M3U8: viršutinis ir jo location (media grojaraščio perkrovimai — location, hls.c n6.1:782-783,
     // 613-621), master variantai ir EXT-X-MEDIA grojaraščiai, išspręsti kaip libav (new_playlist → ff_make_absolute_url, hls.c:324)
     playlist_urls_.clear();
+    init_bytes_ = 0;
     if (hls) {
         playlist_urls_ = {s.url, top_.location};
+        init_bytes_ = init_section_bytes(top_.location, parse_playlist(top_.text));  // F: viršutinis — libav jį irgi analizuoja
         std::string r, why;
         for (const std::string& v : parse_playlist(top_.text).variants)
             if (resolve_playlist_url(top_.location, v, r, why)) playlist_urls_.push_back(r);
@@ -696,7 +698,12 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     f.mime = io_prop(*pb, "mime_type");
     f.cookies = io_prop(*pb, "cookies");
     ff_close(s, pb);
-    if (!check_playlist(f.location, parse_playlist(f.text), false, lim_, why)) return refuse(why);
+    const PlaylistInfo pi = parse_playlist(f.text);
+    if (!check_playlist(f.location, pi, false, lim_, why)) return refuse(why);
+    // F: libav kiekvieno perkrovimo EXT-X-MAP init sekcijas kaupia iki sesijos pabaigos (hls.c n6.1:456, 251-269) — sesijos sąmata
+    if ((init_bytes_ += init_section_bytes(f.location, pi)) > lim_.max_init_bytes)
+        return refuse("EXT-X-MAP init sekcijų sąmata per sesiją " + std::to_string(init_bytes_ >> 10) + " KiB > riba " +
+                      std::to_string(lim_.max_init_bytes >> 10) + " KiB (libav jų neatlaisvina iki sesijos pabaigos)");
     *pb = mem_playlist_io(f);
     return *pb ? 0 : AVERROR(ENOMEM);
 }

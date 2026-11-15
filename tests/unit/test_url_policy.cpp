@@ -269,6 +269,35 @@ TEST_CASE("url_policy: E — segmentų demuxeriui hls neleidžiamas (įdėtas gr
     CHECK(format_whitelist_for("http", true) == "hls," + seg);  // viršutinis — hls + tie patys segmentų formatai
 }
 
+TEST_CASE("url_policy: F — EXT-X-MAP riba grojaraščiui ir init sekcijų atminties sąmata", "[ingest][url]") {
+    // libav (hls.c n6.1:417-457, 860-896): kiekviena #EXT-X-MAP eilutė prideda init sekciją (struct segment + URL + rakto URL), perkrovimas
+    // jų neatlaisvina (free_init_section_list — tik uždarant, hls.c:251-269) → riba eilutėms ir sesijos sąmatai
+    HlsLimits lim;
+    std::string why;
+    const std::string base = "http://h/live/x.m3u8";
+    std::string four = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n";
+    for (int k = 0; k < 4; ++k) four += "#EXT-X-MAP:URI=\"i" + std::to_string(k) + ".mp4\"\n#EXTINF:2,\ns" + std::to_string(k) + ".m4s\n";
+    const PlaylistInfo p4 = parse_playlist(four);
+    CHECK(p4.maps.size() == 4);
+    CHECK(check_playlist(base, p4, false, lim, why));
+    const PlaylistInfo p5 = parse_playlist(four + "#EXT-X-MAP:URI=\"i4.mp4\"\n");
+    CHECK_FALSE(check_playlist(base, p5, false, lim, why));
+    CHECK(why.find("EXT-X-MAP") != std::string::npos);
+    // tos pačios eilutės kartojimas — vis tiek nauja libav init sekcija (skaičiuojamos eilutės, ne skirtingi URI)
+    std::string fifty = "#EXTM3U\n";
+    for (int k = 0; k < 50; ++k) fifty += "#EXT-X-MAP:URI=\"init.mp4\"\n";
+    CHECK_FALSE(check_playlist(base, parse_playlist(fifty), false, lim, why));
+    // sąmata: kiekvienai MAP — 256 + |absoliutus MAP URL| + 1 (+ |absoliutus rakto URL| + 1, jei prieš ją buvo EXT-X-KEY su URI)
+    const PlaylistInfo pk = parse_playlist("#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\"\n#EXT-X-KEY:METHOD=AES-128,URI=\"k.bin\"\n#EXT-X-MAP:URI=\"j.mp4\"\n");
+    REQUIRE(pk.maps.size() == 2);
+    const std::size_t i_url = std::string("http://h/live/i.mp4").size(), j_url = std::string("http://h/live/j.mp4").size(),
+                      k_url = std::string("http://h/live/k.bin").size();
+    CHECK(init_section_bytes(base, pk) == (256 + i_url + 1) + (256 + j_url + 1 + k_url + 1));
+    CHECK(init_section_bytes(base, parse_playlist("#EXTM3U\n#EXTINF:2,\ns.ts\n")) == 0);
+    CHECK(lim.max_maps == 4);
+    CHECK(lim.max_init_bytes == std::size_t{16} << 20);
+}
+
 TEST_CASE("url_policy: visas grojaraštis tikrinamas — gylis, ribos, nuorodos (H2 / H3)", "[ingest][url]") {
     HlsLimits lim;
     std::string why;

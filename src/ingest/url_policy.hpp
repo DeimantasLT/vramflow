@@ -11,6 +11,7 @@
 //   * paslaptys žurnaluose: userinfo ir visos užklausos reikšmės (SRT passphrase=…, žetonai) pakeičiamos „***“.
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace mxlv::ingest {
@@ -53,6 +54,8 @@ struct PlaylistInfo {
     double target_s = -1;  // #EXT-X-TARGETDURATION; < 0 — nėra
     std::vector<std::string> variants;  // master: variantų ir EXT-X-MEDIA URI (grojaraščiai)
     std::vector<std::string> refs;      // media: segmentų ir URI="…" (raktai, EXT-X-MAP) nuorodos
+    // F: kiekviena #EXT-X-MAP eilutė — (jos URI, tuo metu galiojęs EXT-X-KEY URI arba "")
+    std::vector<std::pair<std::string, std::string>> maps;
 };
 PlaylistInfo parse_playlist(const std::string& text);
 
@@ -63,7 +66,14 @@ struct HlsLimits {
     std::size_t max_bytes = 1u << 20;   // grojaraščio dydis (--hls-max-playlist); daugiau — šaltinis atmetamas
     std::size_t max_segments = 10000;   // media grojaraščio nuorodų (segmentų, raktų, EXT-X-MAP) riba
     std::string only_authority;         // --hls-same-host: tik šis canonical_authority (viršutinio grojaraščio location); "" — bet kuris
+    // F: libav init sekcijų (EXT-X-MAP) iki sesijos pabaigos neatlaisvina — ≤ max_maps eilučių grojaraštyje ir ≤ max_init_bytes jų
+    // sąmatos (init_section_bytes) per sesiją; daugiau — sesija nutraukiama (prisijungus iš naujo libav atmintis atlaisvinta)
+    std::size_t max_maps = 4;
+    std::size_t max_init_bytes = std::size_t{16} << 20;
 };
+
+// F: kiek atminties libav skirs šio grojaraščio init sekcijoms (EXT-X-MAP): kiekvienai 256 + |absoliutus URL| + 1 (+ |rakto URL| + 1).
+std::size_t init_section_bytes(const std::string& base, const PlaylistInfo& pi);
 
 // URL host[:port] mažosiomis raidėmis, be userinfo ("" — ne schema://).
 std::string url_authority(const std::string& url);

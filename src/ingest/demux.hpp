@@ -134,6 +134,7 @@ private:
     static void ff_close(AVFormatContext* s, AVIOContext** pb);
     std::uint64_t refused_opens_ = 0;
     std::string shown_;  // šaltinio URL be paslapčių
+    std::size_t init_bytes_ = 0;  // F: libav EXT-X-MAP init sekcijų sąmata šiai sesijai (init_section_bytes)
     std::vector<std::string> playlist_urls_;  // E: URL, kurių M3U8 atsakymas leidžiamas (viršutinis, location, variantai)
 };
 

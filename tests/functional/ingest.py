@@ -929,7 +929,11 @@ def hls_reload_cases(out):
              ("variants100k", hdr + pad + b"".join(b"#EXT-X-STREAM-INF:BANDWIDTH=1\nv%d.m3u8\n" % k for k in range(100000)), "didesnis nei"),
              ("segments50k", hdr + b"#EXTINF:2.0,\ns.ts\n" * 50000, "nuorodų"),
              # B (round 11): tik CR skyrikliai — libav ff_get_line eilutę baigia ir '\r' (aviobuf.c n6.1:825), sargas turi matyti tą patį
-             ("cr_master", (hdr + b"#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n").replace(b"\n", b"\r"), "įdėtas master"))
+             ("cr_master", (hdr + b"#EXT-X-STREAM-INF:BANDWIDTH=1\nlive.m3u8\n").replace(b"\n", b"\r"), "įdėtas master"),
+             # F (round 11): libav kiekvieną #EXT-X-MAP eilutę kaupia iki sesijos pabaigos (hls.c n6.1:456, 251-269) — 2000 eilučių po ~0,4 KiB
+             # (< 1 MiB grojaraštis, perkraunamas kas 2 s) atmetamos
+             ("map_many", hdr + b"".join(b'#EXT-X-MAP:URI="i%d_' % k + b"m" * 400 + b'.mp4"\n' for k in range(2000)) + b"#EXTINF:2.0,\ns.ts\n",
+              "EXT-X-MAP"))
     ports = (51, 52, 53, 59, 60, 61)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
     res = []
     T, SWAP = 30, 12
