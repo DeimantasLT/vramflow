@@ -142,6 +142,88 @@ void free_mem_playlist_io(AVIOContext** io) {
 
 namespace {
 
+// A (round 11): sargo peržiūra be grįžimo tinkle. avio_seek(…, 0) po 4 KiB skaitymo tinklo kontekste ne visada lieka buferyje:
+// ieškomo HTTP (Accept-Ranges) AVIO buferis 32 KiB (aviobuf.c n6.1:985-989 dvigubina tik neieškomam), antras pildymas rašo nuo
+// buferio pradžios (aviobuf.c:563-564), tada avio_seek kviečia http_seek (aviobuf.c:346-353) — NAUJA užklausa, kurios atsakymo sargas
+// nemato. Todėl peržiūrėti baitai atiduodami iš atminties, o toliau skaitoma iš vidinio konteksto (avio_read_partial — kiek yra, ne
+// laukiant pilno buferio). Atgal — tik peržiūros ribose, kol vidinis dar neskaitytas; kitaip ENOSYS (tinkle niekada).
+struct PeekIo {
+    AVIOContext* inner;
+    std::uint8_t head[4096];
+    int n;
+    std::int64_t pos;  // loginė pozicija (0 — atsakymo pradžia)
+};
+
+int peek_read(void* op, std::uint8_t* buf, int size) {
+    auto* p = static_cast<PeekIo*>(op);
+    if (p->pos < p->n) {
+        const int k = std::min(size, p->n - static_cast<int>(p->pos));
+        std::memcpy(buf, p->head + p->pos, static_cast<std::size_t>(k));
+        p->pos += k;
+        return k;
+    }
+    const int r = avio_read_partial(p->inner, buf, size);
+    if (r > 0) p->pos += r;
+    return r == 0 ? AVERROR_EOF : r;
+}
+
+std::int64_t peek_seek(void* op, std::int64_t off, int whence) {
+    auto* p = static_cast<PeekIo*>(op);
+    if (whence & AVSEEK_SIZE) return avio_size(p->inner);  // http: tik Content-Length (http_seek_internal AVSEEK_SIZE — be užklausos)
+    whence &= ~AVSEEK_FORCE;
+    const std::int64_t t = whence == SEEK_SET ? off : whence == SEEK_CUR ? p->pos + off : -1;
+    if (t == p->pos) return t;
+    if (t < 0 || p->pos > p->n || t > p->n) return AVERROR(ENOSYS);
+    p->pos = t;
+    return t;
+}
+
+const AVClass* peek_pb_class() {
+    static const AVClass c = [] {
+        AVClass k{};
+        k.class_name = "vramflow-peek-io";
+        k.item_name = av_default_item_name;
+        k.version = LIBAVUTIL_VERSION_INT;
+        // location / mime_type / cookies — iš vidinio konteksto (jo klasė ff_avio_class → URLContext → http)
+        k.child_next = [](void* obj, void* prev) -> void* { return prev ? nullptr : static_cast<PeekIo*>(static_cast<AVIOContext*>(obj)->opaque)->inner; };
+        return k;
+    }();
+    return &c;
+}
+
+}  // namespace
+
+AVIOContext* peek_io(AVIOContext* inner, const std::uint8_t* head, int n) {
+    auto* p = static_cast<PeekIo*>(av_mallocz(sizeof(PeekIo)));
+    auto* buf = static_cast<std::uint8_t*>(av_malloc(32768));
+    AVIOContext* io = p && buf ? avio_alloc_context(buf, 32768, 0, p, peek_read, nullptr, peek_seek) : nullptr;
+    if (!io) {
+        av_free(p);
+        av_free(buf);
+        return nullptr;
+    }
+    p->inner = inner;
+    p->n = std::clamp(n, 0, static_cast<int>(sizeof p->head));
+    std::memcpy(p->head, head, static_cast<std::size_t>(p->n));
+    io->seekable = 0;
+    io->av_class = peek_pb_class();
+    return io;
+}
+
+bool is_peek_io(const AVIOContext* io) { return io != nullptr && io->read_packet == peek_read; }
+
+AVIOContext* free_peek_io(AVIOContext** io) {
+    if (!io || !*io) return nullptr;
+    auto* p = static_cast<PeekIo*>((*io)->opaque);
+    AVIOContext* inner = p->inner;
+    av_free(p);
+    av_freep(&(*io)->buffer);
+    avio_context_free(io);
+    return inner;
+}
+
+namespace {
+
 // HTTP atsakymo savybė (location, mime_type, cookies) iš libav konteksto; "" — nėra
 std::string io_prop(AVIOContext* io, const char* name) {
     std::uint8_t* v = nullptr;
@@ -315,6 +397,14 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
                 return fail("atidaryti nepavyko", AVERROR(ENOMEM));
             }
             ic_->pb = top_pb_;
+        } else if (http) {
+            // A: tiesioginis MPEG-TS per HTTP — viršutinis kontekstas mūsų (peek_io): libav jo neatidaro ir neuždaro (avio_close
+            // peek_io nepalaiko), sargo peržiūra be antros užklausos
+            if (const int e = open_top(url); e < 0) {
+                avformat_free_context(ic_);
+                ic_ = nullptr;
+                return fail("atidaryti nepavyko", e);
+            }
         }
         // Zondavimo metu perskaityti paketai NEgrąžinami vėliau: jie jau sekundės senumo, o atvykimo laikas žymimas skaitant —
         // SourceClock fiksavimas (atvykimas + latencija − PTS) būtų pasislinkęs tiek, kiek truko zondavimas
@@ -484,34 +574,59 @@ bool Demux::video_format(vramflow::VideoFormat& out, std::string& why) const {
 
 int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, int flags, AVDictionary** opts) {
     const std::string u = url ? url : "";
-    if (guard_http_) {
-        std::string inner = u;
-        if (url_scheme(inner) == "crypto+http" || url_scheme(inner) == "crypto+https") inner = inner.substr(7);  // AES-128 segmentas
-        if (const std::string sc = url_scheme(inner); sc != "http" && sc != "https") {
-            ++refused_opens_;
-            std::fprintf(stderr, "[ingest] %s: HLS: atidarymas atmestas — schema „%s“ neleidžiama (tik http / https): %s\n", shown_.c_str(),
-                         sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
-            return AVERROR(EPERM);
-        }
-        if (!hls_ && opens_total_ > 0) {  // H1: tiesioginis MPEG-TS per HTTP — vienas atidarymas sesijai; daugiau — ne mūsų srautas
-            ++refused_opens_;
-            std::fprintf(stderr, "[ingest] %s: HTTP (ne HLS): papildomas libav atidarymas atmestas: %s\n", shown_.c_str(), redact_url(u).c_str());
-            return AVERROR(EPERM);
-        }
-        const std::uint64_t now = tai_now();
-        if (now - open_win0_ >= 1'000'000'000ull) {
-            open_win0_ = now;
-            opens_in_win_ = 0;
-        }
-        if (++opens_in_win_ > kMaxOpensPerSec) {
-            if (!intr_.abort.exchange(true))
-                std::fprintf(stderr, "[ingest] %s: HLS: > %d grojaraščių / segmentų atidarymų per sekundę — kilpa (įdėtas master grojaraštis?), sesija "
-                                     "nutraukiama\n", shown_.c_str(), kMaxOpensPerSec);
-            return AVERROR_EXIT;
-        }
-    }
-    int r = orig_io_open_(s, pb, url, flags, opts);
+    if (guard_http_)
+        if (const int e = pre_open(u); e < 0) return e;
+    const int r = orig_io_open_(s, pb, url, flags, opts);
     if (r < 0 || !guard_http_) return r;
+    return post_open(s, pb, u);
+}
+
+int Demux::pre_open(const std::string& u) {
+    std::string inner = u;
+    if (url_scheme(inner) == "crypto+http" || url_scheme(inner) == "crypto+https") inner = inner.substr(7);  // AES-128 segmentas
+    if (const std::string sc = url_scheme(inner); sc != "http" && sc != "https") {
+        ++refused_opens_;
+        std::fprintf(stderr, "[ingest] %s: HLS: atidarymas atmestas — schema „%s“ neleidžiama (tik http / https): %s\n", shown_.c_str(),
+                     sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
+        return AVERROR(EPERM);
+    }
+    if (!hls_ && opens_total_ > 0) {  // H1: tiesioginis MPEG-TS per HTTP — vienas atidarymas sesijai; daugiau — ne mūsų srautas
+        ++refused_opens_;
+        std::fprintf(stderr, "[ingest] %s: HTTP (ne HLS): papildomas libav atidarymas atmestas: %s\n", shown_.c_str(), redact_url(u).c_str());
+        return AVERROR(EPERM);
+    }
+    const std::uint64_t now = tai_now();
+    if (now - open_win0_ >= 1'000'000'000ull) {
+        open_win0_ = now;
+        opens_in_win_ = 0;
+    }
+    if (++opens_in_win_ > kMaxOpensPerSec) {
+        if (!intr_.abort.exchange(true))
+            std::fprintf(stderr, "[ingest] %s: HLS: > %d grojaraščių / segmentų atidarymų per sekundę — kilpa (įdėtas master grojaraštis?), sesija "
+                                 "nutraukiama\n", shown_.c_str(), kMaxOpensPerSec);
+        return AVERROR_EXIT;
+    }
+    return 0;
+}
+
+int Demux::open_top(const std::string& url) {
+    if (const int e = pre_open(url); e < 0) return e;
+    AVDictionary* d = nullptr;
+    av_dict_set(&d, "protocol_whitelist", protocol_whitelist_for(url_scheme(url), false).c_str(), 0);
+    av_dict_set(&d, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
+    AVIOContext* pb = nullptr;
+    const int e = avio_open2(&pb, url.c_str(), AVIO_FLAG_READ, &ic_->interrupt_callback, &d);
+    av_dict_free(&d);
+    if (e < 0) return e;
+    // ff_close (refuse) uždaro per ic_->io_close2 → orig (io_close2_default = avio_close) — tas pats, kas avio_open2 kontekstui
+    if (const int r = post_open(ic_, &pb, url); r < 0) return r;
+    free_top_pb();
+    top_pb_ = pb;
+    ic_->pb = pb;
+    return 0;
+}
+
+int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u) {
     ++opens_total_;
     // Sesija nutraukiama su priežastimi žurnale (vieną kartą); šaltinis jungiasi iš naujo
     auto refuse = [&](const std::string& why) {
@@ -520,23 +635,16 @@ int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, i
         return AVERROR(EPERM);
     };
     // Turinio peržiūra (pirmi ≤ 4 KiB): M3U8 atpažįstamas iš pradžios (libav reikalauja #EXTM3U pirmoje eilutėje); ne M3U8 (segmentai,
-    // raktai, tiesioginis TS) — grąžinama atgal buferio ribose ir perduodama nepakeista
+    // raktai, tiesioginis TS) — peržiūrėti baitai atiduodami iš atminties (peek_io), tinklo kontekstas atgal negrąžinamas (A)
     unsigned char head[4096];
-    int n = avio_read(*pb, head, sizeof head);
-    bool m3u = n > 0 && parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n))).m3u;
+    const int n = avio_read(*pb, head, sizeof head);
+    const bool m3u = n > 0 && parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n))).m3u;
     if (!m3u) {
-        if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
-        if (n < 0 && n != AVERROR_EOF) return 0;  // klaidą pamatys skaitytojas
-        // peržiūra netilpo buferyje — atidaroma iš naujo; ir antras atsakymas neturi būti M3U8 (kitaip — tikrinimo apėjimas)
-        ff_close(s, pb);
-        if ((r = orig_io_open_(s, pb, url, flags, opts)) < 0) return r;
-        n = avio_read(*pb, head, sizeof head);
-        if (n > 0 && parse_playlist(std::string(reinterpret_cast<const char*>(head), static_cast<std::size_t>(n))).m3u)
-            return refuse("atsakymas pakartotinai atidarius tapo M3U8: " + redact_url(u));
-        if (n >= 0 && avio_seek(*pb, 0, SEEK_SET) == 0) return 0;
-        if (n < 0 && n != AVERROR_EOF) return 0;
-        ff_close(s, pb);
-        return AVERROR(EIO);
+        // klaida / EOF be duomenų — tuščia peržiūra; vidinio konteksto klaida lieka (avio_read_partial ją grąžins skaitytojui)
+        AVIOContext* w = peek_io(*pb, head, n < 0 ? 0 : n);
+        if (!w) return refuse("atminties nepakanka");
+        *pb = w;
+        return 0;
     }
     // H1: patikra matė ne M3U8, o libav gavo M3U8 — atmetama (format_whitelist vis tiek tik mpegts)
     if (!hls_) return refuse("HTTP atsakymas — M3U8 grojaraštis, nors patikra rado ne HLS");
@@ -558,16 +666,24 @@ int Demux::guarded_open(AVFormatContext* s, AVIOContext** pb, const char* url, i
 }
 
 int Demux::guarded_close(AVFormatContext* s, AVIOContext* pb) {
+    if (pb != nullptr && pb == top_pb_) return 0;  // viršutinį atlaisvina Demux (AVFMT_FLAG_CUSTOM_IO)
     if (is_mem_playlist_io(pb)) {
-        if (pb != top_pb_) free_mem_playlist_io(&pb);  // viršutinį atlaisvina Demux (AVFMT_FLAG_CUSTOM_IO)
+        free_mem_playlist_io(&pb);
         return 0;
     }
+    if (is_peek_io(pb)) pb = free_peek_io(&pb);  // vidinis — libav atidarytas, uždaromas jo būdu
     if (orig_io_close2_) return orig_io_close2_(s, pb);
     avio_close(pb);
     return 0;
 }
 
-void Demux::free_top_pb() { free_mem_playlist_io(&top_pb_); }
+void Demux::free_top_pb() {
+    if (is_peek_io(top_pb_)) {
+        AVIOContext* inner = free_peek_io(&top_pb_);
+        avio_close(inner);  // open_top: avio_open2
+    }
+    free_mem_playlist_io(&top_pb_);
+}
 
 void Demux::ff_close(AVFormatContext* s, AVIOContext** pb) {
     if (s->io_close2) s->io_close2(s, *pb);

@@ -41,6 +41,12 @@ struct FetchedPlaylist {
 AVIOContext* mem_playlist_io(const FetchedPlaylist& f);
 bool is_mem_playlist_io(const AVIOContext* io);
 void free_mem_playlist_io(AVIOContext** io);
+// A (round 11): kontekstas, kuris pirmiausia atiduoda sargo peržiūrėtus baitus (head, n ≤ 4096) iš atminties, tada skaito toliau iš
+// inner (tinklo konteksto niekada negrąžina atgal — jokios antros užklausos); av_opt_get(…, AV_OPT_SEARCH_CHILDREN) — per inner.
+// Atlaisvinamas TIK free_peek_io (grąžina inner — jį uždaro kvietėjas tuo pačiu būdu, kaip atidarė).
+AVIOContext* peek_io(AVIOContext* inner, const std::uint8_t* head, int n);
+bool is_peek_io(const AVIOContext* io);
+AVIOContext* free_peek_io(AVIOContext** io);
 
 enum class Kind : std::uint8_t { Video, Audio };
 constexpr int kVideoStream = 0, kAudioStream = 1;  // SourceClock srautų numeriai (ne libav indeksai)
@@ -106,11 +112,18 @@ public:
     static constexpr int kMaxOpensPerSec = 50;
 
 private:
+    int pre_open(const std::string& u);                                // schema, ribos — prieš atidarymą
+    int post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u);  // peržiūra, M3U8 patikra, peek_io
+    int open_top(const std::string& url);  // A: ne HLS HTTP viršutinis kontekstas (mūsų, AVFMT_FLAG_CUSTOM_IO) → top_pb_
+
+private:
     int (*orig_io_open_)(AVFormatContext*, AVIOContext**, const char*, int, AVDictionary**) = nullptr;
     int (*orig_io_close2_)(AVFormatContext*, AVIOContext*) = nullptr;
     HlsLimits lim_;
     FetchedPlaylist top_;            // H2: viršutinis grojaraštis — tie patys baitai patikrai ir libav (AVFMT_FLAG_CUSTOM_IO)
-    AVIOContext* top_pb_ = nullptr;  // jo atminties kontekstas (mūsų; libav jo neuždaro)
+    // viršutinis kontekstas (mūsų, AVFMT_FLAG_CUSTOM_IO; libav jo neuždaro): HLS — grojaraščio atminties kontekstas, ne HLS HTTP —
+    // peek_io virš avio_open2 konteksto (A: avformat_close_input jį uždarytų avio_close, kuris peek_io nepalaiko)
+    AVIOContext* top_pb_ = nullptr;
     void free_top_pb();
     bool guard_http_ = false;  // HTTP(S) šaltinis (H1: sargas visiems, ne tik HLS)
     bool hls_ = false;         // patikra rado M3U8

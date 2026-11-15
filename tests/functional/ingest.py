@@ -542,7 +542,7 @@ class PlaylistServer:
                     body = body()
                 if body is None:
                     return super().do_GET()
-                if isinstance(body, StreamBody):
+                if hasattr(body, "serve"):  # StreamBody ir kiti atsakymai su savo elgsena (gabalais, nukreipimas)
                     return body.serve(h)
                 h.send_response(200)
                 h.send_header("Content-Type", "application/vnd.apple.mpegurl")
@@ -696,6 +696,101 @@ def hls_toctou_case(out):
         problems.append("žurnale nėra M3U8 / įdėto master atmetimo")
     return [F.result(tid, "FAIL" if problems else "PASS",
                      why="; ".join(problems) + f" | GET po pakeitimo {n[0]} | {line.strip()[:200]} | " + summary_line(si, sv, a, r))]
+
+
+def conn_alive(sock):
+    """Ar kliento TCP ryšys dar atviras (FIN negautas): skaitomas lizdas su 0 baitų MSG_PEEK — klientas uždarė."""
+    import select
+    try:
+        r, _, _ = select.select([sock], [], [], 0)
+        return not r or sock.recv(1, socket.MSG_PEEK) != b""
+    except OSError:
+        return False
+
+
+class ChunkedHeadBody:
+    """HTTP MPEG-TS, kurio pirmi head baitų siunčiami chunk dydžio gabalais su pauze (kiekvienas libav skaitymas gauna vieną gabalą),
+    likusieji — rate baitų/s. Užklausa, atėjusi, kol ankstesnio atsakymo klientas dar skaito (ryšys atviras), — pakartotinė to paties
+    URL užklausa (libav avio_seek → http_seek su Range: bytes=0-): jai — master grojaraštis (rodo į save); reseeks — jų skaičius.
+    „Accept-Ranges: bytes“ — libav http laiko srautą ieškomu (http.c n6.1:1184-1187), tada AVIO buferis 32 KiB (aviobuf.c:985-989
+    padvigubina tik neieškomam), ir antras buferio pildymas rašo nuo pradžios (aviobuf.c:563-564) — peržiūros pradžios buferyje nebelieka."""
+
+    def __init__(self, path, nbytes, rate, head=8192, chunk=200, pause=0.015):
+        import threading
+        self.path, self.nbytes, self.rate, self.head, self.chunk, self.pause = str(path), nbytes, rate, head, chunk, pause
+        self.lock = threading.Lock()
+        self.live, self.gets, self.reseeks = set(), 0, 0
+
+    def serve(self, h):
+        with self.lock:
+            self.gets += 1
+            again = any(conn_alive(c) for c in self.live)
+            if again:
+                self.reseeks += 1
+            else:
+                self.live.add(h.connection)
+        if again:
+            body = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\npeek.ts\n"
+            h.send_response(200)
+            h.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            h.send_header("Content-Length", str(len(body)))
+            h.end_headers()
+            h.wfile.write(body)
+            return
+        try:
+            h.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            data = open(self.path, "rb").read()[:self.nbytes]
+            h.send_response(200)
+            h.send_header("Content-Type", "video/mp2t")
+            h.send_header("Content-Length", str(len(data)))
+            h.send_header("Accept-Ranges", "bytes")  # libav http: ieškomas (is_streamed = 0) → AVIO buferis 32 KiB, ne 64 KiB
+            h.end_headers()
+            time.sleep(self.pause)
+            p = 0
+            while p < min(self.head, len(data)):
+                h.wfile.write(data[p:p + self.chunk])
+                p += self.chunk
+                time.sleep(self.pause)
+            t0 = time.monotonic()
+            while p < len(data):
+                h.wfile.write(data[p:p + 188 * 700])
+                p += 188 * 700
+                ahead = (p - self.head) / self.rate - (time.monotonic() - t0)
+                if ahead > 0:
+                    time.sleep(ahead)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            with self.lock:
+                self.live.discard(h.connection)
+
+
+def hls_peek_case(out):
+    """A (round 11): sargo peržiūra (pirmi 4 KiB) ne M3U8 atsakymo neturi grąžinti tinklo konteksto atgal (avio_seek už buferio ribų →
+    nauja HTTP užklausa, kurios atsakymas niekada netikrinamas). Serveris pirmus 8 KiB siunčia 200 B gabalais (peržiūra netelpa
+    buferyje), pakartotinei užklausai atsako master grojaraščiu. Kriterijai: pakartotinių užklausų 0, HTTP šaltinis dekoduoja (peržiūros
+    baitai ir likusi dalis perduodami libav), procesas gyvena, UDP šaltinis — be praradimų."""
+    tid = "ingest_hls_security[peek_reseek]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    T = 30
+    srv = PlaylistServer()
+    body = ChunkedHeadBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 9500, rate=1_250_000)  # ~10 s realiu laiku
+    srv.routes["/peek.ts"] = body
+    try:
+        si, sv, ri, err = two_source_http(out, tid, srv, "/peek.ts", BASE_PORT + 58, T, 10**9, lambda: None)
+    finally:
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    if body.reseeks:
+        problems.append(f"pakartotinių užklausų po peržiūros {body.reseeks} (laukta 0)")
+    if flow(si, 1).get("frames_decoded", 0) < 25:
+        problems.append(f"HTTP šaltinis dekodavo {flow(si, 1).get('frames_decoded')} kadrų")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | GET {body.gets}, pakartotinių {body.reseeks}, HTTP frames_decoded "
+                     f"{flow(si, 1).get('frames_decoded')} | " + summary_line(si, sv, a, r))]
 
 
 def rss_kb(pid):
@@ -861,6 +956,7 @@ def ingest_hls_security(out):
              ("a", "įdėtas master"), ("huge", "TARGETDURATION"))
     try:
         res += hls_toctou_case(out)
+        res += hls_peek_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:
             tid = f"ingest_hls_security[{name}]"
