@@ -47,6 +47,7 @@ extern "C" {
 #include "ingest/av_input.hpp"
 #include "ingest/demux.hpp"
 #include "ingest/feed_gate.hpp"
+#include "ingest/packet_queue.hpp"
 #include "ingest/url_policy.hpp"
 #include "ingest/video_decode.hpp"
 #include "media/cpu/cpu_media.hpp"
@@ -67,69 +68,24 @@ struct QItem {
     bool flush = false;                // B4: perfiksavimas — dekoderis išvalomas, laukę kadrai išmetami, pradedama nuo įėjimo taško
 };
 
-class PacketQueue {
-public:
-    explicit PacketQueue(std::size_t cap) : cap_(cap) {}
-    ~PacketQueue() { clear(); }
-    void push(QItem it) {
-        {
-            std::lock_guard g(m_);
-            if (q_.size() >= cap_ && it.p.pkt) {  // apsauga nuo atminties augimo (latencija × srauto sparta ≪ cap)
-                drop(q_.front());
-                q_.pop_front();
-                ++dropped_;
-            }
-            q_.push_back(it);
-        }
-        cv_.notify_one();
-    }
-    // Laukia ≤ wait; false — tuščia.
-    bool pop(QItem& out, std::chrono::milliseconds wait) {
-        std::unique_lock lk(m_);
-        if (!cv_.wait_for(lk, wait, [&] { return !q_.empty(); })) return false;
-        out = q_.front();
-        q_.pop_front();
-        return true;
-    }
-    void clear() {
-        std::lock_guard g(m_);
-        for (QItem& it : q_) drop(it);
-        q_.clear();
-    }
-    // B4: išmeta tik paketus (sesijos ir kitos žymės lieka); grąžina išmestų skaičių
-    std::uint64_t drop_packets() {
-        std::lock_guard g(m_);
-        std::uint64_t n = 0;
-        std::deque<QItem> keep;
-        for (QItem& it : q_) {
-            if (it.p.pkt && !it.par) {
-                drop(it);
-                ++n;
-            } else {
-                keep.push_back(it);
-            }
-        }
-        q_.swap(keep);
-        return n;
-    }
-    std::uint64_t dropped() const {
-        std::lock_guard g(m_);
-        return dropped_;
-    }
+// Eilės elementų savybės (ingest/packet_queue.hpp): baitai — paketo dydis (žymės — 0), atlaisvinimas.
+struct QItemTraits {
+    static std::size_t bytes(const QItem& it) { return it.p.pkt ? static_cast<std::size_t>(std::max(it.p.pkt->size, 1)) : 0; }
     static void drop(QItem& it) {
         if (it.p.pkt) av_packet_free(&it.p.pkt);
         if (it.par) avcodec_parameters_free(&it.par);
     }
+};
 
-private:
-    mutable std::mutex m_;
-    std::condition_variable cv_;
-    std::deque<QItem> q_;
-    std::size_t cap_;
-    std::uint64_t dropped_ = 0;
+// M1: riba elementais (apsauga nuo milijonų mažų paketų) ir baitais (--max-queue-mb; numatyta — latencija × dosni sparta)
+class PacketQueue : public ig::PacketQueue<QItem, QItemTraits> {
+public:
+    using ig::PacketQueue<QItem, QItemTraits>::PacketQueue;
+    static void drop(QItem& it) { QItemTraits::drop(it); }
 };
 
 using Counter = std::atomic<std::uint64_t>;
+constexpr double kQueueMbitS = 80;  // M1: numatytosios eilės ribos sparta (Mbit/s) — dosniai virš transliacijos įnašo srautų
 
 struct Source {
     int idx = 0;
@@ -143,7 +99,9 @@ struct Source {
     std::atomic<std::int64_t> pending_step{0};  // tick'o pastebėtas laikrodžio šuolis → demux gijai (SourceClock — viena gija)
     AVCodecParameters* vpar0 = nullptr;         // pirmos sesijos parametrai (perduodami dekoderio gijoms)
     AVCodecParameters* apar0 = nullptr;
-    PacketQueue vq{40000}, aq{40000};
+    PacketQueue vq{40000, std::uint64_t{64} << 20}, aq{40000, std::uint64_t{64} << 20};  // baitų riba — nustatoma zondavus (M1)
+    std::uint64_t queue_cap_bytes = 0;
+    std::uint64_t overflow_logged = 0;  // demux gija: paskutinis žurnale parodytas perpildymo episodas
     // Dekoduoti kadrai pagal kadro indeksą (flow kadrų dažniu); tick'as ima tiksliai savo
     std::mutex fm;
     std::map<std::uint64_t, AVFrame*> frames;
@@ -343,12 +301,15 @@ void demux_thread(Source& s, Shared& c) {
                 it.p.key = (it.p.pkt->flags & AV_PKT_FLAG_KEY) != 0;
                 it.p.kind = k;
                 it.p.ev = st.ev;
-                if (k == ig::Kind::Video) {
-                    ++s.pkts_v;
-                    s.vq.push(it);
-                } else {
-                    ++s.pkts_a;
-                    s.aq.push(it);
+                PacketQueue& q = k == ig::Kind::Video ? s.vq : s.aq;
+                ++(k == ig::Kind::Video ? s.pkts_v : s.pkts_a);
+                q.push(it);
+                // M1: eilė pasiekė baitų / elementų ribą — seniausi paketai išmetami (queue_drops); žurnale — viena eilutė episodui
+                if (const std::uint64_t ep = s.vq.overflow_episodes() + s.aq.overflow_episodes(); ep != s.overflow_logged) {
+                    s.overflow_logged = ep;
+                    log_line("ingest", s.name + ": eilės riba " + std::to_string(s.queue_cap_bytes >> 20) +
+                                           " MB pasiekta — seniausi paketai išmetami (dekodavimas nespėja arba serveris stumia daugiau nei latencija; " +
+                                           "išmesta iš viso " + std::to_string(s.vq.dropped() + s.aq.dropped()) + ", --max-queue-mb)");
                 }
             }
             s.demux.close();
@@ -1045,6 +1006,12 @@ int run_ingest(const Opts& o_in) {
                                " MB (--max-audio-ring-mb; latencija " + std::to_string(s->latency_ns / 1'000'000) + " ms, kanalai " +
                                std::to_string(o.audio_channels) + ")");
         s->ring.init(o.audio_channels, ring_n);
+        // M1: eilių riba baitais — (latencija + atsarga + 2 s) × 80 Mbit/s (dosni transliacijos sparta), arba --max-queue-mb
+        s->queue_cap_bytes = o.max_queue_mb > 0 ? std::uint64_t{o.max_queue_mb} << 20
+                                                : static_cast<std::uint64_t>(static_cast<double>(s->latency_ns + sh.gate.lead_ns + 2'000'000'000LL) / 1e9 *
+                                                                             (kQueueMbitS * 1e6 / 8));
+        s->vq.set_cap_bytes(s->queue_cap_bytes);
+        s->aq.set_cap_bytes(s->queue_cap_bytes);
         std::fprintf(stderr, "[ingest] %s: %s%s, latencija %.0f ms\n", s->name.c_str(),
                      s->video ? vramflow::format_name(s->fmt).c_str() : "be video", s->audio ? " + garsas" : ", be garso",
                      static_cast<double>(s->latency_ns) / 1e6);
@@ -1241,6 +1208,8 @@ int run_ingest(const Opts& o_in) {
         f.inc("skip_dropped_pkts", s.skip_dropped);
         f.inc("decode_errors", s.vdec_errors + s.adec_errors);
         f.inc("queue_drops", s.vq.dropped() + s.aq.dropped());
+        f.inc("queue_overflows", s.vq.overflow_episodes() + s.aq.overflow_episodes());  // M1: perpildymo episodai
+        f.c["queue_cap_mb"] = s.queue_cap_bytes >> 20;
         f.inc("stamp_dropped", s.stamp_dropped);
         f.inc("audio_blocks", s.audio_blocks);
         f.inc("audio_chunks", s.audio_chunks);

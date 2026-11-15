@@ -678,8 +678,11 @@ def ingest_queue_byte_cap(out):
     seg = subprocess.Popen(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", str(CLIPS / "av_1080i50.ts"),
                             "-c", "copy", "-f", "hls", "-hls_time", "2", "-hls_list_size", "6", "-hls_flags", "delete_segments+omit_endlist",
                             str(work / "live.m3u8")], stdout=subprocess.DEVNULL, stderr=open(work.parent / "seg.log", "w"))
+    big = work.parent / "big.ts"  # 600 s ištisiniais laikais (-stream_loop su -c copy laikus tęsia; kartojant baitus — nutrūkimai)
+    subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-stream_loop", "3", "-i", str(CLIPS / "av_1080i50.ts"),
+                    "-c", "copy", "-f", "mpegts", str(big)], check=True)
     srv = PlaylistServer(work)
-    srv.routes["/big.ts"] = StreamBody(CLIPS / "av_1080i50.ts", repeat=4)
+    srv.routes["/big.ts"] = StreamBody(big)
     T, SWAP, CAP = 30, 12, 32
     rss = {"before": 0, "max_after": 0, "swapped": False, "last": 0}
 
@@ -703,6 +706,7 @@ def ingest_queue_byte_cap(out):
         seg.terminate()
         seg.wait()
         srv.close()
+        big.unlink(missing_ok=True)
     problems, a, r = base_checks(si, sv, ri, 20.0, T, want_rc=(0, 3, 4, 5, 6))
     if ri is None or ri < 0 or si is None:
         problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")

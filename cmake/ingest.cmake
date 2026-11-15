@@ -14,7 +14,7 @@ target_link_libraries(mxlv_ingest PUBLIC mxlv_timing mxlv_common PkgConfig::LIBA
 if(MXLV_BUILD_TESTS)
   # Gryna logika (be libav / MXL / GPU): tiekimo vartai, garso sekimas ir žiedas, H.264 skenavimas, URL politika (A1).
   add_executable(mxlv-ingest-unit tests/unit/test_feed_gate.cpp tests/unit/test_audio_sync.cpp tests/unit/test_h264_scan.cpp
-                 tests/unit/test_url_policy.cpp src/ingest/url_policy.cpp)
+                 tests/unit/test_url_policy.cpp tests/unit/test_packet_queue.cpp src/ingest/url_policy.cpp)
   vramflow_warnings(mxlv-ingest-unit)
   target_include_directories(mxlv-ingest-unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(mxlv-ingest-unit PRIVATE Catch2::Catch2WithMain)
