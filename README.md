@@ -531,7 +531,9 @@ local MPEG-TS file.
 | `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
 | `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
 
-**Security rules (URLs and playlists).** The `--input` URL is trusted, but its scheme must be `udp`, `rtp`, `srt`, `http`,
+**Security rules (URLs and playlists).** The HLS guard below is defence in depth around libavformat's HTTP/HLS client, not
+a sandbox: libavformat still parses the responses and follows redirects itself, so configure HLS sources only for known
+servers that you operate or trust. The `--input` URL is trusted, but its scheme must be `udp`, `rtp`, `srt`, `http`,
 `https` or a local file path; anything else (`file:`, `tcp:`, `concat:`, `data:`, `crypto+…` …) is a usage error (exit `1`).
 Every libavformat open, including nested ones (HLS segments, RTP → UDP, HTTP → TCP/TLS), gets an explicit
 `protocol_whitelist` and `format_whitelist` derived from that scheme (local file: `file` / `mpegts` only); HLS segment
@@ -590,7 +592,13 @@ of the host is compared), and for AES-128 segments (`crypto+http…`) the final 
 before the open is checked. URL handling is modelled on libavformat built without `HAVE_DOS_PATHS`; Windows is not a
 target platform. libavformat's `https` does not verify certificates by default
 (`tls_verify=0`), so HTTPS protects against passive eavesdropping only. Use HLS sources you trust, or run ingest where it
-cannot reach sensitive internal addresses.
+cannot reach sensitive internal addresses. Two more limits inside libavformat: the number of HTTP response header lines is
+not limited and `Icy-*` header values are concatenated without a cap (`http.c` n6.1:877-894; `Set-Cookie` values are kept
+too), so a hostile server can make one open grow in memory until the open ends — bounded only by the open deadline
+(`--input-wait-s`; for reconnects 30 s by default) and the 10 s read timeout per stalled read, not by size. URLs refused before
+the open (wrong scheme, `http:` without `//`, another host with `--hls-same-host`) do not count toward the open-rate limit
+(50 opens per second); their number per session is bounded by the playlist (at most 10 000 entries) and libavformat's reload
+limit (`max_reload` 3, `hls.c` n6.1:1500-1503, 2568-2569).
 
 **libavformat redirect-cache hang (FFmpeg ≤ 8.0) and the libav watchdog.** In FFmpeg 6.1 `http.c` a cached redirect jumps
 back to the start of the open without counting redirects and without checking the interrupt callback (`http.c` n6.1:362-373),

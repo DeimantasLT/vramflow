@@ -119,7 +119,8 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   nededamas į dekoderį — praleidžiama iki kito rakto kadro (perkrova nesugriūna). Formatas nustatomas iš srauto prieš kuriant
   flow'us (laukų tvarka — iš pirmo IDR); 4:2:2, 10 bitų, BFF atmetami su įvardytu formatu (exit `2`); formatas pasikeitė vidury
   srauto — tas šaltinis sustabdomas, kiti tęsia, exit `6`. 50 Hz ir 25p šaltiniai — viename procese, 59,94 šeima — atskirame.
-  **Saugumas:** `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
+  **Saugumas:** HLS sargas — papildoma apsauga aplink libavformat HTTP / HLS klientą, ne smėlio dėžė (atsakymus vis tiek analizuoja
+  ir nukreipimus seka pats libavformat), todėl HLS šaltiniai turi būti operatoriaus sukonfigūruoti, žinomi serveriai. `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
   libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`. HTTP(S) šaltinį pirma užklausia pats ingest; HLS
   atpažįstamas pagal turinį ir libavformat gauna būtent tą atsakymą (antros viršutinio grojaraščio užklausos nėra); ne HLS — tik MPEG-TS,
   užklausiamas antrą kartą sargo atidarymu (tiesioginis MPEG-TS — dvi užklausos sesijai; vienas atidarymas, M3U8 atsakymas atmetamas). Kiekvienas libavformat atidaromas atsakymas peržiūrimas (pirmi 4 KiB) be pakartotinės užklausos (peržiūrėti baitai
@@ -150,7 +151,12 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   atidarymo viduje, prieš sargui pamatant galutinį URL; jų turinys nenaudojamas), host'ai, rodantys ne ten, kur atrodo (DNS rebinding,
   kitas tos pačios mašinos vardas ar IP — lyginamas tik host'o tekstas), ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas —
   tikrinamas tik URL prieš atidarymą). URL apdorojimas modeliuotas pagal libavformat be `HAVE_DOS_PATHS`; Windows — ne tikslinė platforma.
-  libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). **libavformat nukreipimų kešo kilpa (FFmpeg ≤ 8.0) ir sargas:**
+  libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). HTTP antraščių eilučių skaičius libavformat neribojamas, `Icy-*`
+  reikšmės jungiamos be ribos (`http.c` n6.1:877-894; `Set-Cookie` irgi kaupiami) — priešiškas serveris gali auginti vieno
+  atidarymo atmintį iki atidarymo pabaigos: ribojama tik atidarymo riba (`--input-wait-s`, prisijungiant iš naujo — 30 s) ir 10 s
+  skaitymo riba, ne dydžiu. Prieš atidarymą atmesti URL (schema, `http:` be `//`, kitas serveris su `--hls-same-host`) į atidarymų
+  spartos ribą (50 / s) neįskaičiuojami; jų skaičių sesijai riboja grojaraštis (≤ 10 000 įrašų) ir libavformat perkrovimų riba
+  (`max_reload` 3, `hls.c` n6.1:1500-1503, 2568-2569). **libavformat nukreipimų kešo kilpa (FFmpeg ≤ 8.0) ir sargas:**
   FFmpeg 6.1 `http.c` kešuotas nukreipimas grįžta į atidarymo pradžią neskaičiuodamas nukreipimų ir netikrindamas pertraukimo
   kabliuko (`http.c` n6.1:362-373), o `301` / `308` kešuojami be galiojimo pabaigos (425-431): serveris, atsakantis
   `301 Location: <tas pats URL>` (ar A → B → A), suka atidarymą 100 % CPU be I/O — 10 s skaitymo riba, `--input-wait-s` ir
