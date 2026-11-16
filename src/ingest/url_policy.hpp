@@ -16,7 +16,7 @@
 
 namespace mxlv::ingest {
 
-// Schema mažosiomis raidėmis (kaip libavformat url_find_protocol: [A-Za-z0-9+.-]+, po jos ':' arba ','); "" — vietinis kelias.
+// Schema mažosiomis raidėmis (kaip libavformat url_find_protocol: [A-Za-z0-9+.-]+, po jos ':'; ',' — tik "subfile,…:…"); "" — vietinis kelias.
 std::string url_scheme(const std::string& url);
 
 // Operatoriaus šaltinio URL: true — leidžiama; kitaip why — „<schema> protokolas nepalaikomas (leidžiami: …): <URL>“.

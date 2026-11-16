@@ -96,7 +96,10 @@ std::string uri_attr(const std::string& line) { return tag_attr(line, "URI=", kM
 
 std::string url_scheme(const std::string& url) {
     const std::size_t n = std::strspn(url.c_str(), kSchemeChars);
-    if (n == 0 || n >= url.size() || (url[n] != ':' && url[n] != ',')) return {};
+    // L2: kaip libav url_find_protocol (avio.c n6.1:249-258): schemą baigia ':'; ',' — tik "subfile," (raidės tiksliai), po kurio
+    // kažkur yra ':'; kitaip libav laiko vietiniu failu (file)
+    const bool subfile = url.compare(0, 8, "subfile,") == 0 && url.find(':', n + 1) != std::string::npos;
+    if (n == 0 || n >= url.size() || (url[n] != ':' && !subfile)) return {};
     return lower(url.substr(0, n));
 }
 

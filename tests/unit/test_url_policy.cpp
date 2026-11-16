@@ -513,3 +513,17 @@ TEST_CASE("url_policy: L1 — viršutinio media grojaraščio URL normalizuojama
     CHECK(libav_playlist_url("https://h/live.m3u8") == "https://h/live.m3u8");
     CHECK(libav_playlist_url("http://h") == "http://h");
 }
+
+TEST_CASE("url_policy: L2 — schemos pabaiga tik ':' (',' — tik „subfile,“ kaip libav url_find_protocol)", "[ingest][url]") {
+    // avio.c n6.1:245-258: protokolas — [A-Za-z0-9+.-]+ ir ':'; ',' — tik "subfile," su ':' toliau; kitaip — file
+    CHECK(url_scheme("http,evil:x").empty());
+    CHECK(url_scheme("https,foo:bar/s.ts").empty());
+    CHECK(url_scheme("udp,x").empty());
+    CHECK(url_scheme("subfile,,0,10,:/etc/passwd") == "subfile");
+    CHECK(url_scheme("subfile,,0,10").empty());  // be ':' — libav file
+    CHECK(url_scheme("SUBFILE,,0,1,:/a").empty());  // strncmp — raidžių dydis svarbus
+    CHECK(url_scheme("http://h/a") == "http");
+    std::string out, why;
+    // grojaraščio nuoroda "https,foo:bar" — ne http (libav ją atidarytų kaip file) → atmetama
+    CHECK_FALSE(resolve_playlist_url("http://h/live/x.m3u8", "https,foo:bar", out, why));
+}
