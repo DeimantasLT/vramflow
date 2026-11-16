@@ -573,7 +573,13 @@ redirect; libavformat follows up to 8 redirects inside one open and FFmpeg 6.1 h
 responses are only parsed as playlists or media, never returned, but the requests are made. `--hls-same-host` restricts
 every URL to the host:port of the top-level playlist (after its redirects; the authority is parsed exactly as
 libavformat's `av_url_split` does, the host compared case-insensitively as text, without a trailing dot, default port
-80 / 443 made explicit): the playlist text is checked, every URL is checked again just before
+80 / 443 made explicit; only the exact lower-case schemes `http`, `https`, `crypto+http(s)` have an authority at all —
+libavformat switches to TLS only for a lower-case `https`, so a redirect to `HTTPS://host/` is plain HTTP to port 80 and is
+refused). The restriction fails closed: if the host:port of the top-level playlist cannot be determined (empty host, or a
+host longer than 1023 bytes), the source is refused instead of running unrestricted. Independently of `--hls-same-host`,
+the final URL of the top-level `http(s)` response after its redirects must start with exactly `http://` or `https://`
+(libavformat follows a redirect to any scheme, e.g. `ftp://`, and still connects to its host:port with HTTP); otherwise
+the source is refused. With `--hls-same-host` the playlist text is checked, every URL is checked again just before
 it is opened, and after the open the final URL after redirects is compared before a single byte is read — a mismatch
 ends the session and the redirected response is never used. What it cannot prevent: the redirected requests themselves
 (libavformat follows them inside the open, before the guard sees the final location; their bodies are not used), host

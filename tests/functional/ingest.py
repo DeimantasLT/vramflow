@@ -794,14 +794,14 @@ def hls_peek_case(out):
 
 
 class Redirect:
-    """HTTP 302 į to (kitas serveris); hits — kiek kartų nukreipta."""
+    """HTTP nukreipimas (numatyta 302) į to; hits — kiek kartų nukreipta."""
 
-    def __init__(self, to):
-        self.to, self.hits = to, 0
+    def __init__(self, to, code=302):
+        self.to, self.code, self.hits = to, code, 0
 
     def serve(self, h):
         self.hits += 1
-        h.send_response(302)
+        h.send_response(self.code)
         h.send_header("Location", self.to)
         h.send_header("Content-Length", "0")
         h.end_headers()
@@ -903,6 +903,72 @@ def hls_authority_case(out):
         problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
     return [F.result(tid, "FAIL" if problems else "PASS",
                      why="; ".join(problems) + f" | kanarėlės prisijungimų {tcp.connections} | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
+
+
+def hls_top_scheme_case(out):
+    """R13-1: --hls-same-host — viršutinis grojaraštis atsako „301 Location: ftp://<tas pats host:port>/x.m3u8“. libav http seka
+    nukreipimą į bet kokią schemą ir vis tiek jungiasi tcp į host:port (http.c n6.1:212-264, 815-821), o kanoninis ne http(s) autoritetas
+    tuščias — anksčiau tai išjungdavo apribojimą (tuščias = „bet kuris“), ir absoliutus segmentas į kitą prievadą (TCP kanarėlė) būdavo
+    atidaromas. Dabar: viršutinio galutinio URL schema ne tiksliai „http://“ / „https://“ — šaltinis atmetamas, kanarėlė 0 prisijungimų."""
+    tid = "ingest_hls_security[top_scheme]"
+    tcp = TcpCanary()
+    srv = PlaylistServer()
+    srv.routes["/top.m3u8"] = Redirect(f"ftp://127.0.0.1:{srv.port}/x.m3u8", code=301)
+    srv.routes["/x.m3u8"] = ("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttp://127.0.0.1:%d/a.ts\n#EXTINF:2.0,\nhttp://127.0.0.1:%d/b.ts\n"
+                             % (tcp.port, tcp.port)).encode()
+    d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
+    try:
+        t0 = time.monotonic()
+        p = F.FProc(out, tid, "ingest", d, "--input", srv.url("/top.m3u8"), "--hls-same-host", "--input-wait-s", 8, *F.vcommon("gpu", "cuda-linear"))
+        rc = p.wait(timeout=40)
+        if rc is None:
+            p.term()
+        dt = time.monotonic() - t0
+    finally:
+        srv.close()
+        tcp.close()
+    fatal = (F.vsummary(p, "ingest") or {}).get("fatal", "")
+    problems = []
+    if rc is None or rc <= 0:
+        problems.append(f"exit {rc} (laukta tvarkinga klaida > 0)")
+    if tcp.connections:
+        problems.append(f"TCP kanarėlė prisijungta {tcp.connections} k. — --hls-same-host išjungtas tuščiu autoritetu")
+    if "ftp://" not in fatal or "http" not in fatal:
+        problems.append("fatal nenurodo ne http(s) galutinio URL")
+    if flows_in(d):
+        problems.append(f"flow'ai domene {flows_in(d)}")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | exit {rc} per {dt:.1f} s, kanarėlė {tcp.connections}, "
+                     f"fatal {fatal[:240]!r}")]
+
+
+def hls_upper_scheme_case(out):
+    """R13-1: --hls-same-host — segmentas tame pačiame serveryje nukreipia į „HTTPS://127.0.0.1:<tas pats>/…“. libav TLS įjungia tik kai
+    proto lygiai "https" (strcmp, http.c n6.1:225-226), todėl jungiasi paprastu http — kitaip, nei rodo mūsų „:443“ / schema. Kanoninis
+    autoritetas tik tiksliai mažosioms schemoms: atsakymas atmetamas (žurnale „HTTPS://“ ir --hls-same-host), procesas gyvena, UDP — be
+    praradimų."""
+    tid = "ingest_hls_security[upper_scheme]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    red = [None]
+
+    def extra(srv):
+        srv.routes["/up2.ts"] = StreamBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 2000)
+        red[0] = Redirect(f"HTTPS://127.0.0.1:{srv.port}/up2.ts")
+        srv.routes["/up.ts"] = red[0]
+        return b"#EXTINF:2.0,\nup.ts\n"
+
+    si, sv, ri, err, _ = hls_live_swap_case(out, tid, BASE_PORT + 72, extra, ("--hls-same-host",))
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    line = next((ln for ln in err.splitlines() if "--hls-same-host" in ln and "HTTPS://" in ln and "sesija nutraukiama" in ln), "")
+    if not line:
+        problems.append("žurnale nėra „HTTPS://“ nukreipimo atmetimo (--hls-same-host, sesija nutraukiama)")
+    hits = red[0].hits if red[0] else 0
+    if hits < 1:
+        problems.append("nukreipiantis segmentas neužklaustas (testo sąranka)")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | nukreipta {hits} k. | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
 
 
 class HugeLengthBody:
@@ -1234,6 +1300,8 @@ def ingest_hls_security(out):
         res += hls_peek_case(out)
         res += hls_redirect_case(out)
         res += hls_authority_case(out)
+        res += hls_top_scheme_case(out)
+        res += hls_upper_scheme_case(out)
         res += huge_length_cases(out)
         res += hls_dot_location_case(out)
         res += hls_segment_m3u8_case(out)

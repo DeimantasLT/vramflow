@@ -421,8 +421,8 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
     for (const auto* v : {&pi.variants, &pi.refs})
         for (const std::string& x : *v) {
             if (!resolve_playlist_url(base, x, r, why)) return false;
-            if (!lim.only_authority.empty() && canonical_authority(r) != lim.only_authority) {
-                why = "grojaraščio nuoroda į kitą serverį (--hls-same-host: tik " + lim.only_authority + "): " + redact_url(r);
+            if (!same_host_allows(lim, r)) {
+                why = "grojaraščio nuoroda į kitą serverį (--hls-same-host: tik " + same_host_name(lim) + "): " + redact_url(r);
                 return false;
             }
         }
@@ -489,6 +489,8 @@ std::string url_authority(const std::string& url) {
 
 std::string canonical_authority(const std::string& url) {
     std::string s = url_scheme(url);
+    // R13-1: url_scheme grąžina mažosiomis — originalas turi sutapti raidė į raidę (http.c n6.1:225-226 lygina strcmp)
+    if (url.compare(0, s.size(), s) != 0) return {};
     if (starts(s, "crypto+")) s = s.substr(7);
     if (!is_http(s) || http_scheme_without_slashes(url)) return {};  // H1: be „://“ — niekada nesutampa
     // url_authority: userinfo iki PASKUTINIO '@' (kaip av_url_split, utils.c n6.1:397-401), mažosios raidės
@@ -515,6 +517,19 @@ std::string canonical_authority(const std::string& url) {
         return host + ":" + std::to_string(std::stoi(port));
     return host + ":" + port;
 }
+
+bool same_host_allows(const HlsLimits& lim, const std::string& url) {
+    if (!lim.only_authority) return true;
+    if (lim.only_authority->empty()) return false;  // R13-1: same-host įjungtas, leistino serverio nėra — niekas (fail closed)
+    return canonical_authority(url) == *lim.only_authority;
+}
+
+std::string same_host_name(const HlsLimits& lim) {
+    if (!lim.only_authority) return "bet kuris";
+    return lim.only_authority->empty() ? std::string("nėra — viršutinio serverio nustatyti nepavyko") : *lim.only_authority;
+}
+
+bool exact_http_url(const std::string& url) { return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0; }
 
 bool secret_from(const std::string& spec, std::string& out, std::string& why) {
     out.clear();

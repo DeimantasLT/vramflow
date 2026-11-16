@@ -291,12 +291,26 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
     hls = false;
     target_ns = 0;
     if (!fetch_playlist(url, cb, lim_in.max_bytes, true, top, err)) return false;
+    // R13-1: galutinis URL po libav nukreipimų — tik tiksliai „http://“ / „https://“. libav http seka Location į bet kokią schemą ir vis
+    // tiek jungiasi tcp į jos host:port (http.c n6.1:212-264, 434, 815-821), o tokio URL kanoninis autoritetas tuščias — anksčiau tai
+    // išjungdavo --hls-same-host; santykinės nuorodos be to būtų sprendžiamos pagal ne http bazę
+    if (!exact_http_url(top.location)) {
+        err = "galutinis URL po nukreipimų ne http:// / https:// (libav http vis tiek jungtųsi į jo host:port): " + redact_url(top.location);
+        return false;
+    }
     const PlaylistInfo pt = parse_playlist(top.text);
     if (!pt.m3u) return true;  // ne HLS (turinys nuspręstas, ne URL galūnė — B8)
     hls = true;
     const std::string& base = top.location;  // nukreipus — santykinės nuorodos pagal galutinį URL (kaip libav)
     HlsLimits lim = lim_in;
-    if (same_host) lim.only_authority = canonical_authority(base);
+    if (same_host) {
+        lim.only_authority = canonical_authority(base);  // R13-1: nustatytas ir tuščias — niekas, ne „bet kuris“
+        if (lim.only_authority->empty()) {
+            err = "--hls-same-host: viršutinio grojaraščio serverio nustatyti nepavyko (host'as tuščias arba ilgesnis nei 1023 baitai): " +
+                  redact_url(base);
+            return false;
+        }
+    }
     // Gylis: master → media, ne giliau. Variantas, kuris pats yra master (A→B→A, A→A) — klaida (kitaip libav HLS demuxeris
     // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
     if (!check_playlist(base, pt, true, lim, err)) return false;
@@ -316,8 +330,8 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
             FetchedPlaylist fv;
             if (!fetch_playlist(vu, cb, lim.max_bytes, false, fv, err)) return false;
             // D: varianto atsakymas po nukreipimų — irgi tik iš leistino serverio (nukreipimo užklausos jau padarytos — README)
-            if (!lim.only_authority.empty() && canonical_authority(fv.location) != lim.only_authority) {
-                err = "variantas nukreiptas į kitą serverį (--hls-same-host: tik " + lim.only_authority + "): " + redact_url(fv.location);
+            if (!same_host_allows(lim, fv.location)) {
+                err = "variantas nukreiptas į kitą serverį (--hls-same-host: tik " + same_host_name(lim) + "): " + redact_url(fv.location);
                 return false;
             }
             const PlaylistInfo pv = parse_playlist(fv.text);
@@ -634,11 +648,11 @@ int Demux::pre_open(const std::string& u) {
         return AVERROR(EPERM);
     }
     // D: --hls-same-host — ir pats atidaromas URL (ne tik grojaraščio tekstas), prieš libav atidarymą
-    if (!lim_.only_authority.empty() && canonical_authority(u) != lim_.only_authority) {
+    if (!same_host_allows(lim_, u)) {
         ++refused_opens_;
         if (!intr_.abort.exchange(true))
             std::fprintf(stderr, "[ingest] %s: HLS: atidarymas į kitą serverį (--hls-same-host: tik %s): %s — atmesta, sesija nutraukiama\n",
-                         shown_.c_str(), lim_.only_authority.c_str(), redact_url(u).c_str());
+                         shown_.c_str(), same_host_name(lim_).c_str(), redact_url(u).c_str());
         return AVERROR(EPERM);
     }
     if (!hls_ && opens_total_ > 0) {  // H1: tiesioginis MPEG-TS per HTTP — vienas atidarymas sesijai; daugiau — ne mūsų srautas
@@ -688,9 +702,9 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     // D: --hls-same-host — galutinis atsakymo URL po libav http nukreipimų (iki 8, http.c n6.1:54, 419-438; max_redirects parinkties
     // 6.1 neturi), PRIEŠ skaitant turinį. Nukreipimų užklausos jau padarytos (README). crypto+ konteksto location nepasiekiamas
     // (crypto klasė be child_next) — tada patikrinta tik prieš atidarymą.
-    if (!lim_.only_authority.empty())
-        if (const std::string loc = io_prop(*pb, "location"); !loc.empty() && canonical_authority(loc) != lim_.only_authority)
-            return refuse("atsakymas nukreiptas į kitą serverį (--hls-same-host: tik " + lim_.only_authority + "): " + redact_url(u) + " → " +
+    if (lim_.only_authority)
+        if (const std::string loc = io_prop(*pb, "location"); !loc.empty() && !same_host_allows(lim_, loc))
+            return refuse("atsakymas nukreiptas į kitą serverį (--hls-same-host: tik " + same_host_name(lim_) + "): " + redact_url(u) + " → " +
                           redact_url(loc));
     // Turinio peržiūra (pirmi ≤ 4 KiB): M3U8 atpažįstamas iš pradžios (libav reikalauja #EXTM3U pirmoje eilutėje); ne M3U8 (segmentai,
     // raktai, tiesioginis TS) — peržiūrėti baitai atiduodami iš atminties (peek_io), tinklo kontekstas atgal negrąžinamas (A)

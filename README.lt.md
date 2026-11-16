@@ -138,7 +138,13 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   env:VARDAS | file:/kelias` (ne `/proc/*/cmdline`; `+` neleidžiamas — libavformat jį paverčia tarpu). **SSRF:** grojaraštis gali nukreipti procesą į bet kurį pasiekiamą http(s)
   host:port (ir loopback, debesų metaduomenų adresus), o bet kuris segmentas, raktas ar grojaraštis — HTTP nukreipimu (libavformat
   seka iki 8, FFmpeg 6.1 to išjungti neleidžia). `--hls-same-host` leidžia tik viršutinio grojaraščio serverį (autoritetas skaidomas tiksliai kaip libavformat `av_url_split`;
-  host lyginamas kaip tekstas, be raidžių dydžio ir galinio taško, numatytas prievadas 80 / 443): tikrinamas tekstas, URL prieš atidarymą ir galutinis URL po nukreipimų prieš
+  host lyginamas kaip tekstas, be raidžių dydžio ir galinio taško, numatytas prievadas 80 / 443; autoritetą turi tik tiksliai
+  mažosiomis rašytos schemos `http`, `https`, `crypto+http(s)` — libavformat TLS įjungia tik mažosiomis `https`, todėl nukreipimas į
+  `HTTPS://host/` yra paprastas HTTP į 80 prievadą ir atmetamas). Apribojimas užsidaro: jei viršutinio grojaraščio host:port nustatyti
+  nepavyksta (tuščias arba ilgesnis nei 1023 baitai host'as), šaltinis atmetamas, o ne paleidžiamas be apribojimo. Nepriklausomai nuo
+  `--hls-same-host`, viršutinio `http(s)` atsakymo galutinis URL po nukreipimų turi prasidėti tiksliai `http://` arba `https://`
+  (libavformat seka nukreipimą į bet kokią schemą, pvz. `ftp://`, ir vis tiek jungiasi HTTP į jos host:port) — kitaip šaltinis
+  atmetamas. Su `--hls-same-host` tikrinamas tekstas, URL prieš atidarymą ir galutinis URL po nukreipimų prieš
   skaitant turinį — kitas serveris baigia sesiją, jo atsakymas nenaudojamas. Neužkertama: pačios nukreipimų užklausos (libavformat jas atlieka
   atidarymo viduje, prieš sargui pamatant galutinį URL; jų turinys nenaudojamas), host'ai, rodantys ne ten, kur atrodo (DNS rebinding,
   kitas tos pačios mašinos vardas ar IP — lyginamas tik host'o tekstas), ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas —

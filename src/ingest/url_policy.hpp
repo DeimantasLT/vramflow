@@ -10,6 +10,7 @@
 //   * grojaraščio pateikti URL (variantai, segmentai, URI="…" atributai) — tik http / https po išsprendimo pagal grojaraščio URL;
 //   * paslaptys žurnaluose: userinfo ir visos užklausos reikšmės (SRT passphrase=…, žetonai) pakeičiamos „***“.
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -75,7 +76,9 @@ struct HlsLimits {
     std::size_t max_playlists = 16;     // master + variantai, kuriuos tikrinam
     std::size_t max_bytes = 1u << 20;   // grojaraščio dydis (--hls-max-playlist); daugiau — šaltinis atmetamas
     std::size_t max_segments = 10000;   // media grojaraščio nuorodų (segmentų, raktų, EXT-X-MAP) riba
-    std::string only_authority;         // --hls-same-host: tik šis canonical_authority (viršutinio grojaraščio location); "" — bet kuris
+    // --hls-same-host: tik šis canonical_authority (viršutinio grojaraščio location). R13-1: nenustatytas — be apribojimo; nustatytas
+    // (ir tuščias — viršutinio serverio nustatyti nepavyko) — tik jis, tuščias neleidžia nieko (tuščias niekada nereiškia „bet kuris“)
+    std::optional<std::string> only_authority;
     // F: libav init sekcijų (EXT-X-MAP) iki sesijos pabaigos neatlaisvina — ≤ max_maps eilučių grojaraštyje ir ≤ max_init_bytes jų
     // sąmatos (init_section_bytes) per sesiją; daugiau — sesija nutraukiama (prisijungus iš naujo libav atmintis atlaisvinta)
     std::size_t max_maps = 4;
@@ -105,7 +108,18 @@ std::string url_authority(const std::string& url);
 bool http_scheme_without_slashes(const std::string& url);
 // D: --hls-same-host lyginimo forma "host:prievadas" (http / https / crypto+http(s); kita — ""): host mažosiomis be galinio taško,
 // prievadas visada (nėra — 80 / 443, skaitmenys — skaitinė reikšmė, kita — kaip parašyta), [IPv6] su skliaustais.
+// R13-1: schema tik TIKSLIAI mažosiomis ("http", "https", "crypto+http(s)") — libav TLS įjungia tik kai av_url_split proto lygiai
+// "https" (strcmp, http.c n6.1:225-226): „HTTPS://h/“ jungiasi paprastu http į :80. Kita rašyba — "" (niekada nesutampa).
 std::string canonical_authority(const std::string& url);
+// R13-1: --hls-same-host leidžia šį URL? Apribojimo nėra (lim.only_authority nenustatytas) — true; kitaip tik kai canonical_authority
+// netuščias ir lygus leistinam (tuščias leistinas — niekas).
+bool same_host_allows(const HlsLimits& lim, const std::string& url);
+// Leistinas serveris žurnalams ir klaidoms ("bet kuris", jo host:port arba „nėra …“).
+std::string same_host_name(const HlsLimits& lim);
+// R13-1: URL schema TIKSLIAI "http" arba "https" (mažosiomis), iš karto po jos „://“ — viršutinio grojaraščio galutinis URL po
+// nukreipimų turi būti toks (libav http seka nukreipimą į bet kokią schemą ir vis tiek jungiasi tcp į host:port, http.c n6.1:212-264,
+// 815-821).
+bool exact_http_url(const std::string& url);
 
 // H2: VISO grojaraščio patikra (ir patikroje prieš libav, ir sarge kiekvienam libav atsisiųstam M3U8): master leidžiamas tik
 // viršutiniam (allow_master), variantų ≤ max_playlists − 1, nuorodų ≤ max_segments, #EXT-X-TARGETDURATION ≤ max_target_s, kiekviena

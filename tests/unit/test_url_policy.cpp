@@ -217,7 +217,7 @@ TEST_CASE("url_policy: D — autoritetas lyginamas normalizuotas (host raidės, 
     CHECK(canonical_authority("http://Host.Example.:80/x") == "host.example:80");
     CHECK(canonical_authority("http://h/x") == "h:80");
     CHECK(canonical_authority("https://h/x") == "h:443");
-    CHECK(canonical_authority("HTTPS://h:443") == "h:443");
+    CHECK(canonical_authority("HTTPS://h:443").empty());  // R13-1: libav TLS tik „https“ mažosiomis (http.c n6.1:225-226)
     CHECK(canonical_authority("crypto+https://u:p@h/x.ts") == "h:443");
     CHECK(canonical_authority("http://a@b@H:1/") == "h:1");
     CHECK(canonical_authority("http://[::1]:8080/") == "[::1]:8080");
@@ -390,7 +390,7 @@ TEST_CASE("url_policy: --hls-same-host — nuorodos tik į grojaraščio server�
     CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://169.254.169.254/latest\n"), false, lim, why));
     CHECK(why.find("--hls-same-host") != std::string::npos);
     CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"http://127.0.0.1:9/k\"\n"), false, lim, why));
-    lim.only_authority.clear();  // numatyta — bet koks http(s) serveris (SSRF dokumentuota)
+    lim.only_authority.reset();  // numatyta — bet koks http(s) serveris (SSRF dokumentuota)
     CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://169.254.169.254/latest\n"), false, lim, why));
 }
 
@@ -526,4 +526,45 @@ TEST_CASE("url_policy: L2 — schemos pabaiga tik ':' (',' — tik „subfile,�
     std::string out, why;
     // grojaraščio nuoroda "https,foo:bar" — ne http (libav ją atidarytų kaip file) → atmetama
     CHECK_FALSE(resolve_playlist_url("http://h/live/x.m3u8", "https,foo:bar", out, why));
+}
+
+TEST_CASE("url_policy: R13-1 — --hls-same-host užsidaro: tuščias leistinas autoritetas ≠ „bet kuris“, schema tik mažosiomis", "[ingest][url]") {
+    // http.c n6.1:225-226: TLS tik kai av_url_split proto lygiai "https" (strcmp) — „HTTPS://h/“ libav jungiasi paprastu http į :80, o
+    // ne į :443; todėl kanoninis autoritetas — tik tiksliai mažosiomis rašytoms schemoms (kitaip "" — niekada nesutampa)
+    for (const char* u : {"HTTPS://h/x", "Http://h/x", "HTTP://h:80/", "hTTps://h/", "crypto+HTTPS://h/x", "CRYPTO+http://h/x"}) {
+        INFO(u);
+        CHECK(canonical_authority(u).empty());
+    }
+    CHECK(canonical_authority("https://h/x") == "h:443");
+    CHECK(canonical_authority("crypto+http://h/x") == "h:80");
+    // --hls-same-host įjungtas, bet leistino autoriteto nėra (viršutinio location schema ne http(s), host'as > 1023 baitų) —
+    // atmetama kiekviena nuoroda, ne „be apribojimo“
+    HlsLimits lim;
+    lim.only_authority = std::string{};
+    std::string why;
+    CHECK_FALSE(check_playlist("http://h/x.m3u8", parse_playlist("#EXTM3U\n#EXTINF:2,\nhttp://evil/s.ts\n"), false, lim, why));
+    CHECK(why.find("--hls-same-host") != std::string::npos);
+    CHECK_FALSE(check_playlist("http://h/x.m3u8", parse_playlist("#EXTM3U\n#EXTINF:2,\ns.ts\n"), false, lim, why));
+    // nuoroda „HTTPS://“ į leistiną host'ą — libav ją atidarytų ne tuo prievadu / be TLS → atmetama
+    lim.only_authority = "h:443";
+    CHECK_FALSE(check_playlist("https://h/x.m3u8", parse_playlist("#EXTM3U\n#EXTINF:2,\nHTTPS://h/s.ts\n"), false, lim, why));
+    CHECK(check_playlist("https://h/x.m3u8", parse_playlist("#EXTM3U\n#EXTINF:2,\nhttps://h/s.ts\n"), false, lim, why));
+    // nenustatytas — be apribojimo (numatyta, SSRF dokumentuota)
+    lim.only_authority.reset();
+    CHECK(same_host_allows(lim, "http://evil/s.ts"));
+    CHECK(same_host_name(lim) == "bet kuris");
+    lim.only_authority = std::string{};
+    CHECK_FALSE(same_host_allows(lim, "http://evil/s.ts"));
+    CHECK_FALSE(same_host_allows(lim, "ftp://evil/s.ts"));
+    // viršutinio grojaraščio galutinis URL po nukreipimų: tik tiksliai „http://“ / „https://“ (libav http seka Location į bet kokią
+    // schemą, o jungiasi vis tiek tcp į host:port — http.c n6.1:212-264, 815-821)
+    for (const char* ok : {"http://h/x.m3u8", "https://h:8443/x.m3u8"}) {
+        INFO(ok);
+        CHECK(exact_http_url(ok));
+    }
+    for (const char* bad : {"ftp://h/x.m3u8", "HTTP://h/x.m3u8", "Https://h/x", "http:h/x.m3u8", "http:/h/x", "crypto+http://h/x", "file:///x",
+                            "/local/x.m3u8", ""}) {
+        INFO(bad);
+        CHECK_FALSE(exact_http_url(bad));
+    }
 }
