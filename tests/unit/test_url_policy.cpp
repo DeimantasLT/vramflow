@@ -393,3 +393,56 @@ TEST_CASE("url_policy: --hls-same-host — nuorodos tik į grojaraščio server�
     lim.only_authority.clear();  // numatyta — bet koks http(s) serveris (SSRF dokumentuota)
     CHECK(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nhttp://169.254.169.254/latest\n"), false, lim, why));
 }
+
+TEST_CASE("url_policy: H1 — autoritetas tiksliai kaip libav av_url_split; http(s) be „://“ — atmetama", "[ingest][url]") {
+    // av_url_split (utils.c n6.1:377-411): schema iki PIRMO ':', po jo praleidžiami ne daugiau kaip du '/', autoritetas iki "/?#";
+    // http jungiasi būtent į šį host'ą (http.c n6.1:213-215), net jei toliau kelyje yra „://kitas“
+    CHECK(url_authority("http:evil.com/x://allowed.com/s.ts") == "evil.com");
+    CHECK(url_authority("http:10.0.0.5/?u=http://allowed.com/") == "10.0.0.5");
+    CHECK(url_authority("http:/evil.com/x://allowed.com/") == "evil.com");
+    CHECK(url_authority("http:///x://allowed.com/").empty());
+    CHECK(url_authority("crypto+http:evil.com/x://allowed.com/s.ts") == "evil.com");
+    CHECK(url_authority("http://u@evil.com@allowed.com/").find("allowed.com") == 0);  // paskutinis '@' (utils.c:397-401)
+    // --hls-same-host lyginimo forma: schema be „://“ iš karto — niekada nesutampa (fail closed)
+    for (const char* u : {"http:evil.com/x://allowed.com/s.ts", "http:10.0.0.5/?u=http://allowed.com/", "http:allowed.com/s.ts",
+                          "https:/allowed.com/s.ts", "crypto+http:evil.com/x://allowed.com/s.ts", "crypto+https:allowed.com/x://allowed.com/"}) {
+        INFO(u);
+        CHECK(canonical_authority(u).empty());
+        CHECK(http_scheme_without_slashes(u));
+    }
+    CHECK_FALSE(http_scheme_without_slashes("http://allowed.com/x://evil.com/"));
+    CHECK_FALSE(http_scheme_without_slashes("crypto+https://allowed.com/s.ts"));
+    CHECK_FALSE(http_scheme_without_slashes("data:,x"));
+    CHECK(canonical_authority("http://allowed.com/x://evil.com/") == "allowed.com:80");
+    CHECK(canonical_authority("http://" + std::string(1024, 'a') + "/").empty());  // libav hostname[1024] — ilgesnis nukerpamas
+    // visos trys patikros naudoja check_playlist / canonical_authority: grojaraščio nuorodos atmetamos su --hls-same-host ir be jo
+    HlsLimits lim;
+    lim.only_authority = "allowed.com:80";
+    std::string why;
+    const std::string base = "http://allowed.com/live/x.m3u8";
+    for (const char* ref : {"http:evil.com/x://allowed.com/s.ts", "http:10.0.0.5/?u=http://allowed.com/", "http:/evil.com/s.ts"}) {
+        INFO(ref);
+        CHECK_FALSE(check_playlist(base, parse_playlist(std::string("#EXTM3U\n#EXTINF:2,\n") + ref + "\n"), false, lim, why));
+        CHECK(why.find("av_url_split") != std::string::npos);
+        HlsLimits any;
+        CHECK_FALSE(check_playlist(base, parse_playlist(std::string("#EXTM3U\n#EXTINF:2,\n") + ref + "\n"), false, any, why));
+        std::string out;
+        CHECK_FALSE(resolve_playlist_url(base, ref, out, why));
+        CHECK(why.find("neleidžiama") != std::string::npos);
+    }
+    CHECK_FALSE(check_playlist(base, parse_playlist("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"http:evil.com/k://allowed.com/k\"\n"), false, lim, why));
+    // operatoriaus URL — irgi tik „schema://“
+    CHECK_FALSE(source_url_allowed("http:allowed.com/live.m3u8", why));
+    CHECK(why.find("av_url_split") != std::string::npos);
+    CHECK(source_url_allowed("http://allowed.com/live.m3u8", why));
+    // paslaptys: userinfo išvaloma visada (anksčiau „://“ kelyje palikdavo pradžią su slaptažodžiu)
+    CHECK(redact_url("http:user:SECRETPW@evil.com/x://allowed.com/") == "http:***");
+    CHECK(redact_url("https:/u:SECRETPW@h/p") == "https:***");
+    for (const char* line : {"[hls @ 0x1] Opening 'http:user:SECRETPW@evil.com/x://allowed.com/s.ts' for reading",
+                             "err http:user:SECRETPW@evil.com/x://allowed.com/s.ts end", "(crypto+http:u:SECRETPW@e/x://a/k)"}) {
+        INFO(line);
+        const std::string r = redact_urls_in(line);
+        CHECK(r.find("SECRETPW") == std::string::npos);
+    }
+    CHECK(redact_urls_in("a http://h/p?t=1 b") == "a http://h/p?t=*** b");  // įprasti URL — kaip iki šiol
+}

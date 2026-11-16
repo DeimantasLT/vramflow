@@ -75,8 +75,12 @@ struct HlsLimits {
 // F: kiek atminties libav skirs šio grojaraščio init sekcijoms (EXT-X-MAP): kiekvienai 256 + |absoliutus URL| + 1 (+ |rakto URL| + 1).
 std::size_t init_section_bytes(const std::string& base, const PlaylistInfo& pi);
 
-// URL host[:port] mažosiomis raidėmis, be userinfo ("" — ne schema://).
+// H1: URL autoritetas host[:port] mažosiomis, be userinfo — TIKSLIAI kaip libav av_url_split (utils.c n6.1:377-411): schema iki pirmo
+// ':', po jo praleidžiami ≤ 2 '/', autoritetas iki "/?#" ("" — nėra schemos arba tuščias autoritetas).
 std::string url_authority(const std::string& url);
+// H1: http / https / crypto+http(s) URL, kurio schemą NE iš karto seka „://“ (pvz. „http:evil/x://allowed/“): libav host'ą ima iš
+// kelio pradžios, todėl toks URL visur atmetamas (operatoriaus, grojaraščio nuorodos, libav atidarymai).
+bool http_scheme_without_slashes(const std::string& url);
 // D: --hls-same-host lyginimo forma "host:prievadas" (http / https / crypto+http(s); kita — ""): host mažosiomis be galinio taško,
 // prievadas visada (nėra — 80 / 443, skaitmenys — skaitinė reikšmė, kita — kaip parašyta), [IPv6] su skliaustais.
 std::string canonical_authority(const std::string& url);

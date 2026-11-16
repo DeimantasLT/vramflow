@@ -872,6 +872,37 @@ def hls_redirect_case(out):
                      summary_line(si, sv, a, r))]
 
 
+def hls_authority_case(out):
+    """H1 (round 12): --hls-same-host — perkrautame grojaraštyje segmentai „http:127.0.0.1:<kitas>/x://127.0.0.1:<leistinas>/a.ts“ ir
+    „http:127.0.0.1:<kitas>/?u=http://…“: libav av_url_split (utils.c n6.1:377-383) jungtųsi į <kitas> (host'as po pirmo ':'), nors
+    „://“ kelyje rodo leistiną serverį. Sargas autoritetą skaičiuoja kaip libav ir „http:“ be „//“ atmeta: kitas prievadas (TCP
+    kanarėlė) niekada neprisijungiamas, procesas gyvena, UDP šaltinis — be praradimų."""
+    tid = "ingest_hls_security[authority_split]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    tcp = TcpCanary()
+
+    def extra(srv):
+        return (b"#EXTINF:2.0,\nhttp:127.0.0.1:%d/x://127.0.0.1:%d/a.ts\n#EXTINF:2.0,\nhttp:127.0.0.1:%d/?u=http://127.0.0.1:%d/b.ts\n"
+                % (tcp.port, srv.port, tcp.port, srv.port))
+
+    try:
+        si, sv, ri, err, _ = hls_live_swap_case(out, tid, BASE_PORT + 64, extra, ("--hls-same-host",))
+    finally:
+        tcp.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    if tcp.connections:
+        problems.append(f"kitas prievadas (TCP kanarėlė) prisijungtas {tcp.connections} k. — libav jungėsi pagal av_url_split host'ą")
+    line = next((ln for ln in err.splitlines() if "av_url_split" in ln and "sesija nutraukiama" in ln), "")
+    if not line:
+        problems.append("žurnale nėra av_url_split atmetimo (sesija nutraukiama)")
+    if flow(si, 1).get("input_reconnects", 0) < 1:
+        problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')}")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | kanarėlės prisijungimų {tcp.connections} | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
+
 
 def hls_segment_m3u8_case(out):
     """E (round 11): media grojaraščio naujas segmentas atsako media grojaraščiu (M3U8 ne grojaraščio URL). Sargas M3U8 priima tik iš
@@ -1072,6 +1103,7 @@ def ingest_hls_security(out):
         res += hls_toctou_case(out)
         res += hls_peek_case(out)
         res += hls_redirect_case(out)
+        res += hls_authority_case(out)
         res += hls_segment_m3u8_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:

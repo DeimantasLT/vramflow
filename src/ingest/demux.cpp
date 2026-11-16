@@ -609,6 +609,13 @@ int Demux::pre_open(const std::string& u) {
                      sc.empty() ? "vietinis kelias" : sc.c_str(), redact_url(u).c_str());
         return AVERROR(EPERM);
     }
+    // H1: „http:host/…“ (be „//“) — libav host'ą ima iš kelio (av_url_split, utils.c n6.1:377-383); niekada neatidaroma
+    if (http_scheme_without_slashes(u)) {
+        ++refused_opens_;
+        std::fprintf(stderr, "[ingest] %s: HLS: atidarymas atmestas — URL be „//“ po schemos (av_url_split host'ą imtų iš kelio): %s\n",
+                     shown_.c_str(), redact_url(u).c_str());
+        return AVERROR(EPERM);
+    }
     // D: --hls-same-host — ir pats atidaromas URL (ne tik grojaraščio tekstas), prieš libav atidarymą
     if (!lim_.only_authority.empty() && canonical_authority(u) != lim_.only_authority) {
         ++refused_opens_;

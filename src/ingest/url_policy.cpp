@@ -100,6 +100,10 @@ std::string url_scheme(const std::string& url) {
 bool source_url_allowed(const std::string& url, std::string& why) {
     const std::string s = url_scheme(url);
     if (s.empty() && !url.empty()) return true;  // vietinis failas (kaip iki šiol)
+    if (http_scheme_without_slashes(url)) {
+        why = s + " URL be „//“ po schemos neleidžiamas (libav av_url_split host'ą imtų iš kelio): " + redact_url(url);
+        return false;
+    }
     if (s == "udp" || s == "rtp" || s == "srt" || is_http(s)) return true;
     why = (s.empty() ? std::string("tuščias") : s) + " protokolas nepalaikomas (leidžiami: udp, rtp, srt, http, https, vietinis failas): " +
           redact_url(url);
@@ -228,17 +232,21 @@ bool resolve_playlist_url(const std::string& base, const std::string& ref_in, st
         why = "grojaraščio URL schema „" + (rs.empty() ? std::string("vietinis kelias") : rs) + "“ neleidžiama (tik http / https): " + redact_url(r);
         return false;
     }
+    if (http_scheme_without_slashes(r)) {
+        why = "grojaraščio URL „" + rs + ":“ be „//“ neleidžiamas (libav av_url_split host'ą imtų iš kelio): " + redact_url(r);
+        return false;
+    }
     out = r;
     return true;
 }
 
 std::string redact_url(const std::string& url) {
-    const auto sep = url.find("://");
-    if (url_scheme(url).empty() || sep == std::string::npos) {
-        // be „//“ (pvz. data:, concat:) — viskas po schemos gali būti paslaptis
-        const std::string s = url_scheme(url);
-        return s.empty() ? url : s + ":***";
-    }
+    const std::string s = url_scheme(url);
+    // H1: „://“ — TIK iš karto po schemos (ne bet kur kelyje: „http:u:pw@h/x://a/“ paliktų userinfo); kitaip (data:, concat:,
+    // „http:h/…“) viskas po schemos gali būti paslaptis
+    if (s.empty()) return url;
+    if (url.compare(s.size(), 3, "://") != 0) return s + ":***";
+    const std::size_t sep = s.size();
     std::string out = url.substr(0, sep + 3);
     const std::size_t auth0 = sep + 3;
     const std::size_t auth1 = std::min(url.find_first_of("/?#", auth0), url.size());
@@ -277,6 +285,15 @@ std::string redact_urls_in(const std::string& text) {
         if (sep == std::string::npos) break;
         std::size_t a = sep;
         while (a > p && std::strchr(kSchemeChars, text[a - 1]) != nullptr) --a;
+        // H1: „://“ gali būti URL kelyje („http:u:pw@h/x://a/“) — URL pradžia tada anksčiau: pirma „schema:“ to paties žodžio (iki tarpo
+        // ar kabutės) pradžia; visas URL nuo jos išvalomas redact_url (be „://“ iš karto — „schema:***“)
+        std::size_t w = a;
+        while (w > p && !std::isspace(static_cast<unsigned char>(text[w - 1])) && std::strchr("'\"<>`", text[w - 1]) == nullptr) --w;
+        for (std::size_t i = w; i < a; ++i)
+            if ((i == w || std::strchr(kSchemeChars, text[i - 1]) == nullptr) && !url_scheme(text.substr(i, sep + 1 - i)).empty()) {
+                a = i;
+                break;
+            }
         std::size_t b = sep + 3;
         if (a > 0 && (text[a - 1] == '\'' || text[a - 1] == '"')) {
             // L1: kabutėse (libav „Opening '<URL>' for reading“) URL gali turėti tarpų — iki uždarančios kabutės ar eilutės galo
@@ -393,20 +410,29 @@ std::size_t init_section_bytes(const std::string& base, const PlaylistInfo& pi) 
     return n;
 }
 
+bool http_scheme_without_slashes(const std::string& url) {
+    const std::string s = url_scheme(url);
+    const std::string inner = starts(s, "crypto+") ? s.substr(7) : s;
+    return is_http(inner) && url.compare(s.size(), 3, "://") != 0;
+}
+
 std::string url_authority(const std::string& url) {
-    const auto sep = url.find("://");
-    if (url_scheme(url).empty() || sep == std::string::npos) return {};
-    const std::size_t a0 = sep + 3;
+    // H1: av_url_split (utils.c n6.1:377-389): schema iki pirmo ':' (url_scheme — tas pats ':'), po jo ≤ 2 '/', autoritetas iki "/?#"
+    // (ne „po pirmo ://“ — „http:evil/x://allowed/“ libav jungiasi į evil)
+    const std::string s = url_scheme(url);
+    if (s.empty()) return {};
+    std::size_t a0 = s.size() + 1;
+    for (int k = 0; k < 2 && a0 < url.size() && url[a0] == '/'; ++k) ++a0;
     const std::size_t a1 = std::min(url.find_first_of("/?#", a0), url.size());
     std::string auth = url.substr(a0, a1 - a0);
-    if (const auto at = auth.rfind('@'); at != std::string::npos) auth = auth.substr(at + 1);
+    if (const auto at = auth.rfind('@'); at != std::string::npos) auth = auth.substr(at + 1);  // utils.c:395-401
     return lower(auth);
 }
 
 std::string canonical_authority(const std::string& url) {
     std::string s = url_scheme(url);
     if (starts(s, "crypto+")) s = s.substr(7);
-    if (!is_http(s)) return {};
+    if (!is_http(s) || http_scheme_without_slashes(url)) return {};  // H1: be „://“ — niekada nesutampa
     // url_authority: userinfo iki PASKUTINIO '@' (kaip av_url_split, utils.c n6.1:397-401), mažosios raidės
     const std::string auth = url_authority(url);
     std::string host, port;
@@ -422,6 +448,8 @@ std::string canonical_authority(const std::string& url) {
         has_port = c != std::string::npos;
         if (has_port) port = auth.substr(c + 1);
     }
+    // H1: http host'o buferis hostname[1024] (http.c n6.1:205) — ilgesnį libav nukirptų iki 1023 baitų (kitas host'as) → nesutampa
+    if (!host.empty() && host.size() - (host[0] == '[' ? 2 : 0) > 1023) return {};
     if (!host.empty() && host.back() == '.') host.pop_back();  // FQDN šaknies taškas: "h." == "h"
     if (!has_port) return host + (s == "https" ? ":443" : ":80");
     // tik skaitmenys (≤ 5) — skaitinė reikšmė (":0080" == ":80"); kita paliekama kaip yra — nesutaps su leistinu, bus atmesta
