@@ -120,24 +120,29 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   flow'us (laukų tvarka — iš pirmo IDR); 4:2:2, 10 bitų, BFF atmetami su įvardytu formatu (exit `2`); formatas pasikeitė vidury
   srauto — tas šaltinis sustabdomas, kiti tęsia, exit `6`. 50 Hz ir 25p šaltiniai — viename procese, 59,94 šeima — atskirame.
   **Saugumas:** `--input` schema — tik `udp`, `rtp`, `srt`, `http`, `https` arba vietinis failas (kita — exit `1`); kiekvienam
-  libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`. HTTP(S) šaltinis atsisiunčiamas vieną kartą ir
-  libavformat gauna būtent tą atsakymą; HLS atpažįstamas pagal turinį, ne HLS — tik MPEG-TS (vienas atidarymas sesijai, M3U8 atsakymas
-  atmetamas). Kiekvienas libavformat atidaromas atsakymas peržiūrimas (pirmi 4 KiB) be pakartotinės užklausos (peržiūrėti baitai
-  atiduodami iš atminties). M3U8 priimamas tik iš grojaraščio URL (viršutinis ir jo galutinis URL, patikrinto master variantai,
+  libavformat atidarymui (ir įdėtiems) — `protocol_whitelist` / `format_whitelist`. HTTP(S) šaltinį pirma užklausia pats ingest; HLS
+  atpažįstamas pagal turinį ir libavformat gauna būtent tą atsakymą (antros viršutinio grojaraščio užklausos nėra); ne HLS — tik MPEG-TS,
+  užklausiamas antrą kartą sargo atidarymu (tiesioginis MPEG-TS — dvi užklausos sesijai; vienas atidarymas, M3U8 atsakymas atmetamas). Kiekvienas libavformat atidaromas atsakymas peržiūrimas (pirmi 4 KiB) be pakartotinės užklausos (peržiūrėti baitai
+  atiduodami iš atminties); dydis imamas tik iš atsakymo antraščių, be ieškojimo (`Content-Length` ≥ 2^63 naujų užklausų nesukelia). M3U8 priimamas tik iš grojaraščio URL (viršutinis ir jo galutinis URL, patikrinto master variantai,
   jų perkrovimai); segmentas, raktas ar init sekcija, atsakę grojaraščiu, — atmetami, segmentų demuxeriui `hls` neleidžiamas.
   Kiekvienas toks grojaraštis perskaitomas ir patikrinamas VISAS (≤ `--hls-max-playlist`, 1 MiB) taip, kaip jį skaito libavformat
   (eilutės baigiasi LF, CR, CR LF arba NUL; atributai kabutėse ir be jų): master tik viršuje, ≤ 15 variantų, 10 000 nuorodų ir 4
-  `#EXT-X-MAP` eilutės, nuorodos — tik http / https, `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s` (30); libavformat init sekcijų
-  (`#EXT-X-MAP`) neatlaisvina iki sesijos pabaigos — jų sąmata ≤ 16 MiB sesijai; pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
+  `#EXT-X-MAP` eilutės, nuorodos — tik http / https su `://` iš karto po schemos (`http:host/…` atmetamas visur, ir `--input`: libavformat host'ą imtų iš
+  kelio), `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s` (30); bet kuri `#EXT-X-MEDIA` eilutė (ir be `URI`) — master lygmuo: viršuje ≤ 32,
+  variantuose ir perkrovimuose — nė vienos; libavformat init sekcijų (`#EXT-X-MAP`) ir `#EXT-X-MEDIA` neatlaisvina iki sesijos pabaigos —
+  init sekcijų sąmata ≤ 16 MiB sesijai; kiekvienam segmentui libavformat kopijuoja jo URL ir galiojančio AES-128 rakto URL (iki 4 KiB) —
+  ši sąmata ≤ 16 MiB grojaraščiui ir ≤ 64 MiB visiems sesijos grojaraščiams; pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
   Paketų eilės ribotos baitais (`--max-queue-mb` — kiekvienai eilei, šaltinis turi dvi: video ir garso; perteklius išmetamas ir skaičiuojamas, žymės — niekada), garso žiedas ≤
   `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir statistikoje — `***` (kabutėse — iki
   uždarančios kabutės; neišvaloma: tarpas užklausos reikšmėje be kabučių, paslaptis URL kelyje). SRT slaptažodis — `--srt-passphrase-from
   env:VARDAS | file:/kelias` (ne `/proc/*/cmdline`; `+` neleidžiamas — libavformat jį paverčia tarpu). **SSRF:** grojaraštis gali nukreipti procesą į bet kurį pasiekiamą http(s)
   host:port (ir loopback, debesų metaduomenų adresus), o bet kuris segmentas, raktas ar grojaraštis — HTTP nukreipimu (libavformat
-  seka iki 8, FFmpeg 6.1 to išjungti neleidžia). `--hls-same-host` leidžia tik viršutinio grojaraščio serverį (host be raidžių dydžio
-  ir galinio taško, numatytas prievadas 80 / 443): tikrinamas tekstas, URL prieš atidarymą ir galutinis URL po nukreipimų prieš
-  skaitant turinį — kitas serveris baigia sesiją, jo atsakymas nenaudojamas. Neužkertama: pačios nukreipimų užklausos (padaromos
-  prieš grįžtant atidarymui) ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas — tikrinamas tik URL prieš atidarymą).
+  seka iki 8, FFmpeg 6.1 to išjungti neleidžia). `--hls-same-host` leidžia tik viršutinio grojaraščio serverį (autoritetas skaidomas tiksliai kaip libavformat `av_url_split`;
+  host lyginamas kaip tekstas, be raidžių dydžio ir galinio taško, numatytas prievadas 80 / 443): tikrinamas tekstas, URL prieš atidarymą ir galutinis URL po nukreipimų prieš
+  skaitant turinį — kitas serveris baigia sesiją, jo atsakymas nenaudojamas. Neužkertama: pačios nukreipimų užklausos (libavformat jas atlieka
+  atidarymo viduje, prieš sargui pamatant galutinį URL; jų turinys nenaudojamas), host'ai, rodantys ne ten, kur atrodo (DNS rebinding,
+  kitas tos pačios mašinos vardas ar IP — lyginamas tik host'o tekstas), ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas —
+  tikrinamas tik URL prieš atidarymą). URL apdorojimas modeliuotas pagal libavformat be `HAVE_DOS_PATHS`; Windows — ne tikslinė platforma.
   libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
   slydimai — pateikimo tvarka, perfiksavimas — žurnale su priežastimi ir dydžiu, garsas — su 5 ms perėjimu; dekodavimas nuo
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš

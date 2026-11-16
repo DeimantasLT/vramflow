@@ -534,20 +534,27 @@ local MPEG-TS file.
 `https` or a local file path; anything else (`file:`, `tcp:`, `concat:`, `data:`, `crypto+…` …) is a usage error (exit `1`).
 Every libavformat open, including nested ones (HLS segments, RTP → UDP, HTTP → TCP/TLS), gets an explicit
 `protocol_whitelist` and `format_whitelist` derived from that scheme (local file: `file` / `mpegts` only); HLS segment
-demuxers get the same list without `hls`. An `http(s)` source is fetched once before libavformat: HLS is recognised by its
-content (`#EXTM3U`), not by the `.m3u8` suffix, and libavformat is handed exactly that response (no second request that
-could answer differently). A source whose first response is not M3U8 is opened as MPEG-TS only (`format_whitelist
-mpegts`), with a single open per session; an M3U8 answer on such a session is refused. Every response libavformat opens
+demuxers get the same list without `hls`. An `http(s)` source is first requested by ingest itself: HLS is recognised by
+its content (`#EXTM3U`), not by the `.m3u8` suffix, and for HLS libavformat is handed exactly that response (no second
+request for the top-level playlist). A source whose first response is not M3U8 is requested a second time by the guarded
+open (so a plain MPEG-TS source is requested twice per session) and opened as MPEG-TS only (`format_whitelist mpegts`),
+with a single open per session; an M3U8 answer on that second request is refused. Every response libavformat opens
 is inspected (first 4 KiB) without re-requesting it: the inspected bytes are served from memory and reading continues on
-the same connection. An M3U8 answer is accepted only from a URL known to be a playlist (the top-level URL and its final
+the same connection; a size query is answered from the response headers only and never falls back to seeking (a
+`Content-Length` of 2^63 or more cannot trigger further ranged requests). An M3U8 answer is accepted only from a URL known to be a playlist (the top-level URL and its final
 location after redirects, the variants and renditions of the checked master playlist, and reloads of those); a segment,
 key or init section that answers with a playlist is refused. Every such playlist (variants, reloads) is read completely
 (at most `--hls-max-playlist` bytes, default 1 MiB), checked completely and then given to libavformat as the same bytes,
 parsed the way libavformat parses it (lines end at LF, CR, CR LF or NUL; attributes quoted or bare): a master playlist is
 allowed only at the top (no nesting, no loops), at most 15 variants, 10 000 entries and 4 `#EXT-X-MAP` lines per playlist,
 `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s`, and every URL it names (variants, segments, `URI` of keys, maps and
-renditions) must resolve to `http`/`https`. libavformat keeps every `#EXT-X-MAP` init section until the session ends, so
-their estimated memory is also capped at 16 MiB per session. A violation ends only that session (the source reconnects
+renditions) must resolve to `http`/`https` with `://` directly after the scheme (`http:host/…` is refused everywhere,
+also as `--input`: libavformat would take the host from the path). Any `#EXT-X-MEDIA` line, with or without `URI`, makes a
+playlist master level: at most 32 in the top-level playlist, none in variants or reloads. libavformat keeps every
+`#EXT-X-MAP` init section and every `#EXT-X-MEDIA` rendition until the session ends, so init sections are also capped at
+16 MiB of estimated memory per session. libavformat copies each segment's resolved URL and, while an AES-128 key is
+active, the resolved key URL (up to 4 KiB each): that estimate is capped at 16 MiB per playlist and 64 MiB for all
+playlists of a session together (during a reload libavformat briefly holds the previous list too). A violation ends only that session (the source reconnects
 with back-off; the other sources are not affected). HTTP reads time out after 10 s, and a reconnecting `http(s)` source
 gives up an open after `--input-wait-s` (default 30 s). Packet queues are capped in bytes (`--max-queue-mb`, default
 (latency + 2.4 s) × 80 Mbit/s per queue; each source has two queues, video and audio); at the cap the oldest media
@@ -564,12 +571,16 @@ can point segments, keys and variants at any `http(s)` host and port the machine
 and cloud metadata addresses (e.g. `169.254.169.254`). Any segment, key or playlist URL can also answer with an HTTP
 redirect; libavformat follows up to 8 redirects inside one open and FFmpeg 6.1 has no option to turn that off. The
 responses are only parsed as playlists or media, never returned, but the requests are made. `--hls-same-host` restricts
-every URL to the host:port of the top-level playlist (after its redirects; host compared case-insensitively, without a
-trailing dot, default port 80 / 443 made explicit): the playlist text is checked, every URL is checked again just before
+every URL to the host:port of the top-level playlist (after its redirects; the authority is parsed exactly as
+libavformat's `av_url_split` does, the host compared case-insensitively as text, without a trailing dot, default port
+80 / 443 made explicit): the playlist text is checked, every URL is checked again just before
 it is opened, and after the open the final URL after redirects is compared before a single byte is read — a mismatch
 ends the session and the redirected response is never used. What it cannot prevent: the redirected requests themselves
-(they are made before the open returns), and for AES-128 segments (`crypto+http…`) the final URL is not visible, so
-there only the URL before the open is checked. libavformat's `https` does not verify certificates by default
+(libavformat follows them inside the open, before the guard sees the final location; their bodies are not used), host
+names that point elsewhere than they read (DNS rebinding, another name or IP address of the same machine — only the text
+of the host is compared), and for AES-128 segments (`crypto+http…`) the final URL is not visible, so there only the URL
+before the open is checked. URL handling is modelled on libavformat built without `HAVE_DOS_PATHS`; Windows is not a
+target platform. libavformat's `https` does not verify certificates by default
 (`tls_verify=0`), so HTTPS protects against passive eavesdropping only. Use HLS sources you trust, or run ingest where it
 cannot reach sensitive internal addresses.
 
