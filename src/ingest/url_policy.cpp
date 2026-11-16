@@ -335,7 +335,10 @@ PlaylistInfo parse_playlist(const std::string& text) {
                 pi.master = true;
                 want_variant = true;
             } else if (starts(line, "#EXT-X-MEDIA:") || starts(line, "#EXT-X-I-FRAME-STREAM-INF")) {
-                pi.master = pi.master || starts(line, "#EXT-X-I-FRAME-STREAM-INF");
+                // H2: bet kuri #EXT-X-MEDIA (ir be URI) — master lygmuo: libav kiekvieną kaupia c->renditions iki uždarymo
+                // (hls.c n6.1:824-828, 523-527, 303-311), todėl perkraunamame ar įdėtame grojaraštyje jų būti negali
+                if (starts(line, "#EXT-X-MEDIA:")) ++pi.media;
+                pi.master = true;
                 if (const std::string u = uri_attr(line); !u.empty()) pi.variants.push_back(u);
             } else {
                 const std::string u = uri_attr(line);
@@ -363,7 +366,14 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
         return false;
     }
     if (pi.master && !allow_master) {
-        why = "įdėtas master grojaraštis (gylis > 1: master → media): " + redact_url(base);
+        why = pi.media > 0 ? "#EXT-X-MEDIA perkraunamame ar įdėtame grojaraštyje (master lygmuo; libav kiekvieną eilutę kaupia iki sesijos "
+                             "pabaigos): " + redact_url(base)
+                           : "įdėtas master grojaraštis (gylis > 1: master → media): " + redact_url(base);
+        return false;
+    }
+    if (pi.media > lim.max_media) {
+        why = "grojaraštyje " + std::to_string(pi.media) + " #EXT-X-MEDIA eilučių > riba " + std::to_string(lim.max_media) +
+              " (libav jų neatlaisvina iki sesijos pabaigos)";
         return false;
     }
     if (pi.variants.size() + 1 > lim.max_playlists) {

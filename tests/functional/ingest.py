@@ -964,8 +964,11 @@ def hls_reload_cases(out):
              # F (round 11): libav kiekvieną #EXT-X-MAP eilutę kaupia iki sesijos pabaigos (hls.c n6.1:456, 251-269) — 2000 eilučių po ~0,4 KiB
              # (< 1 MiB grojaraštis, perkraunamas kas 2 s) atmetamos
              ("map_many", hdr + b"".join(b'#EXT-X-MAP:URI="i%d_' % k + b"m" * 400 + b'.mp4"\n' for k in range(2000)) + b"#EXTINF:2.0,\ns.ts\n",
-              "EXT-X-MAP"))
-    ports = (51, 52, 53, 59, 60, 61)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
+              "EXT-X-MAP"),
+             # H2 (round 12): libav kiekvieną #EXT-X-MEDIA eilutę (ir be URI) kiekvieno perkrovimo metu prideda prie c->renditions
+             # (hls.c n6.1:824-828, 523-527), atlaisvina tik uždarant (303-311) — ~40 000 eilučių (< 1 MiB) kas 2 s atmetamos
+             ("media_many", hdr + b"#EXT-X-MEDIA:TYPE=AUDIO\n" * 40000 + b"#EXTINF:2.0,\ns.ts\n", "EXT-X-MEDIA"))
+    ports = (51, 52, 53, 59, 60, 61, 65)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
     res = []
     T, SWAP = 30, 12
     try:

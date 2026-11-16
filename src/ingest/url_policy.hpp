@@ -56,6 +56,8 @@ struct PlaylistInfo {
     std::vector<std::string> refs;      // media: segmentų ir URI="…" (raktai, EXT-X-MAP) nuorodos
     // F: kiekviena #EXT-X-MAP eilutė — (jos URI, tuo metu galiojęs EXT-X-KEY URI arba "")
     std::vector<std::pair<std::string, std::string>> maps;
+    // H2: #EXT-X-MEDIA eilučių skaičius (su URI ir be): libav kiekvieną kaupia iki sesijos pabaigos — bet kuri daro grojaraštį master lygmens
+    std::size_t media = 0;
 };
 PlaylistInfo parse_playlist(const std::string& text);
 
@@ -70,6 +72,8 @@ struct HlsLimits {
     // sąmatos (init_section_bytes) per sesiją; daugiau — sesija nutraukiama (prisijungus iš naujo libav atmintis atlaisvinta)
     std::size_t max_maps = 4;
     std::size_t max_init_bytes = std::size_t{16} << 20;
+    // H2: #EXT-X-MEDIA eilučių riba viršutiniame grojaraštyje (perkraunamuose / įdėtuose jų negali būti visai)
+    std::size_t max_media = 32;
 };
 
 // F: kiek atminties libav skirs šio grojaraščio init sekcijoms (EXT-X-MAP): kiekvienai 256 + |absoliutus URL| + 1 (+ |rakto URL| + 1).

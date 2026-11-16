@@ -446,3 +446,31 @@ TEST_CASE("url_policy: H1 — autoritetas tiksliai kaip libav av_url_split; http
     }
     CHECK(redact_urls_in("a http://h/p?t=1 b") == "a http://h/p?t=*** b");  // įprasti URL — kaip iki šiol
 }
+
+TEST_CASE("url_policy: H2 — #EXT-X-MEDIA (ir be URI) — master lygmuo; viršutiniame ≤ max_media", "[ingest][url]") {
+    // libav kiekvieną #EXT-X-MEDIA eilutę (TYPE AUDIO / VIDEO) kiekvieno analizavimo metu prideda prie c->renditions (hls.c n6.1:824-828,
+    // 523-527), atlaisvina tik uždarant (303-311): perkrovimas su EXT-X-MEDIA kaupia atmintį be ribos
+    HlsLimits lim;
+    std::string why;
+    const std::string base = "http://h/live/x.m3u8";
+    const PlaylistInfo m = parse_playlist("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"x\"\n#EXTINF:2,\ns.ts\n");
+    CHECK(m.master);
+    CHECK(m.media == 1);
+    CHECK(m.variants.empty());
+    CHECK_FALSE(check_playlist(base, m, false, lim, why));  // perkrovimas / variantas — atmetama
+    CHECK(why.find("EXT-X-MEDIA") != std::string::npos);
+    CHECK(check_playlist(base, m, true, lim, why));  // viršutinis — leidžiamas
+    // #EXT-X-MEDIA-SEQUENCE — ne EXT-X-MEDIA (libav av_strstart "#EXT-X-MEDIA:" su dvitaškiu)
+    const PlaylistInfo seq = parse_playlist("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXTINF:2,\ns.ts\n");
+    CHECK_FALSE(seq.master);
+    CHECK(seq.media == 0);
+    CHECK(check_playlist(base, seq, false, lim, why));
+    // viršutiniame — ne daugiau kaip max_media eilučių
+    CHECK(lim.max_media == 32);
+    std::string top = "#EXTM3U\n";
+    for (std::size_t k = 0; k < lim.max_media; ++k) top += "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"n" + std::to_string(k) + "\"\n";
+    top += "#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nv.m3u8\n";
+    CHECK(check_playlist(base, parse_playlist(top), true, lim, why));
+    CHECK_FALSE(check_playlist(base, parse_playlist(top + "#EXT-X-MEDIA:TYPE=VIDEO\n"), true, lim, why));
+    CHECK(why.find("EXT-X-MEDIA") != std::string::npos);
+}
