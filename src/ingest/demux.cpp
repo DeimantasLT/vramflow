@@ -169,7 +169,13 @@ int peek_read(void* op, std::uint8_t* buf, int size) {
 
 std::int64_t peek_seek(void* op, std::int64_t off, int whence) {
     auto* p = static_cast<PeekIo*>(op);
-    if (whence & AVSEEK_SIZE) return avio_size(p->inner);  // http: tik Content-Length (http_seek_internal AVSEEK_SIZE — be užklausos)
+    // M1: dydis — TIK tiesiai (http_seek_internal AVSEEK_SIZE grąžina Content-Length be užklausos, http.c n6.1:1908-1909). Ne avio_size:
+    // jo atsarginis kelias (dydis < 0, pvz. Content-Length ≥ 2^63) ieško SEEK_END ir atgal (aviobuf.c:383-389) — ieškomame http tai
+    // naujos užklausos (http.c:1938-1960), kurių atsakymų sargas nemato. < 0 — ENOSYS, be jokio atsarginio kelio.
+    if (whence & AVSEEK_SIZE) {
+        const std::int64_t sz = p->inner->seek ? p->inner->seek(p->inner->opaque, 0, AVSEEK_SIZE) : -1;
+        return sz < 0 ? AVERROR(ENOSYS) : sz;
+    }
     whence &= ~AVSEEK_FORCE;
     const std::int64_t t = whence == SEEK_SET ? off : whence == SEEK_CUR ? p->pos + off : -1;
     if (t == p->pos) return t;

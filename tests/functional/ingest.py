@@ -904,6 +904,101 @@ def hls_authority_case(out):
                      why="; ".join(problems) + f" | kanarėlės prisijungimų {tcp.connections} | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
 
 
+class HugeLengthBody:
+    """HTTP atsakymas su „Content-Length: 9223372036854775808“ (2^63: libav http filesize strtoull, http.c n6.1:1181, kaip int64 —
+    neigiamas) ir „Accept-Ranges: bytes“ (ieškomas, http.c:1184-1187). avio_size atsarginis kelias (aviobuf.c:383-389) tada ieškotų
+    SEEK_END ir atgal — naujos užklausos su Range (http.c:1938-1960), kurių atsakymų sargas nemato. Siunčiami pirmi nbytes failo baitų
+    (rate B/s, 0 — tinklo greičiu); gets — užklausų, ranged — užklausų su Range poslinkiu > 0."""
+
+    def __init__(self, path, nbytes, rate=0):
+        import threading
+        self.path, self.nbytes, self.rate = str(path), nbytes, rate
+        self.lock = threading.Lock()
+        self.gets, self.ranged = 0, 0
+
+    def serve(self, h):
+        import re
+        m = re.match(r"bytes=(\d+)-", h.headers.get("Range", ""))
+        with self.lock:
+            self.gets += 1
+            if m and int(m.group(1)) > 0:
+                self.ranged += 1
+        try:
+            data = open(self.path, "rb").read()[:self.nbytes]
+            h.send_response(200)
+            h.send_header("Content-Type", "video/mp2t")
+            h.send_header("Content-Length", "9223372036854775808")
+            h.send_header("Accept-Ranges", "bytes")
+            h.end_headers()
+            t0, p = time.monotonic(), 0
+            while p < len(data):
+                h.wfile.write(data[p:p + 188 * 700])
+                p += 188 * 700
+                if self.rate:
+                    ahead = p / self.rate - (time.monotonic() - t0)
+                    if ahead > 0:
+                        time.sleep(ahead)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+def huge_length_cases(out):
+    """M1 (round 12): serveris praneša Content-Length 2^63 su „Accept-Ranges: bytes“. Sargo peek_io AVSEEK_SIZE kvietė avio_size(vidinis),
+    kurio atsarginis kelias (dydis < 0 → SEEK_END ir atgal) http kontekste — naujos užklausos (Range: bytes=2^63−1- ir atgal). Dabar
+    dydis imamas tik tiesiai (inner->seek AVSEEK_SIZE), < 0 — ENOSYS, be atsarginio kelio. [ts]: tiesioginis MPEG-TS per HTTP
+    (avio_size — demux.c n6.1:1906); [init]: HLS init sekcija be BYTERANGE (avio_size — hls.c:1386) ir jos segmentas. Kriterijai: užklausų su
+    Range poslinkiu > 0 — 0; TS: ≤ 2 užklausos sesijai (patikra + sargo atidarymas); init: ≤ 1 sesijai; procesas gyvena, UDP — be praradimų."""
+    res = []
+    if (why := ensure_clips()):
+        return [F.result("ingest_hls_security[huge_length_ts]", "FAIL", why=why)]
+    tid = "ingest_hls_security[huge_length_ts]"
+    srv = PlaylistServer()
+    body = HugeLengthBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 9500, rate=1_250_000)  # ~10 s realiu laiku
+    srv.routes["/huge.ts"] = body
+    try:
+        si, sv, ri, err = two_source_http(out, tid, srv, "/huge.ts", BASE_PORT + 66, 30, 10**9, lambda: None)
+    finally:
+        srv.close()
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    sessions = flow(si, 1).get("input_reconnects", 0) + 1
+    if body.ranged:
+        problems.append(f"užklausų su Range poslinkiu > 0: {body.ranged} (laukta 0)")
+    if body.gets > 2 * sessions:
+        problems.append(f"GET {body.gets} > 2 × {sessions} sesijų")
+    if flow(si, 1).get("frames_decoded", 0) < 25:
+        problems.append(f"HTTP šaltinis dekodavo {flow(si, 1).get('frames_decoded')} kadrų")
+    res.append(F.result(tid, "FAIL" if problems else "PASS",
+                        why="; ".join(problems) + f" | GET {body.gets}, su Range > 0 {body.ranged}, sesijų {sessions}, HTTP frames_decoded "
+                        f"{flow(si, 1).get('frames_decoded')} | " + summary_line(si, sv, a, r)))
+
+    tid = "ingest_hls_security[huge_length_init]"
+    init = HugeLengthBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 20)
+    seg = HugeLengthBody(CLIPS / "av_1080i50.ts", nbytes=188 * 7 * 2400)
+
+    def extra(s):
+        s.routes["/init.ts"] = init
+        s.routes["/mseg.ts"] = seg
+        return b'#EXT-X-MAP:URI="init.ts"\n#EXTINF:2.0,\nmseg.ts\n'
+
+    si, sv, ri, err, _ = hls_live_swap_case(out, tid, BASE_PORT + 67, extra)
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    sessions = flow(si, 1).get("input_reconnects", 0) + 1
+    if init.gets < 1:
+        problems.append("init.ts neužklaustas (testo sąranka)")
+    if init.ranged or seg.ranged:
+        problems.append(f"užklausų su Range poslinkiu > 0: init {init.ranged}, segmento {seg.ranged} (laukta 0)")
+    if init.gets > sessions or seg.gets > sessions:
+        problems.append(f"GET init {init.gets}, segmento {seg.gets} > {sessions} sesijų")
+    res.append(F.result(tid, "FAIL" if problems else "PASS",
+                        why="; ".join(problems) + f" | GET init {init.gets} (Range > 0: {init.ranged}), segmento {seg.gets} (Range > 0: "
+                        f"{seg.ranged}), sesijų {sessions} | " + summary_line(si, sv, a, r)))
+    return res
+
+
 def hls_segment_m3u8_case(out):
     """E (round 11): media grojaraščio naujas segmentas atsako media grojaraščiu (M3U8 ne grojaraščio URL). Sargas M3U8 priima tik iš
     žinomų grojaraščių URL (viršutinis ir jo location, master variantai) — čia atmesta; procesas gyvena, UDP šaltinis — be praradimų."""
@@ -1107,6 +1202,7 @@ def ingest_hls_security(out):
         res += hls_peek_case(out)
         res += hls_redirect_case(out)
         res += hls_authority_case(out)
+        res += huge_length_cases(out)
         res += hls_segment_m3u8_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:
