@@ -525,6 +525,7 @@ local MPEG-TS file.
 | `--hls-max-target-s S` | Largest accepted HLS `#EXT-X-TARGETDURATION` (default 30); a longer one rejects that source with a clear message |
 | `--hls-max-playlist B` | Largest accepted HLS playlist in bytes (default 1048576); a larger one ends that session |
 | `--hls-same-host` | HLS: segments, keys, maps and variants only from the top-level playlist's host:port |
+| `--libav-watchdog-s S` | libavformat call watchdog margin (default 30, 5–3600): a call stuck that much past its own bound, or without any progress for `S` s, ends the process with exit `7` (see *libavformat redirect-cache hang*) |
 | `--max-queue-mb N` | Packet queue cap per queue, MB; each source has two queues (video and audio), so up to 2 × N MB per source (default 0 = (latency + 2.4 s) × 80 Mbit/s per queue); oldest packets dropped and counted |
 | `--srt-passphrase-from env:NAME\|file:PATH` | SRT passphrase from an environment variable or a file, not from the command line; 10–79 characters without `&`, `#`, `?`, `%`, `+` or spaces (libavformat turns `+` into a space) |
 | `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
@@ -589,6 +590,23 @@ before the open is checked. URL handling is modelled on libavformat built withou
 target platform. libavformat's `https` does not verify certificates by default
 (`tls_verify=0`), so HTTPS protects against passive eavesdropping only. Use HLS sources you trust, or run ingest where it
 cannot reach sensitive internal addresses.
+
+**libavformat redirect-cache hang (FFmpeg ≤ 8.0) and the libav watchdog.** In FFmpeg 6.1 `http.c` a cached redirect jumps
+back to the start of the open without counting redirects and without checking the interrupt callback (`http.c` n6.1:362-373),
+and `301` / `308` answers are cached without expiry (425-431). A server that answers `301 Location: <the same URL>` (or
+A → B → A) therefore makes that open spin at 100 % CPU without any I/O: the 10 s read timeout, `--input-wait-s` and the stop
+request never fire, and FFmpeg 6.1 has no option to switch the cache off. Every `http(s)` open can hit it (top-level playlist,
+variants, reloads, segments, keys, MPEG-TS over HTTP). FFmpeg 6.1 is affected (checked in its source); FFmpeg up to 8.0 has
+the same code path, and FFmpeg master fixes it by applying `max_redirects` on the cached path as well (not re-checked here). A thread inside libavformat cannot be cancelled safely, and such a thread would also block
+shutdown (the process joins every source thread). Ingest therefore watches every libavformat call of every source: if one
+call (open, probe, read, close) stays inside libavformat longer than the bound ingest's interrupt callback enforces for it
+(`--input-wait-s` while opening, the silence limit since the last packet while reading) plus `--libav-watchdog-s` (default
+30 s), or libavformat stops calling the interrupt callback for `--libav-watchdog-s` (legitimate waits inside libavformat call it
+repeatedly: every read attempt, the HLS reload wait every 100 ms), the process logs the source and the call and exits at once with code `7` — also while it is
+shutting down. Nothing else is cleaned up: no summary is written and the flows stay as after a crash (the next start of the
+same domain collects them). Run ingest under a supervisor that restarts it (e.g. systemd `Restart=on-failure`); all sources of
+the process restart together. The margin covers blocking that the interrupt cannot cut short, mainly a DNS lookup (glibc: up
+to 5 s × 2 attempts per name server); raise `--libav-watchdog-s` where name resolution is slower.
 
 **Timing model in plain words.** Every packet is stamped once, when the demuxer reads it: *output time = source timestamp
 + one offset per source*. The offset is fixed by the first video packet so that it is shown `--latency-ms` after it arrived,
@@ -724,6 +742,7 @@ or `auto` with `--duration S > 0` (test and measurement runs); lenient — `off`
 | Inputs did not appear within `--input-wait-ms` | 4 | 4 |
 | An input came back with another format (`--on-format-change exit`) | 6 | 6 |
 | Stopped while still waiting for inputs | 0 | 0 |
+| `ingest` only: a libavformat call is stuck (see *libavformat redirect-cache hang*); immediate exit, no summary | 7 | 7 |
 
 `verify` exits `3` on verification errors. In service mode losses are reported in the summary only: `any_loss` and
 `strict_exit` (top level) and the counters; failed units — `failed_units` (proc) and `unit_failed` (per flow). A second

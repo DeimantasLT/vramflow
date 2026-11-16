@@ -182,6 +182,9 @@ struct Opts {
     std::uint32_t max_queue_mb = 0;   // --max-queue-mb (0 — pagal latenciją)
     std::string srt_passphrase_from;  // L1: --srt-passphrase-from env:VARDAS | file:/kelias
     bool hls_same_host = false;       // --hls-same-host
+    // R13-2: libav kvietimų sargo atsarga, s (--libav-watchdog-s): kvietimas ilgiau nei jo pertraukimo riba + tiek arba be pertraukimo
+    // kabliuko kvietimo tiek — procesas baigiamas exit kExitLibavStuck
+    double libav_watchdog_s = 30;
     // verify --mode ingest: grain'ų išsaugojimas (chromos bitų tikslumo testui): katalogas ir kiek pirmų galiojančių grain'ų
     std::string dump_dir;
     std::uint32_t dump_count = 0;
@@ -311,6 +314,9 @@ runtime::FormatChange format_change(const Opts& o);  // --on-format-change
 // Exit kodai: įėjimai neatsirado per --input-wait-ms; įėjimas grįžo kitu formatu ir --on-format-change exit (PF-3).
 constexpr int kExitInputs = 4;
 constexpr int kExitFormatChange = 6;
+// R13-2 (ingest): libav kvietimas užstrigo (libav ≤ 8.0 http nukreipimų kešo kilpa) — gijos atšaukti negalima, procesas baigiamas;
+// prižiūrėtojas paleidžia iš naujo. Kiti kodai: 0, 1 (naudojimas), 2 (paleidimas / vykdymas), 4, 6; vramflow-verify — 3.
+constexpr int kExitLibavStuck = 7;
 // Vidinis kodas: sustabdyta (SIGINT / SIGTERM) belaukiant įėjimų — tvarkinga pabaiga; exit_code() jį paverčia į 0.
 constexpr int kStoppedWaiting = -1;
 constexpr int exit_code(int rc) { return rc < 0 ? 0 : rc; }

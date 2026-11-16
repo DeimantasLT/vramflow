@@ -26,9 +26,12 @@ std::uint64_t tai_now() { return mxlGetTime(); }
 
 int interrupt_cb(void* p) {
     auto* x = static_cast<Interrupt*>(p);
+    const std::uint64_t now = tai_now();
+    // R13-2: libav kabliuką kviečia kiekviename laukime (retry_transfer_wrapper — kiekvienam skaitymui, avio.c n6.1:357-381; HLS
+    // perkrovimo laukimas — kas 100 ms, hls.c:1538-1541) — sargui tai pažanga
+    if (x->watch != nullptr) x->watch->last_poll.store(now, std::memory_order_relaxed);
     if (x->stop != nullptr && x->stop->load(std::memory_order_relaxed)) return 1;
     if (x->abort.load(std::memory_order_relaxed)) return 1;
-    const std::uint64_t now = tai_now();
     const std::uint64_t last = x->last_pkt.load(std::memory_order_relaxed);
     if (last != 0 && x->silence_ns != 0 && now - last > x->silence_ns) {
         x->silent = true;
@@ -39,6 +42,30 @@ int interrupt_cb(void* p) {
         return 1;
     }
     return 0;
+}
+
+LibavCall::LibavCall(Interrupt& in, const char* what) : w_(in.watch) {
+    if (w_ == nullptr) return;
+    const std::uint64_t now = tai_now();
+    const std::uint64_t last = in.last_pkt.load(std::memory_order_relaxed);
+    // ta pati riba kaip interrupt_cb: tyla — nuo paskutinio paketo, atidarymo riba — kol paketo nėra
+    const std::uint64_t bound = last != 0 && in.silence_ns != 0 ? last + in.silence_ns : last == 0 && in.deadline_tai != 0 ? in.deadline_tai : 0;
+    prev_what_ = w_->what.load(std::memory_order_relaxed);
+    prev_since_ = w_->since.load(std::memory_order_relaxed);
+    prev_kill_ = w_->kill_at.load(std::memory_order_relaxed);
+    w_->what.store(nullptr, std::memory_order_release);  // kol perrašoma — ne „viduje“ (sargas nemato pusiau atnaujintos būsenos)
+    w_->since.store(now, std::memory_order_release);
+    w_->kill_at.store(bound != 0 ? std::max(bound, now) + w_->margin_ns : 0, std::memory_order_release);
+    w_->what.store(what, std::memory_order_release);
+}
+
+LibavCall::~LibavCall() {
+    if (w_ == nullptr) return;
+    w_->what.store(nullptr, std::memory_order_release);
+    if (prev_what_ == nullptr) return;
+    w_->since.store(prev_since_, std::memory_order_release);
+    w_->kill_at.store(prev_kill_, std::memory_order_release);
+    w_->what.store(prev_what_, std::memory_order_release);
 }
 
 std::string protocol_error(const std::string& url) {

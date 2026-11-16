@@ -379,7 +379,12 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     if (http) {
         AVIOInterruptCB cb{interrupt_cb, &intr_};
         std::string why;
-        if (!hls_precheck(s.url, &cb, lim_, s.hls_same_host, hls, hls_target_ns_, top_, why)) {
+        bool ok = false;
+        {
+            LibavCall g(intr_, "avio_open2 / avio_read (HTTP patikra)");  // R13-2: sargui — kiekvienas libav I/O
+            ok = hls_precheck(s.url, &cb, lim_, s.hls_same_host, hls, hls_target_ns_, top_, why);
+        }
+        if (!ok) {
             err = shown + ": HLS: " + (intr_.timed_out ? "nėra duomenų per --input-wait-s" : intr_.silent ? "įėjimas tylus" : why);
             return false;
         }
@@ -472,13 +477,21 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         }
         // HTTP(S): sustojęs serveris (prisijungus, bet neatsakant) — skaitymo klaida po 10 s, ne amžinas laukimas (ir prisijungiant iš naujo)
         if (http) av_dict_set(&o, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
-        int e = avformat_open_input(&ic_, url.c_str(), nullptr, &o);  // klaidoje ic_ atlaisvinamas
+        int e = 0;
+        {
+            LibavCall g(intr_, "avformat_open_input");
+            e = avformat_open_input(&ic_, url.c_str(), nullptr, &o);  // klaidoje ic_ atlaisvinamas
+        }
         av_dict_free(&o);
         if (e < 0) {
             ic_ = nullptr;
             return fail("atidaryti nepavyko", e);
         }
-        if ((e = avformat_find_stream_info(ic_, nullptr)) < 0) return fail("zondavimas nepavyko", e);
+        {
+            LibavCall g(intr_, "avformat_find_stream_info");
+            e = avformat_find_stream_info(ic_, nullptr);
+        }
+        if (e < 0) return fail("zondavimas nepavyko", e);
         bool unknown = false;
         for (unsigned i = 0; i < ic_->nb_streams; ++i) {
             const AVCodecParameters* p = ic_->streams[i]->codecpar;
@@ -486,6 +499,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         }
         if (!unknown || k == 3) break;
         std::fprintf(stderr, "[ingest] %s: video parametrų dar nėra (%d) — zonduojama iš naujo, langas %d ms\n", shown.c_str(), k + 1, 1000 << (k + 1));
+        LibavCall g(intr_, "avformat_close_input");
         avformat_close_input(&ic_);
         free_top_pb();
     }
@@ -533,7 +547,11 @@ int Demux::key_field_order() {
     AVPacket* pkt = av_packet_alloc();
     int read = 0;
     for (int n = 0; n < 2000 && !scan.done(); ++n) {
-        const int e = av_read_frame(ic_, pkt);
+        int e = 0;
+        {
+            LibavCall g(intr_, "av_read_frame (įėjimo taško paieška)");
+            e = av_read_frame(ic_, pkt);
+        }
         ++read;
         if (e == AVERROR(EAGAIN)) continue;
         if (e < 0) break;
@@ -561,6 +579,7 @@ int Demux::key_field_order() {
 }
 
 void Demux::close() {
+    LibavCall g(intr_, "avformat_close_input");
     if (ic_) avformat_close_input(&ic_);
     ic_ = nullptr;
     free_top_pb();
@@ -676,6 +695,7 @@ int Demux::pre_open(const std::string& u) {
 
 int Demux::open_top(const std::string& url) {
     if (const int e = pre_open(url); e < 0) return e;
+    LibavCall g(intr_, "avio_open2 (HTTP)");  // R13-2: ir post_open peržiūros skaitymas
     AVDictionary* d = nullptr;
     av_dict_set(&d, "protocol_whitelist", protocol_whitelist_for(url_scheme(url), false).c_str(), 0);
     av_dict_set(&d, "rw_timeout", std::to_string(kRwTimeoutUs).c_str(), 0);
@@ -785,7 +805,11 @@ void Demux::ff_close(AVFormatContext* s, AVIOContext** pb) {
 
 int Demux::read(AVPacket* pkt, Kind& kind, std::string& why) {
     for (;;) {
-        const int e = av_read_frame(ic_, pkt);
+        int e = 0;
+        {
+            LibavCall g(intr_, "av_read_frame");
+            e = av_read_frame(ic_, pkt);
+        }
         if (e == AVERROR(EAGAIN)) continue;
         if (e < 0) {
             why = intr_.abort.load() ? "HLS grojaraščių kilpa — sesija nutraukta"

@@ -228,6 +228,10 @@ int main(int argc, char** argv) {
     ig->add_option("--hls-max-playlist", o.hls_max_playlist,
                    "HLS: didžiausias grojaraščio dydis, baitai (numatyta 1048576; didesnis — tas šaltinis atmetamas, jungiamasi iš naujo)")
         ->check(CLI::Range(std::size_t{4096}, std::size_t{64} << 20));
+    ig->add_option("--libav-watchdog-s", o.libav_watchdog_s,
+                   "libav kvietimų sargas: kvietimas ilgiau nei jo riba (--input-wait-s / tyla) + S s arba S s be pažangos — procesas "
+                   "baigiamas exit 7 (libav ≤ 8.0 http nukreipimų kešo kilpa; prižiūrėtojas paleidžia iš naujo; numatyta 30)")
+        ->check(CLI::Range(5.0, 3600.0));
     ig->add_option("--max-queue-mb", o.max_queue_mb,
                    "paketų eilės riba šaltiniui (video ir garso — kiekvienai), MB (0 — numatyta: (latencija + 2,4 s) × 80 Mbit/s)")
         ->check(CLI::Range(0u, 65536u));

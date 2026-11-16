@@ -32,6 +32,7 @@ Aplinka: INGEST_CLIPS (numatyta ~/media-test/av), INGEST_QUICK=1 — sutrumpinto
 import os
 import pathlib
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -1985,6 +1986,79 @@ def flows_in(domain):
     return sorted(x.name for x in p.glob("*.mxl-flow")) if p.exists() else []
 
 
+def ingest_libav_watchdog(out):
+    """R13-2: libav ≤ 8.0 http nukreipimų kešo kilpa — „301 Location: <tas pats URL>“ (http.c n6.1:362-373: kešo pataikymas — goto redo
+    be nukreipimų skaitiklio ir be pertraukimo patikros; 301 / 308 kešuojami be galiojimo pabaigos, 425-431). Gija sukasi libav viduje
+    100 % CPU be I/O: rw_timeout, --input-wait-s ir sustabdymas nesuveikia, gijos atšaukti saugiai negalima. Sargas (watchdog) baigia
+    procesą exit 7 per ribą, žurnale — šaltinis ir kvietimas.
+      [open]    — viršutinis URL kilpoje, --input-wait-s 2: exit 7 per ≤ 2 + 30 s (numatytas --libav-watchdog-s) + 5 s atsargos;
+      [sigterm] — tas pats be --input-wait-s (riba nėra — pažangos taisyklė), --libav-watchdog-s 5, SIGTERM po 1,5 s: sustabdymas
+                  laukia užstrigusios gijos — sargas vis tiek baigia procesą exit 7 per ≤ 5 + 5 s;
+      [segment] — gyvas HLS + UDP, vidury darbo segmentas kilpoje (av_read_frame viduje), --libav-watchdog-s 10: exit 7 per ≤ 6 s
+                  tylos ribos + 10 s + 10 s atsargos po pakeitimo; žurnale — šaltinis 1."""
+    res = []
+    srv = PlaylistServer()
+    loop = Redirect(srv.url("/loop.m3u8"), code=301)
+    srv.routes["/loop.m3u8"] = loop
+
+    def one(name, args, bound, sig_at=None):
+        tid = f"ingest_libav_watchdog[{name}]"
+        d = F.fresh_domain(tid.replace("[", "-").replace("]", ""))
+        t0 = time.monotonic()
+        p = F.FProc(out, tid, "ingest", d, "--input", srv.url("/loop.m3u8"), *args, *F.vcommon("gpu", "cuda-linear"))
+        if sig_at is not None:
+            time.sleep(sig_at)
+            p.p.send_signal(signal.SIGTERM)
+        rc = p.wait(timeout=bound + 30)
+        dt = time.monotonic() - t0
+        if rc is None:
+            p.term()
+        err = p.err_path.read_text(errors="replace") if p.err_path.exists() else ""
+        line = next((ln for ln in err.splitlines() if "libav kvietimas" in ln and "exit 7" in ln), "")
+        problems = []
+        if rc != 7:
+            problems.append(f"exit {rc} (laukta 7{' — kabo' if rc is None else ''})")
+        elif dt > bound:
+            problems.append(f"baigėsi po {dt:.1f} s > riba {bound} s")
+        if not line or f"šaltinis 0 ({srv.url('/loop.m3u8')})" not in line:
+            problems.append("žurnale nėra sargo eilutės su šaltinio vardu")
+        res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | exit {rc} per {dt:.1f} s, nukreipta {loop.hits} k. | "
+                            f"{line.strip()[:260]}"))
+
+    try:
+        one("open", ("--input-wait-s", 2), 2 + 30 + 5)
+        one("sigterm", ("--libav-watchdog-s", 5), 1.5 + 5 + 5, sig_at=1.5)
+    finally:
+        srv.close()
+    # [segment]: gyvas šaltinis, kilpa — naujame segmente (libav HLS jį atidaro av_read_frame viduje)
+    tid = "ingest_libav_watchdog[segment]"
+    if (why := ensure_clips()):
+        return res + [F.result(tid, "FAIL", why=why)]
+    red = [None]
+
+    def extra(s):
+        red[0] = Redirect(s.url("/spin.ts"), code=301)
+        s.routes["/spin.ts"] = red[0]
+        return b"#EXTINF:2.0,\nspin.ts\n"
+
+    t0 = time.monotonic()
+    si, sv, ri, err, _ = hls_live_swap_case(out, tid, BASE_PORT + 73, extra, ("--libav-watchdog-s", 10))
+    dt = time.monotonic() - t0
+    line = next((ln for ln in err.splitlines() if "libav kvietimas" in ln and "exit 7" in ln), "")
+    problems = []
+    if ri != 7:
+        problems.append(f"exit {ri} (laukta 7{' — kabo' if ri is None else ''})")
+    if not line or "šaltinis 1 (http://127.0.0.1:" not in line:
+        problems.append("žurnale nėra sargo eilutės su šaltinio 1 vardu")
+    if red[0] is None or red[0].hits < 1:
+        problems.append("kilpos segmentas neužklaustas (testo sąranka)")
+    # pakeitimas po ~18 s nuo ingest paleidimo (+ ~5 s segmentuotojo paruošimo); po jo ≤ 6 s tylos + 10 s + 10 s atsargos
+    if ri == 7 and dt > 5 + 18 + 26 + 5:
+        problems.append(f"baigėsi po {dt:.1f} s nuo pradžios (riba ~54 s)")
+    res.append(F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | exit {ri} per {dt:.1f} s | {line.strip()[:260]}"))
+    return res
+
+
 def ingest_bad_url(out):
     tid = "ingest_bad_url"
     d = F.fresh_domain(tid)
@@ -2109,3 +2183,4 @@ TESTS["ingest_codec_change_reconnect"] = ingest_codec_change_reconnect
 TESTS["ingest_hls_token_redacted"] = ingest_hls_token_redacted
 TESTS["ingest_srt_passphrase_file"] = ingest_srt_passphrase_file
 TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap
+TESTS["ingest_libav_watchdog"] = ingest_libav_watchdog

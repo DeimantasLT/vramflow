@@ -946,6 +946,9 @@ int run_ingest(const Opts& o_in) {
         }
     }
     install_redacting_av_log();
+    // R13-2: libav kvietimų sargas — gyvena ilgiau už visas šaltinių gijas (sunaikinamas grįžtant iš run_ingest, po src join): užstrigusi
+    // gija libav viduje (http nukreipimų kešo kilpa) kitaip laikytų ir zondavimo join, ir sustabdymo join amžinai
+    ig::LibavWatchdog watchdog(static_cast<std::uint64_t>(o.libav_watchdog_s * 1e9), kExitLibavStuck, [] { return ig::tai_now(); });
     ig::Decoder decoder{};
     if (!ig::parse_decoder(o.decoder, decoder)) {
         st.fatal = "--decoder: " + o.decoder;
@@ -1006,6 +1009,7 @@ int run_ingest(const Opts& o_in) {
         s->spec.audio = o.ingest_audio;
         s->spec.audio_channels = o.audio_channels;
         s->spec.silence_ms = o.input_silence_ms;
+        s->demux.interrupt().watch = watchdog.add(s->name);  // R13-2
         auto fail = [&](int code, std::string why) {
             prc[k] = code;
             perr[k] = std::move(why);

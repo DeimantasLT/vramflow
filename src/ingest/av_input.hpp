@@ -12,6 +12,8 @@ extern "C" {
 #include <functional>
 #include <string>
 
+#include "ingest/libav_watchdog.hpp"
+
 namespace mxlv::ingest {
 
 std::string averr(int e);
@@ -27,6 +29,7 @@ struct Interrupt {
     std::uint64_t deadline_tai = 0;
     bool silent = false, timed_out = false;
     std::atomic<bool> abort{false};  // sesija nutraukiama iš vidaus (A1: HLS grojaraščių kilpa vidury sesijos)
+    CallWatch* watch = nullptr;      // R13-2: sargo būsena (nustato savininkas; nullptr — nestebima)
     void packet() { last_pkt.store(tai_now(), std::memory_order_relaxed); }
     void reset_session() {
         last_pkt.store(0, std::memory_order_relaxed);
@@ -35,6 +38,22 @@ struct Interrupt {
     }
 };
 int interrupt_cb(void* p);
+
+// R13-2: libav kvietimo sritis sargui (RAII): įėjimo laikas, kvietimas ir riba — TA PATI, kurią taiko interrupt_cb (paketas jau buvo ir
+// tyla ribota — paskutinis paketas + silence_ns; paketo dar nebuvo ir atidarymo riba — deadline_tai; kitaip ribos nėra) + atsarga.
+// Įdėtos sritys leidžiamos (išeinant atstatoma ankstesnė). Be in.watch — nieko nedaro.
+class LibavCall {
+public:
+    LibavCall(Interrupt& in, const char* what);
+    ~LibavCall();
+    LibavCall(const LibavCall&) = delete;
+    LibavCall& operator=(const LibavCall&) = delete;
+
+private:
+    CallWatch* w_;
+    const char* prev_what_ = nullptr;
+    std::uint64_t prev_since_ = 0, prev_kill_ = 0;
+};
 inline void attach_interrupt(AVFormatContext* ic, Interrupt* in) {
     ic->interrupt_callback.callback = interrupt_cb;
     ic->interrupt_callback.opaque = in;

@@ -149,7 +149,19 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   atidarymo viduje, prieš sargui pamatant galutinį URL; jų turinys nenaudojamas), host'ai, rodantys ne ten, kur atrodo (DNS rebinding,
   kitas tos pačios mašinos vardas ar IP — lyginamas tik host'o tekstas), ir AES-128 segmentų (`crypto+http…`) galutinis URL (nematomas —
   tikrinamas tik URL prieš atidarymą). URL apdorojimas modeliuotas pagal libavformat be `HAVE_DOS_PATHS`; Windows — ne tikslinė platforma.
-  libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
+  libav `https` numatytai sertifikatų netikrina (`tls_verify=0`). **libavformat nukreipimų kešo kilpa (FFmpeg ≤ 8.0) ir sargas:**
+  FFmpeg 6.1 `http.c` kešuotas nukreipimas grįžta į atidarymo pradžią neskaičiuodamas nukreipimų ir netikrindamas pertraukimo
+  kabliuko (`http.c` n6.1:362-373), o `301` / `308` kešuojami be galiojimo pabaigos (425-431): serveris, atsakantis
+  `301 Location: <tas pats URL>` (ar A → B → A), suka atidarymą 100 % CPU be I/O — 10 s skaitymo riba, `--input-wait-s` ir
+  sustabdymas nesuveikia, FFmpeg 6.1 kešo išjungti neleidžia (6.1 patikrinta šaltinyje; iki 8.0 — tas pats kelias, FFmpeg master pataisė:
+  `max_redirects` tikrinamas ir kešo kelyje — čia nepertikrinta).
+  Gijos libavformat viduje saugiai atšaukti negalima, o ji laikytų ir sustabdymą (procesas laukia visų šaltinių gijų). Todėl
+  kiekvienas libavformat kvietimas stebimas: ilgiau nei jo pertraukimo riba (`--input-wait-s` atidarant, tyla nuo paskutinio paketo
+  skaitant) + `--libav-watchdog-s` (numatyta 30 s) arba be pertraukimo kabliuko kvietimo `--libav-watchdog-s` (teisėti laukimai
+  jį kviečia nuolat: kiekvienas skaitymo bandymas, HLS perkrovimo laukimas kas 100 ms) — žurnale šaltinis ir kvietimas, procesas iškart baigiamas exit `7` (ir sustabdymo metu); santrauka
+  nerašoma, flow'ai lieka kaip po gedimo (kitas paleidimas juos surenka). Paleiskite su prižiūrėtoju (pvz. systemd
+  `Restart=on-failure`); visi proceso šaltiniai paleidžiami iš naujo kartu. Atsarga dengia DNS užklausą (glibc: iki 5 s × 2 bandymai
+  vienam vardų serveriui). **Patikimumas:** dreifo atsarga laikoma grįžtamuoju ryšiu (be perfiksavimo valandomis, ir HLS),
   slydimai — pateikimo tvarka, perfiksavimas — žurnale su priežastimi ir dydžiu, garsas — su 5 ms perėjimu; dekodavimas nuo
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
   naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
@@ -168,6 +180,7 @@ Exit kodai (variklio funkcijos; griežtas — `--strict-exit on` arba `auto` su 
 | Netinkamos parinktys | 1 | 1 |
 | Įėjimai neatsirado per `--input-wait-ms` | 4 | 4 |
 | Įėjimas grįžo kitu formatu (`--on-format-change exit`) | 6 | 6 |
+| Tik `ingest`: libavformat kvietimas užstrigo (nukreipimų kešo kilpa); iškart, be santraukos | 7 | 7 |
 
 `verify` — exit `3`, jei yra teisingumo klaidų.
 
