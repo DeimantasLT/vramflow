@@ -131,7 +131,8 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   kelio), `#EXT-X-TARGETDURATION` ≤ `--hls-max-target-s` (30); bet kuri `#EXT-X-MEDIA` eilutė (ir be `URI`) — master lygmuo: viršuje ≤ 32,
   variantuose ir perkrovimuose — nė vienos; libavformat init sekcijų (`#EXT-X-MAP`) ir `#EXT-X-MEDIA` neatlaisvina iki sesijos pabaigos —
   init sekcijų sąmata ≤ 16 MiB sesijai; kiekvienam segmentui libavformat kopijuoja jo URL ir galiojančio AES-128 rakto URL (iki 4 KiB) —
-  ši sąmata ≤ 16 MiB grojaraščiui ir ≤ 64 MiB visiems sesijos grojaraščiams; pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
+  ši sąmata ≤ 16 MiB grojaraščiui ir ≤ 64 MiB visiems sesijos grojaraščiams (URL keliuose master įrašuose skaičiuojamas kiekvienam
+  įrašui: libavformat kiekvienai `#EXT-X-STREAM-INF` ir `#EXT-X-MEDIA` su `URI` laiko atskirą grojaraštį); pažeidimas baigia tik tą sesiją. HTTP skaitymo riba 10 s, prisijungimo iš naujo atidarymas — ≤ `--input-wait-s` (30 s).
   Paketų eilės ribotos baitais (`--max-queue-mb` — kiekvienai eilei, šaltinis turi dvi: video ir garso; perteklius išmetamas ir skaičiuojamas, žymės — niekada), garso žiedas ≤
   `--max-audio-ring-mb` (256); slaptažodžiai ir užklausos reikšmės žurnaluose, santraukoje ir statistikoje — `***` (kabutėse — iki
   uždarančios kabutės; neišvaloma: tarpas užklausos reikšmėje be kabučių, paslaptis URL kelyje). SRT slaptažodis — `--srt-passphrase-from

@@ -325,8 +325,11 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
                 err = "įdėtas master grojaraštis (variantas rodo į save): " + redact_url(vu);
                 return false;
             }
+            // R13-3: tas pats URL kelis kartus — atsisiunčiamas vieną kartą, bet libav jį atidaro ir laiko segmentų sąrašą KIEKVIENAM
+            // įrašui (hls.c n6.1:349-370, 535-540, 1954-1964) — sąmata dauginama iš įrašų skaičiaus; dublikatai neatmetami
             if (std::find(seen.begin(), seen.end(), vu) != seen.end()) continue;
             seen.push_back(vu);
+            const std::size_t mult = playlist_multiplicity(base, pt, vu);
             FetchedPlaylist fv;
             if (!fetch_playlist(vu, cb, lim.max_bytes, false, fv, err)) return false;
             // D: varianto atsakymas po nukreipimų — irgi tik iš leistino serverio (nukreipimo užklausos jau padarytos — README)
@@ -340,9 +343,10 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
                 return false;
             }
             if (!check_playlist(fv.location, pv, false, lim, err)) return false;
-            if ((seg_bytes += segment_bytes(fv.location, pv)) > lim.max_session_bytes) {
+            if ((seg_bytes += segment_bytes(fv.location, pv) * mult) > lim.max_session_bytes) {
                 err = "libav segmentų sąmata visiems grojaraščiams " + std::to_string(seg_bytes >> 10) + " KiB > riba " +
-                      std::to_string(lim.max_session_bytes >> 10) + " KiB";
+                      std::to_string(lim.max_session_bytes >> 10) + " KiB" + (mult > 1 ? " (" + redact_url(vu) + " — " + std::to_string(mult) +
+                      " libav grojaraščiai)" : std::string{});
                 return false;
             }
             target = std::max(target, pv.target_s);
@@ -402,6 +406,7 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // E: URL, kuriuose libav gali gauti M3U8: viršutinis ir jo location (media grojaraščio perkrovimai — location, hls.c n6.1:782-783,
     // 613-621), master variantai ir EXT-X-MEDIA grojaraščiai, išspręsti kaip libav (new_playlist → ff_make_absolute_url, hls.c:324)
     playlist_urls_.clear();
+    playlist_mult_.clear();
     init_bytes_ = 0;
     seg_bytes_.clear();
     if (hls) {
@@ -412,8 +417,14 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
         init_bytes_ = init_section_bytes(top_.location, parse_playlist(top_.text));  // F: viršutinis — libav jį irgi analizuoja
         seg_bytes_.emplace_back(top_url, segment_bytes(top_.location, parse_playlist(top_.text)));  // M2
         std::string r, why;
-        for (const std::string& v : parse_playlist(top_.text).variants)
-            if (resolve_playlist_url(top_.location, v, r, why)) playlist_urls_.push_back(r);
+        const PlaylistInfo tp = parse_playlist(top_.text);
+        for (const std::string& v : tp.variants)
+            if (resolve_playlist_url(top_.location, v, r, why)) {
+                playlist_urls_.push_back(r);
+                // R13-3: libav grojaraščių su šiuo URL skaičius — post_open sąmata dauginama (dublikatai skaičiuojami vieną kartą)
+                if (std::find_if(playlist_mult_.begin(), playlist_mult_.end(), [&](const auto& e) { return e.first == r; }) == playlist_mult_.end())
+                    playlist_mult_.emplace_back(r, playlist_multiplicity(top_.location, tp, r));
+            }
     }
     auto fail = [&](const std::string& what, int code) {
         const std::string why = intr_.timed_out ? "nėra duomenų per --input-wait-s" : (intr_.silent ? "įėjimas tylus" : averr(code));
@@ -769,7 +780,11 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     if (it == seg_bytes_.end()) seg_bytes_.emplace_back(u, sb);
     else it->second = sb;
     std::size_t total = 0;
-    for (const auto& e : seg_bytes_) total += e.second;
+    for (const auto& e : seg_bytes_) {
+        // R13-3: tas pats URL keliuose master įrašuose — libav tiek atskirų grojaraščių, kiekvienas su savo sąrašu
+        const auto m = std::find_if(playlist_mult_.begin(), playlist_mult_.end(), [&](const auto& p) { return p.first == e.first; });
+        total += e.second * (m == playlist_mult_.end() ? 1 : m->second);
+    }
     if (total > lim_.max_session_bytes)
         return refuse("libav segmentų sąmata visiems grojaraščiams " + std::to_string(total >> 10) + " KiB > riba " +
                       std::to_string(lim_.max_session_bytes >> 10) + " KiB");

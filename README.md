@@ -555,7 +555,8 @@ playlist master level: at most 32 in the top-level playlist, none in variants or
 `#EXT-X-MAP` init section and every `#EXT-X-MEDIA` rendition until the session ends, so init sections are also capped at
 16 MiB of estimated memory per session. libavformat copies each segment's resolved URL and, while an AES-128 key is
 active, the resolved key URL (up to 4 KiB each): that estimate is capped at 16 MiB per playlist and 64 MiB for all
-playlists of a session together (during a reload libavformat briefly holds the previous list too). A violation ends only that session (the source reconnects
+playlists of a session together (a URL listed in several master entries counts once per entry: libavformat keeps a separate
+playlist for each `#EXT-X-STREAM-INF` and each `#EXT-X-MEDIA` with `URI`) (during a reload libavformat briefly holds the previous list too). A violation ends only that session (the source reconnects
 with back-off; the other sources are not affected). HTTP reads time out after 10 s, and a reconnecting `http(s)` source
 gives up an open after `--input-wait-s` (default 30 s). Packet queues are capped in bytes (`--max-queue-mb`, default
 (latency + 2.4 s) × 80 Mbit/s per queue; each source has two queues, video and audio); at the cap the oldest media

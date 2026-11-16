@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ingest/url_policy.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -346,7 +347,10 @@ PlaylistInfo parse_playlist(const std::string& text) {
                 // (hls.c n6.1:824-828, 523-527, 303-311), todėl perkraunamame ar įdėtame grojaraštyje jų būti negali
                 if (starts(line, "#EXT-X-MEDIA:")) ++pi.media;
                 pi.master = true;
-                if (const std::string u = uri_attr(line); !u.empty()) pi.variants.push_back(u);
+                if (const std::string u = uri_attr(line); !u.empty()) {
+                    pi.variants.push_back(u);
+                    if (starts(line, "#EXT-X-MEDIA:")) pi.playlists.push_back(u);  // R13-3: libav grojaraštis (I-FRAME — ne)
+                }
             } else {
                 const std::string u = uri_attr(line);
                 if (!u.empty()) pi.refs.push_back(u);  // EXT-X-KEY, EXT-X-MAP, EXT-X-SESSION-KEY, EXT-X-PART …
@@ -367,6 +371,7 @@ PlaylistInfo parse_playlist(const std::string& text) {
         }
         if (want_variant) {
             pi.variants.push_back(line);
+            pi.playlists.push_back(line);
             want_variant = false;
         } else {
             pi.refs.push_back(line);
@@ -472,6 +477,14 @@ std::size_t segment_bytes(const std::string& base, const PlaylistInfo& pi) {
     for (const auto& [uri, key] : pi.segments)
         n += kSegmentOverhead + abs_url_bytes(base, uri) + (key >= 0 ? key_bytes[static_cast<std::size_t>(key)] : 0);
     return n;
+}
+
+std::size_t playlist_multiplicity(const std::string& base, const PlaylistInfo& pi, const std::string& url) {
+    std::size_t n = 0;
+    std::string r, why;
+    for (const std::string& p : pi.playlists)
+        if (resolve_playlist_url(base, p, r, why) && r == url) ++n;
+    return std::max<std::size_t>(n, 1);
 }
 
 std::string url_authority(const std::string& url) {

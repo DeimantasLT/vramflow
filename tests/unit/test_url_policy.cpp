@@ -568,3 +568,17 @@ TEST_CASE("url_policy: R13-1 — --hls-same-host užsidaro: tuščias leistinas 
         CHECK_FALSE(exact_http_url(bad));
     }
 }
+
+TEST_CASE("url_policy: R13-3 — libav grojaraščių daugybiškumas (tas pats URL keliuose master įrašuose)", "[ingest][url]") {
+    // hls.c n6.1:349-370, 535-540, 804-828: kiekviena STREAM-INF ir EXT-X-MEDIA su URI — atskiras libav grojaraštis; I-FRAME — praleidžiama
+    const std::string base = "http://h/live/m.m3u8";
+    const PlaylistInfo pi = parse_playlist(
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2\nv.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=3\n/live/v.m3u8\n"
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"x\",URI=\"v.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"y\"\n"
+        "#EXT-X-I-FRAME-STREAM-INF:URI=\"i.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=4\nw.m3u8\n");
+    CHECK(pi.playlists.size() == 5);
+    CHECK(playlist_multiplicity(base, pi, "http://h/live/v.m3u8") == 4);
+    CHECK(playlist_multiplicity(base, pi, "http://h/live/w.m3u8") == 1);
+    CHECK(playlist_multiplicity(base, pi, "http://h/live/i.m3u8") == 1);  // libav jo nekuria — kaip iki šiol, vienas
+    CHECK(pi.variants.size() == 6);  // patikra / žinomi URL — kaip iki šiol (ir I-FRAME)
+}

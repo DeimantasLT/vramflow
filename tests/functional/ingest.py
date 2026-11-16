@@ -1293,9 +1293,15 @@ def ingest_hls_security(out):
         "/sess.m3u8": master(*[f"sv{k}.m3u8" for k in range(5)]),
         **{f"/sv{k}.m3u8": ("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=AES-128,URI=\"" + "k" * 4000 + "\"\n" +
                             "#EXTINF:2.0,\ns.ts\n" * 3500).encode() for k in range(5)},
+        # R13-3: 15 master įrašų į TĄ PATĮ URL — libav kiekvienam kuria atskirą grojaraštį (hls.c n6.1:349-370, 1954-1964); vieno sąmata
+        # ~15,9 MiB (< 16 MiB grojaraščiui, 4000 segmentų × 4000 B rakto URI), 15 × — > 64 MiB sesijai
+        "/dup.m3u8": master(*["dv.m3u8"] * 15),
+        "/dv.m3u8": ("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=AES-128,URI=\"" + "k" * 4000 + "\"\n" +
+                     "#EXTINF:2.0,\ns.ts\n" * 4000).encode(),
     })
     cases = (("file_variant", "neleidžiama"), ("file_segment", "neleidžiama"), ("key_file", "neleidžiama"), ("tcp_segment", "neleidžiama"),
-             ("a", "įdėtas master"), ("huge", "TARGETDURATION"), ("sess", "visiems grojaraščiams"))
+             ("a", "įdėtas master"), ("huge", "TARGETDURATION"), ("sess", "visiems grojaraščiams"),
+             ("dup", "visiems grojaraščiams"))
     try:
         res += hls_toctou_case(out)
         res += hls_peek_case(out)

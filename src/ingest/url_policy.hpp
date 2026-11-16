@@ -58,6 +58,10 @@ struct PlaylistInfo {
     bool master = false;  // turi #EXT-X-STREAM-INF (master grojaraštis)
     double target_s = -1;  // #EXT-X-TARGETDURATION; < 0 — nėra
     std::vector<std::string> variants;  // master: variantų ir EXT-X-MEDIA URI (grojaraščiai)
+    // R13-3: URI, iš kurių libav kuria po ATSKIRĄ grojaraštį (su pasikartojimais): kiekviena #EXT-X-STREAM-INF eilutė ir kiekviena
+    // #EXT-X-MEDIA su URI (hls.c n6.1:349-370, 535-540, 804-828; I-FRAME-STREAM-INF libav praleidžia). libav jų nesutapatina —
+    // kiekvienas atidaromas ir analizuojamas atskirai (hls.c:1954-1964), todėl tas pats URL N kartų = N segmentų sąrašų
+    std::vector<std::string> playlists;
     std::vector<std::string> refs;      // media: segmentų ir URI="…" (raktai, EXT-X-MAP) nuorodos
     // F: kiekviena #EXT-X-MAP eilutė — (jos URI, tuo metu galiojęs EXT-X-KEY URI arba "")
     std::vector<std::pair<std::string, std::string>> maps;
@@ -99,6 +103,9 @@ constexpr std::size_t kSegmentOverhead = 128;
 // M2: kiek atminties libav skirs šio grojaraščio segmentams (hls.c n6.1:931-978): kiekvienam kSegmentOverhead + |absoliutus URL| + 1
 // (+ |absoliutus rakto URL| + 1, jei raktas galioja; URI "" — grojaraščio URL); URL ≤ 4096 (tmp_str[MAX_URL_SIZE]).
 std::size_t segment_bytes(const std::string& base, const PlaylistInfo& pi);
+// R13-3: kiek libav grojaraščių master'yje pi (bazė base) turi URL url — pi.playlists, išspręsti kaip libav new_playlist; ≥ 1 (URL,
+// kurio libav pats nekuria, pvz. tik I-FRAME, — vienas, kaip patikroje iki šiol).
+std::size_t playlist_multiplicity(const std::string& base, const PlaylistInfo& pi, const std::string& url);
 
 // H1: URL autoritetas host[:port] mažosiomis, be userinfo — TIKSLIAI kaip libav av_url_split (utils.c n6.1:377-411): schema iki pirmo
 // ':', po jo praleidžiami ≤ 2 '/', autoritetas iki "/?#" ("" — nėra schemos arba tuščias autoritetas).

@@ -138,6 +138,8 @@ private:
     // M2: libav segmentų sąmata kiekvienam sesijos grojaraščiui (URL, kurį libav atidaro → paskutinio analizavimo segment_bytes)
     std::vector<std::pair<std::string, std::size_t>> seg_bytes_;
     std::vector<std::string> playlist_urls_;  // E: URL, kurių M3U8 atsakymas leidžiamas (viršutinis, location, variantai)
+    // R13-3: master įrašų (STREAM-INF, EXT-X-MEDIA su URI) URL → kiek libav grojaraščių jį turi (seg_bytes_ sąmatos daugiklis)
+    std::vector<std::pair<std::string, std::size_t>> playlist_mult_;
 };
 
 // HTTP(S) šaltinio patikra prieš libav (A1, B8): ar turinys — M3U8 (hls), ir jei taip — master → media (ne giliau, be kilpų),
