@@ -456,6 +456,11 @@ std::size_t abs_url_bytes(const std::string& base, const std::string& ref) {
 
 }  // namespace
 
+std::string libav_playlist_url(const std::string& location) {
+    // ff_make_absolute_url(pls->url, sizeof pls->url, NULL, url): bazė "" (url.c n6.1:227-228), buferis MAX_URL_SIZE — ≤ 4095 baitų
+    return absolute_like_libav("", location).substr(0, kMaxLine);
+}
+
 std::size_t segment_bytes(const std::string& base, const PlaylistInfo& pi) {
     // libav kiekvienam segmentui (hls.c n6.1:931-978): av_malloc(struct segment), av_strdup(rakto URL), jei raktas, av_strdup(URL)
     std::vector<std::size_t> key_bytes(pi.keys.size());

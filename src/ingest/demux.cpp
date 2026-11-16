@@ -386,9 +386,12 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     init_bytes_ = 0;
     seg_bytes_.clear();
     if (hls) {
-        playlist_urls_ = {s.url, top_.location};
+        // L1: viršutinio media grojaraščio perkrovimus libav atidaro normalizuotu URL (new_playlist → ff_make_absolute_url(NULL, location),
+        // hls.c n6.1:324, 613-621) — jis irgi žinomas grojaraštis; jo segmentų sąmata — tuo pačiu raktu, kurį sargas mato perkraunant
+        const std::string top_url = libav_playlist_url(top_.location);
+        playlist_urls_ = {s.url, top_.location, top_url};
         init_bytes_ = init_section_bytes(top_.location, parse_playlist(top_.text));  // F: viršutinis — libav jį irgi analizuoja
-        seg_bytes_.emplace_back(top_.location, segment_bytes(top_.location, parse_playlist(top_.text)));  // M2
+        seg_bytes_.emplace_back(top_url, segment_bytes(top_.location, parse_playlist(top_.text)));  // M2
         std::string r, why;
         for (const std::string& v : parse_playlist(top_.text).variants)
             if (resolve_playlist_url(top_.location, v, r, why)) playlist_urls_.push_back(r);

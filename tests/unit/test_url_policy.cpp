@@ -504,3 +504,12 @@ TEST_CASE("url_policy: M2 — libav segmentų atminties sąmata grojaraščiui (
     CHECK(segment_bytes(base, parse_playlist(live)) < 2048);
     CHECK(check_playlist(base, parse_playlist(live), false, lim, why));
 }
+
+TEST_CASE("url_policy: L1 — viršutinio media grojaraščio URL normalizuojamas kaip libav new_playlist", "[ingest][url]") {
+    // libav viršutiniam media grojaraščiui: ensure_playlist → new_variant(c, NULL, url, NULL) → ff_make_absolute_url(pls->url, NULL, url)
+    // (hls.c n6.1:613-621, 347-354, 324): taškų segmentai suprastinami — perkrovimai atidaro jau normalizuotą URL
+    CHECK(libav_playlist_url("http://h/a/../live.m3u8") == "http://h/live.m3u8");
+    CHECK(libav_playlist_url("http://h:8080/./x/./y.m3u8?tok=1") == "http://h:8080/x/y.m3u8?tok=1");
+    CHECK(libav_playlist_url("https://h/live.m3u8") == "https://h/live.m3u8");
+    CHECK(libav_playlist_url("http://h") == "http://h");
+}

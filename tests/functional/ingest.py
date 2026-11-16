@@ -807,9 +807,10 @@ class Redirect:
         h.end_headers()
 
 
-def hls_live_swap_case(out, tid, port, extra, ingest_args=()):
+def hls_live_swap_case(out, tid, port, extra, ingest_args=(), path="/live.m3u8"):
     """Gyvas HLS šaltinis (ffmpeg segmentuotojas) + UDP šaltinis 0. Po 18 s grojaraštis = dabartinis + extra(srv) (pvz. naujas
-    segmentas, kuris nukreipia ar grąžina M3U8). Grąžina (si, sv, ri, err, srv)."""
+    segmentas, kuris nukreipia ar grąžina M3U8); extra None — be pakeitimo. path — šaltinio URL kelias (serveris jį normalizuoja).
+    Grąžina (si, sv, ri, err, srv)."""
     work = pathlib.Path(out) / tid.replace("[", "-").replace("]", "") / "live"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
@@ -827,7 +828,7 @@ def hls_live_swap_case(out, tid, port, extra, ingest_args=()):
         def swap():
             srv.routes["/live.m3u8"] = (work / "live.m3u8").read_bytes() + extra(srv)
 
-        si, sv, ri, err = two_source_http(out, tid, srv, "/live.m3u8", port, T, 6 + SWAP, swap, ingest_args)
+        si, sv, ri, err = two_source_http(out, tid, srv, path, port, T, 6 + SWAP if extra is not None else 10**9, swap, ingest_args)
     finally:
         seg.terminate()
         seg.wait()
@@ -997,6 +998,29 @@ def huge_length_cases(out):
                         why="; ".join(problems) + f" | GET init {init.gets} (Range > 0: {init.ranged}), segmento {seg.gets} (Range > 0: "
                         f"{seg.ranged}), sesijų {sessions} | " + summary_line(si, sv, a, r)))
     return res
+
+
+def hls_dot_location_case(out):
+    """L1 (round 12): šaltinio URL su taškų segmentu („/x/../live.m3u8“). libav viršutinio media grojaraščio perkrovimus atidaro
+    normalizuotu URL (ff_make_absolute_url(NULL, location), hls.c n6.1:324, 613-621) — „/live.m3u8“; sargas jį turi laikyti tuo pačiu
+    grojaraščiu (ne „M3U8 ne grojaraščio URL“). Kriterijai: 0 prisijungimų iš naujo, žurnale nėra atmetimo, HLS šaltinis dekoduoja."""
+    tid = "ingest_hls_security[dot_location]"
+    if (why := ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    si, sv, ri, err, srv = hls_live_swap_case(out, tid, BASE_PORT + 69, None, path="/x/../live.m3u8")
+    problems, a, r = base_checks(si, sv, ri, 20.0, 30, want_rc=(0, 3, 4, 5, 6))
+    if ri is None or ri < 0 or si is None:
+        problems.append(f"procesas: exit {ri}, santrauka {'yra' if si else 'nėra'}")
+    line = next((ln for ln in err.splitlines() if "sesija nutraukiama" in ln), "")
+    if line:
+        problems.append("sargas atmetė perkrovimą")
+    if flow(si, 1).get("input_reconnects", 0) != 0:
+        problems.append(f"HLS input_reconnects {flow(si, 1).get('input_reconnects')} (laukta 0)")
+    if flow(si, 1).get("frames_decoded", 0) < 250:
+        problems.append(f"HLS šaltinis dekodavo {flow(si, 1).get('frames_decoded')} kadrų")
+    return [F.result(tid, "FAIL" if problems else "PASS",
+                     why="; ".join(problems) + f" | HLS input_reconnects {flow(si, 1).get('input_reconnects')}, frames_decoded "
+                     f"{flow(si, 1).get('frames_decoded')} | {line.strip()[:220]} | " + summary_line(si, sv, a, r))]
 
 
 def hls_segment_m3u8_case(out):
@@ -1211,6 +1235,7 @@ def ingest_hls_security(out):
         res += hls_redirect_case(out)
         res += hls_authority_case(out)
         res += huge_length_cases(out)
+        res += hls_dot_location_case(out)
         res += hls_segment_m3u8_case(out)
         res += hls_reload_cases(out)
         for name, want in cases:

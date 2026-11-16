@@ -33,6 +33,10 @@ std::string segment_format_whitelist();
 // santykinė). true — rezultatas http / https (out); kitaip why — aiški priežastis (schema išvalyta nuo paslapčių).
 bool resolve_playlist_url(const std::string& base, const std::string& ref, std::string& out, std::string& why);
 
+// L1: URL, kurį libav HLS atidaro viršutinio media grojaraščio perkrovimams: ff_make_absolute_url(NULL, location) (hls.c n6.1:324,
+// 613-621) — taškų segmentai suprastinami, ≤ 4095 baitų.
+std::string libav_playlist_url(const std::string& location);
+
 // URL be paslapčių: userinfo → „***@“, kiekvienos užklausos poros reikšmė → „***“ (raktas paliekamas), fragmentas → „#***“.
 // Vietinis kelias — nepakeistas.
 std::string redact_url(const std::string& url);
