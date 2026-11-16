@@ -58,6 +58,10 @@ struct PlaylistInfo {
     std::vector<std::pair<std::string, std::string>> maps;
     // H2: #EXT-X-MEDIA eilučių skaičius (su URI ir be): libav kiekvieną kaupia iki sesijos pabaigos — bet kuri daro grojaraštį master lygmens
     std::size_t media = 0;
+    // M2: kiekviena ne žymės eilutė (libav segmentas, jei prieš ją #EXTINF) — (jos URI, galiojančio rakto indeksas keys arba −1);
+    // raktas galioja, kai paskutinio #EXT-X-KEY METHOD — AES-128 arba SAMPLE-AES (hls.c n6.1:808-823); keys — to rakto URI ("" — nėra)
+    std::vector<std::pair<std::string, int>> segments;
+    std::vector<std::string> keys;
 };
 PlaylistInfo parse_playlist(const std::string& text);
 
@@ -74,10 +78,20 @@ struct HlsLimits {
     std::size_t max_init_bytes = std::size_t{16} << 20;
     // H2: #EXT-X-MEDIA eilučių riba viršutiniame grojaraštyje (perkraunamuose / įdėtuose jų negali būti visai)
     std::size_t max_media = 32;
+    // M2: libav segmentų sąrašo sąmata (segment_bytes) — ≤ max_playlist_bytes grojaraščiui ir ≤ max_session_bytes visiems sesijos
+    // grojaraščiams kartu (kiekvieno — paskutinio analizavimo; perkraunant libav trumpai laiko ir ankstesnį sąrašą, hls.c:1010-1027)
+    std::size_t max_playlist_bytes = std::size_t{16} << 20;
+    std::size_t max_session_bytes = std::size_t{64} << 20;
 };
 
 // F: kiek atminties libav skirs šio grojaraščio init sekcijoms (EXT-X-MAP): kiekvienai 256 + |absoliutus URL| + 1 (+ |rakto URL| + 1).
 std::size_t init_section_bytes(const std::string& base, const PlaylistInfo& pi);
+
+// M2: libav vieno segmento pastovioji dalis: struct segment (80 B, hls.c n6.1:76-86) + malloc antraštės + dynarray rodyklė (≤ 2 × 8 B)
+constexpr std::size_t kSegmentOverhead = 128;
+// M2: kiek atminties libav skirs šio grojaraščio segmentams (hls.c n6.1:931-978): kiekvienam kSegmentOverhead + |absoliutus URL| + 1
+// (+ |absoliutus rakto URL| + 1, jei raktas galioja; URI "" — grojaraščio URL); URL ≤ 4096 (tmp_str[MAX_URL_SIZE]).
+std::size_t segment_bytes(const std::string& base, const PlaylistInfo& pi);
 
 // H1: URL autoritetas host[:port] mažosiomis, be userinfo — TIKSLIAI kaip libav av_url_split (utils.c n6.1:377-411): schema iki pirmo
 // ':', po jo praleidžiami ≤ 2 '/', autoritetas iki "/?#" ("" — nėra schemos arba tuščias autoritetas).

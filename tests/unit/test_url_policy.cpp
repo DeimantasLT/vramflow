@@ -474,3 +474,33 @@ TEST_CASE("url_policy: H2 — #EXT-X-MEDIA (ir be URI) — master lygmuo; viršu
     CHECK_FALSE(check_playlist(base, parse_playlist(top + "#EXT-X-MEDIA:TYPE=VIDEO\n"), true, lim, why));
     CHECK(why.find("EXT-X-MEDIA") != std::string::npos);
 }
+
+TEST_CASE("url_policy: M2 — libav segmentų atminties sąmata grojaraščiui (URL + rakto URL kiekvienam segmentui)", "[ingest][url]") {
+    // libav kiekvienam segmentui (hls.c n6.1:931-978): av_malloc(struct segment) + av_strdup(absoliutus URL, ≤ 4095 + 1) ir, jei raktas
+    // (METHOD AES-128 / SAMPLE-AES), av_strdup(absoliutus rakto URL); URI tuščias — rakto URL = grojaraščio URL (ff_make_absolute_url)
+    HlsLimits lim;
+    std::string why;
+    const std::string base = "http://h/live/x.m3u8";
+    CHECK(lim.max_playlist_bytes == std::size_t{16} << 20);
+    CHECK(lim.max_session_bytes == std::size_t{64} << 20);
+    const PlaylistInfo p = parse_playlist("#EXTM3U\n#EXTINF:2,\ns0.ts\n#EXT-X-KEY:METHOD=AES-128,URI=\"k.bin\"\n#EXTINF:2,\ns1.ts\n"
+                                          "#EXT-X-KEY:METHOD=NONE\n#EXTINF:2,\ns2.ts\n#EXT-X-KEY:METHOD=SAMPLE-AES\n#EXTINF:2,\ns3.ts\n");
+    const std::size_t seg = std::string("http://h/live/s0.ts").size() + 1, key = std::string("http://h/live/k.bin").size() + 1;
+    CHECK(segment_bytes(base, p) == 4 * (kSegmentOverhead + seg) + key + (base.size() + 1));
+    // ilgas rakto URI + daug trumpų segmentų: kiekvienam segmentui — rakto URL kopija (~4 KiB) → > 16 MiB → atmetama
+    std::string big = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=AES-128,URI=\"" + std::string(4000, 'k') + "\"\n";
+    for (int k = 0; k < 5000; ++k) big += "#EXTINF:2,\ns.ts\n";
+    const PlaylistInfo pb = parse_playlist(big);
+    CHECK(segment_bytes(base, pb) > lim.max_playlist_bytes);
+    CHECK_FALSE(check_playlist(base, pb, false, lim, why));
+    CHECK(why.find("segment") != std::string::npos);
+    // tas pats be rakto — tik trumpi URL: priimta
+    std::string small = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n";
+    for (int k = 0; k < 5000; ++k) small += "#EXTINF:2,\ns.ts\n";
+    CHECK(check_playlist(base, parse_playlist(small), false, lim, why));
+    // įprastas gyvas grojaraštis (6 segmentai) — maža sąmata
+    std::string live = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:10\n";
+    for (int k = 0; k < 6; ++k) live += "#EXTINF:2.000000,\nlive" + std::to_string(k) + ".ts\n";
+    CHECK(segment_bytes(base, parse_playlist(live)) < 2048);
+    CHECK(check_playlist(base, parse_playlist(live), false, lim, why));
+}

@@ -54,7 +54,8 @@ bool next_line(const std::string& t, std::size_t& p, std::string& line) {
 // hls.c handle_*_args (raktas lyginamas strncmp(key, "URI=", key_len) — tik lygiai „URI=“): praleidžiami tarpai ir kableliai, raktas —
 // iki pirmo '=', reikšmė kabutėse (\x — x pažodžiui, be uždarančios — iki galo) arba be jų iki tarpo / kablelio, ≤ 4095 baitų
 // (char uri[MAX_URL_SIZE]); tas pats raktas vėl — paskutinė reikšmė. "" — nėra (libav tuščią URI irgi laiko „nėra“).
-std::string uri_attr(const std::string& line) {
+// M2: tas pats bet kuriam raktui want ("METHOD=" …), reikšmė nukerpama iki cap baitų (libav dest_len − 1)
+std::string tag_attr(const std::string& line, const char* want, std::size_t cap) {
     const auto colon = line.find(':');
     if (colon == std::string::npos) return {};
     const std::size_t n = line.size();
@@ -67,7 +68,7 @@ std::string uri_attr(const std::string& line) {
         const auto eq = line.find('=', k0);
         if (eq == std::string::npos) break;
         p = eq + 1;
-        const bool uri = line.compare(k0, p - k0, "URI=") == 0;
+        const bool hit = line.compare(k0, p - k0, want) == 0;
         std::string v;
         if (p < n && line[p] == '"') {
             ++p;
@@ -84,10 +85,12 @@ std::string uri_attr(const std::string& line) {
         } else {
             while (p < n && !av_space(line[p]) && line[p] != ',') v += line[p++];
         }
-        if (uri) out = v.substr(0, kMaxLine);
+        if (hit) out = v.substr(0, cap);
     }
     return out;
 }
+
+std::string uri_attr(const std::string& line) { return tag_attr(line, "URI=", kMaxLine); }
 
 }  // namespace
 
@@ -315,6 +318,7 @@ PlaylistInfo parse_playlist(const std::string& text) {
     std::size_t p = 0;
     bool first = true, want_variant = false;
     std::string line, key;
+    int seg_key = -1;  // M2: galiojančio rakto indeksas pi.keys (−1 — nėra)
     while (next_line(text, p, line)) {
         if (first) {
             // #EXTM3U atpažinimas platesnis nei libav (pirma eilutė == "#EXTM3U", hls.c n6.1:786-787): BOM, tušti priekyje, tarpai —
@@ -344,8 +348,17 @@ PlaylistInfo parse_playlist(const std::string& text) {
                 const std::string u = uri_attr(line);
                 if (!u.empty()) pi.refs.push_back(u);  // EXT-X-KEY, EXT-X-MAP, EXT-X-SESSION-KEY, EXT-X-PART …
                 // F: libav rakto URI laiko iki kito EXT-X-KEY (hls.c n6.1:809-823); kiekviena EXT-X-MAP eilutė — nauja init sekcija
-                if (starts(line, "#EXT-X-KEY:")) key = u;
-                else if (starts(line, "#EXT-X-MAP:")) pi.maps.emplace_back(u, key);
+                if (starts(line, "#EXT-X-KEY:")) {
+                    key = u;
+                    // M2: libav rakto URL kopijuoja kiekvienam segmentui tik kai METHOD AES-128 / SAMPLE-AES (char method[11], hls.c
+                    // n6.1:393-395, 808-823), kitaip — rakto nėra
+                    const std::string m = tag_attr(line, "METHOD=", 10);
+                    seg_key = -1;
+                    if (m == "AES-128" || m == "SAMPLE-AES") {
+                        pi.keys.push_back(u);
+                        seg_key = static_cast<int>(pi.keys.size()) - 1;
+                    }
+                } else if (starts(line, "#EXT-X-MAP:")) pi.maps.emplace_back(u, key);
             }
             continue;
         }
@@ -354,6 +367,7 @@ PlaylistInfo parse_playlist(const std::string& text) {
             want_variant = false;
         } else {
             pi.refs.push_back(line);
+            pi.segments.emplace_back(line, seg_key);
         }
     }
     if (!pi.variants.empty() && !pi.master) pi.master = true;  // tik EXT-X-MEDIA — vis tiek master lygmuo
@@ -387,6 +401,11 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
     }
     if (pi.refs.size() > lim.max_segments) {
         why = "grojaraštyje " + std::to_string(pi.refs.size()) + " nuorodų (segmentų, raktų) > riba " + std::to_string(lim.max_segments);
+        return false;
+    }
+    if (const std::size_t sb = segment_bytes(base, pi); sb > lim.max_playlist_bytes) {
+        why = "libav segmentų sąmata grojaraščiui " + std::to_string(sb >> 10) + " KiB > riba " + std::to_string(lim.max_playlist_bytes >> 10) +
+              " KiB (kiekvienam segmentui — URL ir rakto URL kopija)";
         return false;
     }
     if (pi.target_s > lim.max_target_s) {
@@ -424,6 +443,27 @@ bool http_scheme_without_slashes(const std::string& url) {
     const std::string s = url_scheme(url);
     const std::string inner = starts(s, "crypto+") ? s.substr(7) : s;
     return is_http(inner) && url.compare(s.size(), 3, "://") != 0;
+}
+
+namespace {
+
+// M2: libav ff_make_absolute_url(tmp_str[MAX_URL_SIZE], base, ref) ilgis su NUL (≤ 4096); ref "" — bazė (url.c n6.1:195-319)
+std::size_t abs_url_bytes(const std::string& base, const std::string& ref) {
+    std::string r, why;
+    const std::size_t n = ref.empty() ? base.size() : resolve_playlist_url(base, ref, r, why) ? r.size() : base.size() + ref.size();
+    return std::min<std::size_t>(4096, n + 1);
+}
+
+}  // namespace
+
+std::size_t segment_bytes(const std::string& base, const PlaylistInfo& pi) {
+    // libav kiekvienam segmentui (hls.c n6.1:931-978): av_malloc(struct segment), av_strdup(rakto URL), jei raktas, av_strdup(URL)
+    std::vector<std::size_t> key_bytes(pi.keys.size());
+    for (std::size_t k = 0; k < pi.keys.size(); ++k) key_bytes[k] = abs_url_bytes(base, pi.keys[k]);
+    std::size_t n = 0;
+    for (const auto& [uri, key] : pi.segments)
+        n += kSegmentOverhead + abs_url_bytes(base, uri) + (key >= 0 ? key_bytes[static_cast<std::size_t>(key)] : 0);
+    return n;
 }
 
 std::string url_authority(const std::string& url) {

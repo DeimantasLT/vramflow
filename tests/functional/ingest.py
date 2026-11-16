@@ -1062,8 +1062,11 @@ def hls_reload_cases(out):
               "EXT-X-MAP"),
              # H2 (round 12): libav kiekvieną #EXT-X-MEDIA eilutę (ir be URI) kiekvieno perkrovimo metu prideda prie c->renditions
              # (hls.c n6.1:824-828, 523-527), atlaisvina tik uždarant (303-311) — ~40 000 eilučių (< 1 MiB) kas 2 s atmetamos
-             ("media_many", hdr + b"#EXT-X-MEDIA:TYPE=AUDIO\n" * 40000 + b"#EXTINF:2.0,\ns.ts\n", "EXT-X-MEDIA"))
-    ports = (51, 52, 53, 59, 60, 61, 65)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
+             ("media_many", hdr + b"#EXT-X-MEDIA:TYPE=AUDIO\n" * 40000 + b"#EXTINF:2.0,\ns.ts\n", "EXT-X-MEDIA"),
+             # M2 (round 12): libav kiekvienam segmentui kopijuoja galiojančio rakto absoliutų URL (hls.c n6.1:948-975) — ~4 KiB rakto URI
+             # ir 5000 trumpų segmentų (~0,1 MiB grojaraštis) — ~20 MiB libav atminties kas perkrovimą; atmetama (> 16 MiB grojaraščiui)
+             ("key_long", hdr + b'#EXT-X-KEY:METHOD=AES-128,URI="' + b"k" * 4000 + b'"\n' + b"#EXTINF:2.0,\ns.ts\n" * 5000, "segmentų sąmata"))
+    ports = (51, 52, 53, 59, 60, 61, 65, 68)  # BASE_PORT + …; 54 — ingest_queue_byte_cap
     res = []
     T, SWAP = 30, 12
     try:
@@ -1194,9 +1197,14 @@ def ingest_hls_security(out):
         "/a.m3u8": master("b.m3u8"),
         "/b.m3u8": master("a.m3u8"),
         "/huge.m3u8": media(["seg0.ts"], td=100000),
+        # M2 (round 12): 5 variantai po ~14 MiB libav segmentų sąmatos (4000 baitų rakto URI × 3500 segmentų; kiekvienas < 16 MiB
+        # grojaraščiui), kartu > 64 MiB sesijai — atmetama patikroje prieš libav
+        "/sess.m3u8": master(*[f"sv{k}.m3u8" for k in range(5)]),
+        **{f"/sv{k}.m3u8": ("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-KEY:METHOD=AES-128,URI=\"" + "k" * 4000 + "\"\n" +
+                            "#EXTINF:2.0,\ns.ts\n" * 3500).encode() for k in range(5)},
     })
     cases = (("file_variant", "neleidžiama"), ("file_segment", "neleidžiama"), ("key_file", "neleidžiama"), ("tcp_segment", "neleidžiama"),
-             ("a", "įdėtas master"), ("huge", "TARGETDURATION"))
+             ("a", "įdėtas master"), ("huge", "TARGETDURATION"), ("sess", "visiems grojaraščiams"))
     try:
         res += hls_toctou_case(out)
         res += hls_peek_case(out)

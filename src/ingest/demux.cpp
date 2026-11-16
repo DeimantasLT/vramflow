@@ -301,6 +301,7 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
     // kilpoje kraunasi grojaraščius be galo, o ankstesnė rekursija pripildydavo steką ir nužudydavo visą procesą)
     if (!check_playlist(base, pt, true, lim, err)) return false;
     double target = pt.target_s;
+    std::size_t seg_bytes = segment_bytes(base, pt);  // M2: visų sesijos grojaraščių libav segmentų sąmata
     if (pt.master) {
         std::vector<std::string> seen{url, base};
         for (const std::string& v : pt.variants) {
@@ -325,6 +326,11 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
                 return false;
             }
             if (!check_playlist(fv.location, pv, false, lim, err)) return false;
+            if ((seg_bytes += segment_bytes(fv.location, pv)) > lim.max_session_bytes) {
+                err = "libav segmentų sąmata visiems grojaraščiams " + std::to_string(seg_bytes >> 10) + " KiB > riba " +
+                      std::to_string(lim.max_session_bytes >> 10) + " KiB";
+                return false;
+            }
             target = std::max(target, pv.target_s);
         }
     }
@@ -378,9 +384,11 @@ bool Demux::open(const SourceSpec& s, const std::atomic<bool>& stop, std::int64_
     // 613-621), master variantai ir EXT-X-MEDIA grojaraščiai, išspręsti kaip libav (new_playlist → ff_make_absolute_url, hls.c:324)
     playlist_urls_.clear();
     init_bytes_ = 0;
+    seg_bytes_.clear();
     if (hls) {
         playlist_urls_ = {s.url, top_.location};
         init_bytes_ = init_section_bytes(top_.location, parse_playlist(top_.text));  // F: viršutinis — libav jį irgi analizuoja
+        seg_bytes_.emplace_back(top_.location, segment_bytes(top_.location, parse_playlist(top_.text)));  // M2
         std::string r, why;
         for (const std::string& v : parse_playlist(top_.text).variants)
             if (resolve_playlist_url(top_.location, v, r, why)) playlist_urls_.push_back(r);
@@ -717,6 +725,17 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     if ((init_bytes_ += init_section_bytes(f.location, pi)) > lim_.max_init_bytes)
         return refuse("EXT-X-MAP init sekcijų sąmata per sesiją " + std::to_string(init_bytes_ >> 10) + " KiB > riba " +
                       std::to_string(lim_.max_init_bytes >> 10) + " KiB (libav jų neatlaisvina iki sesijos pabaigos)");
+    // M2: libav segmentų sąrašas — kiekvieno grojaraščio paskutinio analizavimo (ankstesnis atlaisvinamas, hls.c n6.1:1010-1027);
+    // visų sesijos grojaraščių suma ≤ max_session_bytes
+    const std::size_t sb = segment_bytes(f.location, pi);
+    auto it = std::find_if(seg_bytes_.begin(), seg_bytes_.end(), [&](const auto& e) { return e.first == u; });
+    if (it == seg_bytes_.end()) seg_bytes_.emplace_back(u, sb);
+    else it->second = sb;
+    std::size_t total = 0;
+    for (const auto& e : seg_bytes_) total += e.second;
+    if (total > lim_.max_session_bytes)
+        return refuse("libav segmentų sąmata visiems grojaraščiams " + std::to_string(total >> 10) + " KiB > riba " +
+                      std::to_string(lim_.max_session_bytes >> 10) + " KiB");
     *pb = mem_playlist_io(f);
     return *pb ? 0 : AVERROR(ENOMEM);
 }
