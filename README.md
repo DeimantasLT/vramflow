@@ -372,6 +372,9 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 | `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
+| `--admission off\|warn\|enforce` | Admission control against the measured GPU capacity (see *Capacity and admission*). `warn` (default): a flow over capacity starts with a warning line; `enforce`: flows that do not fit are not started (exit code `5`); `off`: no check. Not applied to `verify` and `--impl cpu` |
+| `--capacity-file PATH` | Capacity file from `tests/perf/capacity_file.py`, or a directory with `capacity-<GPU UUID>.json`; default: the `VRAMFLOW_CAPACITY` environment variable |
+| `--admission-headroom H` | Limit = capacity × `H` for Mpix/s and VRAM, default `0.85`; NVENC sessions are a hard driver count and get no headroom |
 
 Options of the MXL video writers (`gen`, `logo`, `composite`, `dec`) — every index is committed (gap policy K3):
 
@@ -714,6 +717,36 @@ otherwise SKIP).
   3 s) and `mxl-gst-cuda-sink` exits when the flow is recreated — so commit every index.
 - `mxl-gst-testsrc` (a foreign writer, progressive only, no VRAMFlow tags) → `logo --input-expect-ms X` works.
 
+### Capacity and admission
+
+A GPU function knows how much the GPU can serve only from a measurement: `scripts/linux/70-capacity.sh` (or
+`tests/perf/capacity.py --n auto`) finds the knee per function, and `tests/perf/capacity_file.py <campaign dir>` writes
+`capacity-<GPU UUID>.json` (schema 1: NVDEC and NVENC Mpix/s with `bound`, the NVENC session count when the driver limit set
+the knee, measured VRAM per flow for each function, GPU UUID and driver version). With `--capacity-file` each process
+reserves what its flows need before it creates any output flow — demand in Mpix/s per engine (1080i50 / 1080p25 =
+51.84 Mpix/s per flow), NVENC sessions and VRAM bytes — in a ledger next to the domain (`<domain>.vramflow/*.adm`, one
+file per process held with `flock`, so a `kill -9` frees the reservation at once; read, decide and write run under one lock,
+so two processes cannot overbook). Flows are admitted in order: with `enforce` the first flow that does not fit and every
+flow after it are refused, their flows never appear in the domain, and the message names the engine and the numbers, e.g.
+`flow 4: atmestas — nvdec: prašoma 51,84, užimta 207,36, leidžiama 229,50 Mpix/s`. If none is admitted the process exits
+`5` at once; otherwise the admitted flows run and the process exits `5` at the end (the summary has `admission`: mode,
+requested, admitted, refused, notes).
+
+| Function | Checked |
+|---|---|
+| `ingest`, `dec` | NVDEC Mpix/s (not for `--decoder sw`) and VRAM: measured `functions.<ingest\|dec>.vram_per_flow_bytes` (+ the per-process offset), else an estimate (NV12 surfaces + v210 output ring) |
+| `enc --encoder nvenc` | NVENC Mpix/s, NVENC sessions (1 per flow) and VRAM if `functions.enc-nvenc-<tune>` has it |
+| `enc --encoder x264`, `gen`, `gfxgen`, `logo`, `composite` | VRAM only, if the capacity file has `functions.<tag>` (`enc-x264-<preset>`, `composite-k<K>`, …); otherwise not checked (one line says so) |
+
+- A capacity value with `bound: lower_bound` (the real capacity is larger) is still used as the limit, with a warning.
+- A file for another GPU (UUID differs) is not used. A different driver version is a warning with both versions; the
+  running version comes from NVML.
+- `enforce` without a usable capacity file exits `1` (`talpa neišmatuota, paleiskite 70-capacity …`); `warn` starts with one
+  warning line. `warn` is the default because most machines have no capacity file yet (plan question K13); switch to
+  `enforce` once the GPU has been measured.
+- Limits: the ledger only sees VRAMFlow processes in the same domain on the same GPU (not other GPU users, not other
+  domains); VRAM is checked against the total GPU memory × headroom, not against the free memory at start.
+
 ### Domain ownership
 
 Every `vramflow-func` process holds a lease file `<domain>.vramflow/<run-id>.lease` **next to** the domain folder (the
@@ -737,7 +770,7 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
 
 ### Exit code and summary
 
-Exit codes of the functions on the shared tick engine (`gen`, `logo`, `composite`, `enc`, `dec`). Strict — `--strict-exit on`,
+Exit codes of the functions on the shared tick engine (`gen`, `logo`, `composite`, `enc`, `dec`, `ingest`). Strict — `--strict-exit on`,
 or `auto` with `--duration S > 0` (test and measurement runs); lenient — `off`, or `auto` in service mode (`--duration 0`):
 
 | Situation | strict | lenient |
@@ -752,6 +785,8 @@ or `auto` with `--duration S > 0` (test and measurement runs); lenient — `off`
 | An input came back with another format (`--on-format-change exit`) | 6 | 6 |
 | Stopped while still waiting for inputs | 0 | 0 |
 | `ingest` only: a libavformat call is stuck (see *libavformat redirect-cache hang*); immediate exit, no summary | 7 | 7 |
+| Admission control (`--admission enforce`) refused flows: none admitted — at once; some admitted — they run, exit at the end (an error code above wins) | 5 | 5 |
+| `--admission enforce` without a usable capacity file | 1 | 1 |
 
 `verify` exits `3` on verification errors. In service mode losses are reported in the summary only: `any_loss` and
 `strict_exit` (top level) and the counters; failed units — `failed_units` (proc) and `unit_failed` (per flow). A second

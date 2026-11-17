@@ -173,6 +173,22 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
   naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
   video paketą, ne PCR — srautui su VBV vėlinimu ≥ `--latency-ms` latenciją reikia didinti.
+- **Talpa ir priėmimo kontrolė** (`--admission off | warn | enforce`, `--capacity-file`, `--admission-headroom`). Talpa —
+  tik išmatuota: `scripts/linux/70-capacity.sh` (arba `tests/perf/capacity.py --n auto`) randa kiekvienos funkcijos kelią, o
+  `tests/perf/capacity_file.py <kampanija>` įrašo `capacity-<GPU UUID>.json` (NVDEC / NVENC Mpix/s su `bound`, NVENC sesijų skaičius,
+  kai kelią nulėmė tvarkyklės riba, VRAM srautui kiekvienai funkcijai, GPU UUID ir tvarkyklė). Prieš kurdamas išėjimų flow'us
+  procesas rezervuoja savo srautų paklausą (Mpix/s varikliui — 1080i50 / 1080p25 = 51,84 srautui, NVENC sesijos, VRAM baitai)
+  knygoje šalia domeno (`<domenas>.vramflow/*.adm`, failas procesui su `flock` — po `kill -9` rezervacija dingsta iškart;
+  skaitymas, sprendimas ir įrašymas — po vienu užraktu, todėl du procesai talpos neperskirsto). Riba — talpa × 0,85 (NVENC
+  sesijoms — tikslus skaičius). Priimama iš eilės: `enforce` — pirmas netilpęs srautas ir visi po jo nepaleidžiami (jų flow'ų
+  domene nėra), pranešime variklis ir skaičiai (`flow 4: atmestas — nvdec: prašoma 51,84, užimta 207,36, leidžiama 229,50
+  Mpix/s`); nė vieno — exit `5` iškart, dalis — priimtieji veikia, pabaigoje exit `5`. Tikrinama: `ingest`, `dec` — NVDEC +
+  VRAM (išmatuotas arba įvertis); `enc` NVENC — NVENC Mpix/s + sesijos + VRAM (jei išmatuotas); `enc` x264, `gen`, `gfxgen`,
+  `logo`, `composite` — tik VRAM, jei talpos faile yra `functions.<žymė>`; `verify` ir `--impl cpu` — netaikoma. Numatyta `warn`
+  (dauguma mašinų talpos failo dar neturi; K13): be failo — viena įspėjimo eilutė, viršijus — įspėjimas; `enforce` be failo —
+  exit `1` („talpa neišmatuota, paleiskite 70-capacity“). Kita GPU (UUID) — failas nenaudojamas; kita tvarkyklė arba
+  `lower_bound` — įspėjimas. Riba: knyga mato tik VRAMFlow procesus tame pačiame domene ir GPU; VRAM lyginamas su visa GPU
+  atmintimi, ne su laisva.
 - **Sąveika su MXL įrankiais.** `mxl-info` skaito visus VRAMFlow flow'us; `mxl-gst-sink` / `mxl-gst-cuda-sink` rodo `gen` ir
   `logo` išėjimus ir per aukštupio pertrauką laiko paskutinį gerą vaizdą (`--on-loss invalid`).
 
@@ -188,6 +204,8 @@ Exit kodai (variklio funkcijos; griežtas — `--strict-exit on` arba `auto` su 
 | Įėjimai neatsirado per `--input-wait-ms` | 4 | 4 |
 | Įėjimas grįžo kitu formatu (`--on-format-change exit`) | 6 | 6 |
 | Tik `ingest`: libavformat kvietimas užstrigo (nukreipimų kešo kilpa); iškart, be santraukos | 7 | 7 |
+| Priėmimo kontrolė (`--admission enforce`) atmetė srautus: nė vieno nepriimta — iškart; dalis priimta — jie veikia, pabaigoje (aukštesnė klaida — viršesnė) | 5 | 5 |
+| `--admission enforce` be tinkamo talpos failo | 1 | 1 |
 
 `verify` — exit `3`, jei yra teisingumo klaidų.
 

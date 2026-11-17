@@ -1220,6 +1220,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in interop.TESTS.items()})
     import ingest  # tikras šaltinis su garsu (P3): ingest_av_offset, ingest_bursty_no_drift, ingest_hls, … (tests/functional/ingest.py)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in ingest.TESTS.items()})
+    import overload  # priėmimo kontrolė (P4): overload_enforce_synthetic, overload_no_capacity, overload_partial (tests/functional/overload.py)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in overload.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():
