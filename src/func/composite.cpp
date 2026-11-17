@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "common/index_math.hpp"
+#include "common/parse_num.hpp"
 #include "engine/engine.hpp"
 #include "engine/mxl_ports.hpp"
 #include "func/engine_glue.hpp"
@@ -63,8 +64,8 @@ using gfx::Raster;
 
 // Bendra su verify (--mode composite).
 bool parse_xy(const std::string& s, int& x, int& y) {
-    int n = 0;
-    return std::sscanf(s.c_str(), "%d,%d%n", &x, &y, &n) == 2 && static_cast<std::size_t>(n) == s.size();
+    std::string_view v = s;
+    return take_num(v, x) && take_char(v, ',') && take_num(v, y) && v.empty();
 }
 
 namespace {
@@ -343,10 +344,11 @@ struct CompositeFn final : engine::TickFunction {
                 f.inc("output_errors");
                 times.unit_done(ut.index, now_tai(), false);
                 break;
-            case engine::Outcome::GapNoContent: break;
-            case engine::Outcome::GapStartup: break;  // bazių laukiama prieš variklį (wait-all) — neturėtų būti
-            case engine::Outcome::GapUpstream: break;  // bazė — INVALID (aukštupio spraga): gap_upstream, ne praradimas
-            case engine::Outcome::GapAlign: break;     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
+            case engine::Outcome::GapNoContent:
+            case engine::Outcome::GapStartup:   // bazių laukiama prieš variklį (wait-all) — neturėtų būti
+            case engine::Outcome::GapUpstream:  // bazė — INVALID (aukštupio spraga): gap_upstream, ne praradimas
+            case engine::Outcome::GapAlign:     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
+                break;
             case engine::Outcome::GapLate:
                 if (inv) f.loss("in_invalid", ti);
                 else if (tl) f.loss("too_late", ti);

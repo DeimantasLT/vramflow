@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "runtime/domain_lease.hpp"
 
+#include "common/textf.hpp"
 #include "runtime/safe_files.hpp"
 
 #include <dirent.h>
@@ -99,9 +100,7 @@ std::string lease_dir(const std::string& domain) { return canonical_domain(domai
 
 std::string make_run_id(const std::string& role) {
     std::random_device rd;
-    char b[96];
-    std::snprintf(b, sizeof b, "%.40s-%d-%08x", role.c_str(), static_cast<int>(::getpid()), static_cast<unsigned>(rd()));
-    return b;
+    return strf("%.40s-%d-%08x", role.c_str(), static_cast<int>(::getpid()), static_cast<unsigned>(rd()));
 }
 
 bool valid_run_id(const std::string& id) {
@@ -164,7 +163,7 @@ bool DomainLease::acquire(const std::string& domain, const std::string& run_id, 
     // „Patikrinti seną → sukurti → paskelbti“ — po katalogo užraktu: negyvų nuomų šalintojai ir kiti kūrėjai laukia, todėl
     // niekas nepašalina ką tik paskelbtos nuomos ir du procesai negauna to paties run_id.
     const DirLock lock(ld, kLock);
-    if (!lock.ok()) return fail_dir("nuomos katalogas " + dir + ": užraktas " + kLock + " negautas (" + std::strerror(errno) + ")");
+    if (!lock.ok()) return fail_dir("nuomos katalogas " + dir + ": užraktas " + kLock + " negautas (" + errno_text(errno) + ")");
     if (probe(ld.fd, name, nullptr, true) == 1) return fail_dir("run_id " + run_id + " jau naudoja gyvas procesas (" + path + ")");
     // Laikinas failas užrakinamas PRIEŠ paskelbiant: live_owners niekada nemato paskelbto, bet neužrakinto failo.
     // Kuriamas O_EXCL | O_NOFOLLOW; pasenęs to paties vardo įrašas (ir simbolinė nuoroda) pašalinamas, taikinys neliečiamas.
@@ -174,18 +173,18 @@ bool DomainLease::acquire(const std::string& domain, const std::string& run_id, 
         ::unlinkat(ld.fd, tmp.c_str(), 0);
         fd = create_file_at(ld, tmp);
     }
-    if (fd < 0) return fail_dir("nuomos failas " + dir + "/" + tmp + ": " + std::strerror(errno));
+    if (fd < 0) return fail_dir("nuomos failas " + dir + "/" + tmp + ": " + errno_text(errno));
     auto fail = [&](const std::string& e) {
         ::close(fd);
         ::unlinkat(ld.fd, tmp.c_str(), 0);
         return fail_dir(e);
     };
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) return fail("flock " + dir + "/" + tmp + ": " + std::strerror(errno));
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) return fail("flock " + dir + "/" + tmp + ": " + errno_text(errno));
     if (!write_all(fd, "run_id=" + run_id + "\npid=" + std::to_string(::getpid()) + "\n"))
-        return fail("nuomos failo rašymas: " + std::string(std::strerror(errno)));
+        return fail("nuomos failo rašymas: " + errno_text(errno));
     if (::renameat2(ld.fd, tmp.c_str(), ld.fd, name.c_str(), RENAME_NOREPLACE) != 0)
         return fail(errno == EEXIST ? "run_id " + run_id + " jau naudojamas (" + path + ")"
-                                    : "nuomos paskelbimas: " + std::string(std::strerror(errno)));
+                                    : "nuomos paskelbimas: " + errno_text(errno));
     out.fd_ = fd;
     out.dir_ = ld;
     out.path_ = path;

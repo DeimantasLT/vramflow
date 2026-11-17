@@ -189,6 +189,52 @@ Konfigūracija — `.clang-tidy`, paleidimas — `scripts/linux/55-clang-tidy.sh
 
 Išjungti keturi tikrinimai — 204 radiniai iš 480. Kiekvieno priežastis parašyta `.clang-tidy` faile šalia.
 
-`cert-err33-c`: iš 152 radinių 67 — `fprintf(stderr, …)`, t. y. diagnostika, kurios rašymo klaidos nėra kam pranešti.
+`cert-err33-c`: iš 152 radinių 69 — `fprintf` ir `fputs` į stderr, t. y. diagnostika, kurios rašymo klaidos nėra kam pranešti.
 Todėl iš CERT funkcijų sąrašo pašalintos penkios išvedimo funkcijos (`fprintf`, `fputc`, `fputs`, `putc`, `vfprintf`): jų
 klaida lieka srauto būsenoje, o rašant į failą ji patikrinama uždarant — `fclose` ir `fflush` sąraše lieka.
+Tas pats principas `fflush`: periodinis CSV išrašymas ir `--stats-file` (skaitytuvas gali būti uždarytas) rezultato
+netikrina sąmoningai — tai pažymėta `(void)` ir komentaru.
+
+Su taisymais atsirado dar vienas radinys ir penktas išjungtas tikrinimas: `cert-dcl50-cpp` žymi naują `mxlv::strf` kaip
+C stiliaus kintamo argumentų skaičiaus funkciją. Ji tokia tyčia: su `[[gnu::format(printf, …)]]` kompiliatorius patikrina
+kiekvieno kvietimo formatą ir argumentus, o parametrų paketo variantas tos patikros netektų.
+
+### Taisymai
+
+Du nauji failai su vienetų testais (pirma krentantys, tada žali; kartu 91 tvirtinimas 14 atvejų):
+
+- `src/common/textf.hpp` — `strf` (printf formatas į `std::string` be nupjovimo), `close_checked` ir `write_file` (rašymo
+  klaida pastebima ir tada, kai ji paaiškėja tik uždarant), `read_file`, `close_read`, `errno_text` (gijoms saugus
+  `strerror` pakaitalas);
+- `src/common/parse_num.hpp` — `take_num`, `take_char` (griežtas skaičių skaitymas: perpildymas — klaida) ir
+  `parse_ref_crc`.
+
+| Grupė | Vietų | Kas padaryta |
+|---|---|---|
+| `snprintf` į fiksuotą buferį | 41 | → `strf`. Tikra rizika buvo trijose vietose: flow aprašas (2 048 B buferis su `%s` žymoms), variklio įvykio tekstas (160 B su klaidos tekstu — nupjovimas galėjo perkirsti UTF-8 simbolį), `vramflow-verify` flow santrauka (4 096 B) |
+| `fclose`, `fwrite`, `fflush` | 26 | santraukos ir diagnostikos failai rašomi per `write_file`, CSV uždaromi per `close_checked`; nesėkmė — eilutė į stderr (anksčiau — tyla) |
+| `strerror` | 19 | → `errno_text` |
+| priskyrimas `if` sąlygoje | 18 | `if ((e = f()) < 0)` → `if (e = f(); e < 0)` |
+| sveikasis → `double` | 23 | aiškūs `static_cast<double>` |
+| `atoi`, `sscanf`, `fscanf` | 9 | → `take_num` / `parse_ref_crc` |
+| `fread` ciklai | 7 | skaitymas sustoja po pirmo nepilno bloko (`read_file`); ciklų sąlygoje — pastovus dydis |
+| kita | 42 | `reserve` (8), aiškūs rodyklių keitimai (6), daugyba prieš platinimą (5), vienodos `switch` šakos (4), negyvi priskyrimai (4), `clock_gettime` / `signal` / `gmtime_r` rezultatai (4), apvalinimas `llround` (3), kita (8) |
+
+Sąmoningi elgsenos pokyčiai (visi — griežtesnė patikra arba matomesnė klaida):
+
+- `--layer-geom WxH` nebepriima teksto po skaičių (anksčiau „1920x1080abc“ tiko);
+- `--layer-xy`, `--layer-absent`, `--layer-either`: „+“ ar tarpas prieš skaičių ir netelpantis skaičius — klaida;
+- nepavykęs santraukos, CSV ar diagnostikos failo rašymas — eilutė į stderr;
+- išimtis, pasiekusi `main`, — exit 2 su pranešimu (anksčiau — `SIGABRT` be pranešimo);
+- `options.json` skaitymo klaida — numatytoji 200 ms istorija (anksčiau buvo naudojama perskaityta dalis).
+
+### Rezultatas
+
+| Paleidimas | Radinių |
+|---|---|
+| bazė | 480 |
+| po konfigūracijos ir pirmo taisymų paketo | 152 |
+| po visų taisymų | 5 |
+| galutinis | **0** (62 vertimo vienetai, 96 s, exit 0) |
+
+Build — 0 įspėjimų; po taisymų `ctest` 534 iš 534 (137 s), 89 funkciniai testai per pakeistą kodą — visi praėjo. `NOLINT` kode nėra nė vieno. Etapas pridėtas į `scripts/linux/run-all.sh` (`55-clang-tidy`).

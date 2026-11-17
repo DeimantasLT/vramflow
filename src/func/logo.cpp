@@ -263,10 +263,11 @@ struct LogoFn final : engine::TickFunction {
                 f.inc("output_errors");
                 times.unit_done(ut.index, now_tai(), false);
                 break;
-            case engine::Outcome::GapNoContent: break;
-            case engine::Outcome::GapStartup: break;  // įėjimas dar neprisijungė (--start immediate): ne praradimas (gap_startup)
-            case engine::Outcome::GapUpstream: break;  // įėjimas — INVALID (aukštupio spraga): gap_upstream, ne praradimas
-            case engine::Outcome::GapAlign: break;     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
+            case engine::Outcome::GapNoContent:
+            case engine::Outcome::GapStartup:   // įėjimas dar neprisijungė (--start immediate): ne praradimas (gap_startup)
+            case engine::Outcome::GapUpstream:  // įėjimas — INVALID (aukštupio spraga): gap_upstream, ne praradimas
+            case engine::Outcome::GapAlign:     // interlaced freeze / black: iki kadro ribos — gap_align, ne praradimas
+                break;
             case engine::Outcome::GapLate: {
                 // Spragos commit'o vėlavimas nuo T(i) (end_unit — iškart po commit'o; V20: riba B = T + D, D = 3·P/4)
                 const std::uint64_t us = (now_tai() - ti) / 1000;
@@ -360,6 +361,7 @@ int run_logo(const Opts& o_in) {
     // išėjimų flow aprašuose (urn:x-vramflow:tag:commit-bound-ns, content-delay-ns)
     engine::EngineConfig ecfg = engine_config(o, kLogoTiming, o.read_offset_us * 1000);
     std::vector<InEdge> edges;
+    edges.reserve(o.flows);
     for (std::uint32_t n = 0; n < o.flows; ++n) edges.push_back(in_edge(inst, flow_id(o.in_role, o.in_base() + n), o, 0));
     EdgePlan plan;
     if (!plan_edges(o, ecfg, edges, false, "logo", st, plan, err)) {
@@ -425,6 +427,7 @@ int run_logo(const Opts& o_in) {
     engine::TickEngine eng(ecfg, clk, hub, stop);
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
+    optr.reserve(ports_out.size());
     for (auto& p : ports_out) optr.push_back(&p);
     optr = output_ports(optr, o, faulty);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {

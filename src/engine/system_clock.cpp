@@ -13,7 +13,7 @@ std::uint64_t SystemClock::now_tai() const { return mxlGetTime(); }
 
 std::int64_t SystemClock::now_mono_raw() const {
     timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) ts = timespec{};  // Linux šiam laikrodžiui klaidos negrąžina
     return static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
 }
 

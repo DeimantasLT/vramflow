@@ -17,6 +17,7 @@
 #include <future>
 #include <thread>
 
+#include "common/textf.hpp"
 #include "func/engine_glue.hpp"
 #include "mxlio/common_io.hpp"
 #include "runtime/fail_text.hpp"
@@ -39,7 +40,8 @@ std::atomic<bool>& fast_stop_flag() {
 // ignoruojamas: uždarytas --stats-file skaitytuvas (FIFO, `| head`) ar UDP gavėjas — rašymo klaida, ne proceso mirtis.
 // Variklio gija signalų negauna (užblokuoti visose gijose).
 void install_signals() {
-    std::signal(SIGPIPE, SIG_IGN);
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        std::fprintf(stderr, "[vramflow] SIGPIPE ignoruoti nepavyko: %s\n", errno_text(errno).c_str());
     sigset_t set;
     sigemptyset(&set);
     sigaddset(&set, SIGINT);
@@ -195,10 +197,9 @@ bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const
 
 namespace {
 std::string hist_json(const Histogram& h) {
-    char b[256];
-    std::snprintf(b, sizeof b, "{\"count\":%" PRIu64 ",\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f,\"max_ms\":%.3f}", h.count(),
-                  h.quantile(0.5) / 1e6, h.quantile(0.99) / 1e6, h.quantile(0.999) / 1e6, h.max() / 1e6);
-    return b;
+    const auto ms = [](std::uint64_t ns) { return static_cast<double>(ns) / 1e6; };
+    return strf("{\"count\":%" PRIu64 ",\"p50_ms\":%.3f,\"p99_ms\":%.3f,\"p999_ms\":%.3f,\"max_ms\":%.3f}", h.count(),
+                ms(h.quantile(0.5)), ms(h.quantile(0.99)), ms(h.quantile(0.999)), ms(h.max()));
 }
 template <class Map>
 std::string map_json(const Map& m) {
@@ -291,11 +292,9 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
     if (!extra_json.empty()) j += "," + extra_json;
     j += "}";
     const std::string p = o.out + "/summary-" + role + ".json";
-    if (FILE* f = std::fopen(p.c_str(), "w")) {
-        std::fputs(j.c_str(), f);
-        std::fputc('\n', f);
-        std::fclose(f);
-    }
+    j += "\n";
+    if (!write_file(p, j.data(), j.size()))
+        std::fprintf(stderr, "[%s] santraukos %s įrašyti nepavyko: %s\n", role.c_str(), p.c_str(), errno_text(errno).c_str());
 }
 
 }  // namespace mxlv::func

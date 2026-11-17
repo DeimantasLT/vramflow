@@ -37,6 +37,7 @@ extern "C" {
 #include <thread>
 #include <vector>
 
+#include "common/textf.hpp"
 #include "engine/engine.hpp"
 #include "engine/mxl_ports.hpp"
 #include "func/engine_glue.hpp"
@@ -203,9 +204,8 @@ void on_relock(Source& s) {
     if (ri.seq == s.relock_seen) return;  // epochą pradėjęs garsas — tik video tinklelio nustatymas, ne perfiksavimas
     s.relock_seen = ri.seq;
     ++s.relock_events;
-    char b[96];
-    std::snprintf(b, sizeof b, "%+.1f ms", static_cast<double>(ri.step_ns) / 1e6);
-    std::string what = s.name + ": perfiksavimas — " + timing::relock_reason_name(ri.reason) + ", poslinkis " + b;
+    std::string what = s.name + ": perfiksavimas — " + timing::relock_reason_name(ri.reason) + ", poslinkis " +
+                       strf("%+.1f ms", static_cast<double>(ri.step_ns) / 1e6);
     // M2: sandūros trūkis / persidengimas ≤ 20 ms (= AudioSync hard_samples, vienas 50 Hz garso blokas) sugeriamas vietoje: video —
     // ≤ 1 kadras (frame sync: pakartojimas / slip_drop), garsas — pririšamas prie naujos ašies (žymė resync, 5 ms perėjimas).
     // Anksčiau nuo Tf/2 viskas buvo išmetama ir likdavo ~latencijos tyla, o garsas dar ir nebūdavo perinkaruojamas (≤ 20 ms —
@@ -969,9 +969,8 @@ int run_ingest(const Opts& o_in) {
             st.fatal = "CUDA įrenginys";
             return finish(2);
         }
-        char ord[8];
-        std::snprintf(ord, sizeof ord, "%d", dev);
-        if (const int e = av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, ord, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT); e < 0) {
+        if (const int e = av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, std::to_string(dev).c_str(), nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
+            e < 0) {
             st.fatal = "hwdevice: " + ig::averr(e);
             return finish(2);
         }
@@ -1084,6 +1083,7 @@ int run_ingest(const Opts& o_in) {
     };
     {
         std::vector<std::thread> pt;
+        pt.reserve(N);
         for (std::size_t k = 0; k < N; ++k) pt.emplace_back(probe, k);
         for (auto& t : pt) t.join();
     }

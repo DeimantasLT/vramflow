@@ -110,9 +110,7 @@ void writers(CLI::App* c, Opts& o) {
         ->check(CLI::IsMember({"invalid", "freeze", "black", "leave"}));  // leave — tik testams (nieko necommit'inti)
     c->add_option("--hold-ms", o.hold_ms, "freeze: kiek ms kartoti paskutinį gerą grain'ą (numatyta 1000)")->check(CLI::Range(0u, 3600000u));
 }
-}  // namespace
-
-int main(int argc, char** argv) {
+int func_main(int argc, char** argv) {
     install_signals();
     CLI::App app{"vramflow-func — GPU media funkcijos ant MXL"};
     app.require_subcommand(1);
@@ -338,6 +336,7 @@ int main(int argc, char** argv) {
             std::string tag;
             std::vector<mxlv::runtime::Demand> dem = admission_demand(o, sub, tag);
             std::vector<std::string> names;
+            names.reserve(o.flows);
             for (std::uint32_t n = 0; n < o.flows; ++n) names.push_back("flow " + std::to_string(o.flow_base + n));
             const std::size_t m = admission_admit(tag, std::move(dem), names);
             if (m == 0) {
@@ -361,4 +360,18 @@ int main(int argc, char** argv) {
     if (app.got_subcommand("dec")) return run_dec(o);
     if (app.got_subcommand("ingest")) return run_ingest(o);
     return 1;
+}
+}  // namespace
+
+// Išimtis, pasiekusi main, baigtų procesą per std::terminate (SIGABRT, exit 134): be pranešimo ir be sutarto exit kodo.
+// Čia ji paverčiama į exit 2 (paleidimo / vykdymo klaida) su priežastimi stderr.
+int main(int argc, char** argv) {
+    try {
+        return func_main(argc, argv);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[vramflow-func] neapdorota išimtis: %s\n", e.what());
+    } catch (...) {
+        std::fprintf(stderr, "[vramflow-func] neapdorota išimtis (ne std::exception)\n");
+    }
+    return 2;
 }

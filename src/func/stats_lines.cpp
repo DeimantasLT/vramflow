@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "common/textf.hpp"
 #include "func/func_common.hpp"
 #include "mxlio/common_io.hpp"
 
@@ -29,14 +30,10 @@ using FnShutdown = nvmlReturn_t (*)();
 using FnDriver = nvmlReturn_t (*)(char*, unsigned int);
 
 void ms(std::string& j, const char* k, std::uint64_t ns, bool comma = true) {
-    char b[64];
-    std::snprintf(b, sizeof b, "%s\"%s\":%.3f", comma ? "," : "", k, static_cast<double>(ns) / 1e6);
-    j += b;
+    j += strf("%s\"%s\":%.3f", comma ? "," : "", k, static_cast<double>(ns) / 1e6);
 }
 void num(std::string& j, const char* k, std::uint64_t v, bool comma = true) {
-    char b[64];
-    std::snprintf(b, sizeof b, "%s\"%s\":%" PRIu64, comma ? "," : "", k, v);
-    j += b;
+    j += strf("%s\"%s\":%" PRIu64, comma ? "," : "", k, v);
 }
 void str(std::string& j, const char* k, const std::string& v, bool comma = true) {
     if (comma) j += ",";
@@ -55,11 +52,10 @@ std::string utc_of_tai(std::uint64_t tai_ns) {
     const std::uint64_t utc = tai_ns > kTaiUtcNs ? tai_ns - kTaiUtcNs : 0;
     const auto sec = static_cast<std::time_t>(utc / 1'000'000'000ull);
     std::tm tm{};
-    gmtime_r(&sec, &tm);
+    if (gmtime_r(&sec, &tm) == nullptr) tm = std::tm{};  // metai už std::tm ribų — tik teoriškai (TAI ns telpa)
     char b[48];
     const std::size_t n = std::strftime(b, sizeof b, "%Y-%m-%dT%H:%M:%S", &tm);
-    std::snprintf(b + n, sizeof b - n, ".%03uZ", static_cast<unsigned>((utc / 1'000'000ull) % 1000));
-    return b;
+    return std::string(b, n) + strf(".%03uZ", static_cast<unsigned>((utc / 1'000'000ull) % 1000));
 }
 
 void log_line(const char* role, const std::string& text) {
@@ -148,14 +144,14 @@ StatsLines::StatsLines(const Opts& o, std::string role)
     } else if (!o.stats_file.empty()) {
         f_ = std::fopen(o.stats_file.c_str(), "a");
         own_ = f_ != nullptr;
-        if (!f_) log_line(role_.c_str(), "--stats-file " + o.stats_file + ": nepavyko atidaryti (" + std::strerror(errno) + ")");
+        if (!f_) log_line(role_.c_str(), "--stats-file " + o.stats_file + ": nepavyko atidaryti (" + errno_text(errno) + ")");
     }
     gpu_wanted_ = f_ != nullptr;
     buf_.reserve(1 << 16);
 }
 
 StatsLines::~StatsLines() {
-    if (own_) std::fclose(f_);
+    if (own_) (void)std::fclose(f_);  // skaitytuvo (FIFO) gali nebebūti — klaidos nėra kam pranešti
 }
 
 void StatsLines::event(const engine::Event& e, const engine::StatsNames& n) {
@@ -196,7 +192,7 @@ void StatsLines::event(const engine::Event& e, const engine::StatsNames& n) {
     str(j, "text", e.text);
     j += "}\n";
     std::fputs(j.c_str(), f_);
-    std::fflush(f_);
+    (void)std::fflush(f_);  // --stats-file skaitytuvas gali būti uždarytas: rašymo klaida — ne proceso mirtis
 }
 
 void StatsLines::publish(const engine::Snapshot& s) {
@@ -215,9 +211,7 @@ void StatsLines::publish(const engine::Snapshot& s) {
     str(j, "role", role_);
     str(j, "run", run_id_);
     {
-        char b[64];
-        std::snprintf(b, sizeof b, ",\"interval_s\":%.3f", static_cast<double>(s.t_end_tai - s.t_begin_tai) / 1e9);
-        j += b;
+        j += strf(",\"interval_s\":%.3f", static_cast<double>(s.t_end_tai - s.t_begin_tai) / 1e9);
     }
     str(j, "state", engine::to_string(s.health));
     num(j, "dropped_lines", s.dropped_lines);
@@ -345,7 +339,7 @@ void StatsLines::publish(const engine::Snapshot& s) {
     }
     j += "}\n";
     std::fputs(j.c_str(), f_);
-    std::fflush(f_);
+    (void)std::fflush(f_);  // --stats-file skaitytuvas gali būti uždarytas: rašymo klaida — ne proceso mirtis
     lines_.fetch_add(1, std::memory_order_release);
 }
 

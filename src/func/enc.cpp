@@ -36,6 +36,7 @@ extern "C" {
 #include "func/func_common.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
+#include "common/textf.hpp"
 #include "mxlio/common_io.hpp"
 #include "runtime/fail_text.hpp"
 #include "runtime/input_slot.hpp"
@@ -245,15 +246,14 @@ void worker(Ctx& cx, Stream& s) {
         av_channel_layout_default(&ac->ch_layout, 2);
         ac->bit_rate = o.abitrate;
         ac->time_base = {1, 48000};
-        if ((e = avcodec_open2(ac, acodec, nullptr)) < 0) { fail("aac avcodec_open2: " + averr(e)); goto out; }
+        if (e = avcodec_open2(ac, acodec, nullptr); e < 0) { fail("aac avcodec_open2: " + averr(e)); goto out; }
         fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, 2, 48000);
         s.audio_tl = mxlv::timing::AudioTimeline(ac->frame_size, kMaxSilenceSamples);
     }
     // --- mux
     {
-        char url[256];
-        std::snprintf(url, sizeof url, "udp://127.0.0.1:%d?pkt_size=1316&buffer_size=4194304", o.port_base + s.n);
-        if ((e = avformat_alloc_output_context2(&oc, nullptr, "mpegts", url)) < 0) { fail("mux alloc: " + averr(e)); goto out; }
+        const std::string url = strf("udp://127.0.0.1:%d?pkt_size=1316&buffer_size=4194304", o.port_base + s.n);
+        if (e = avformat_alloc_output_context2(&oc, nullptr, "mpegts", url.c_str()); e < 0) { fail("mux alloc: " + averr(e)); goto out; }
         AVStream* vs = avformat_new_stream(oc, nullptr);
         avcodec_parameters_from_context(vs->codecpar, vc);
         vs->time_base = {1, 90000};
@@ -262,7 +262,7 @@ void worker(Ctx& cx, Stream& s) {
             avcodec_parameters_from_context(as->codecpar, ac);
             as->time_base = {1, 90000};
         }
-        if ((e = avio_open2(&oc->pb, url, AVIO_FLAG_WRITE, nullptr, nullptr)) < 0) { fail("avio_open2: " + averr(e)); goto out; }
+        if (e = avio_open2(&oc->pb, url.c_str(), AVIO_FLAG_WRITE, nullptr, nullptr); e < 0) { fail("avio_open2: " + averr(e)); goto out; }
         AVDictionary* md = nullptr;
         av_dict_set_int(&md, "muxrate", o.muxrate, 0);
         av_dict_set(&md, "pcr_period", "20", 0);
@@ -270,7 +270,7 @@ void worker(Ctx& cx, Stream& s) {
         // PTS = TAI·90 kHz (iš MXL indekso). Be copyts muxer'is prideda max_delay prie PTS/DTS.
         av_dict_set(&md, "mpegts_copyts", "1", 0);
         oc->max_delay = 500000;
-        if ((e = avformat_write_header(oc, &md)) < 0) { fail("write_header: " + averr(e)); av_dict_free(&md); goto out; }
+        if (e = avformat_write_header(oc, &md); e < 0) { fail("write_header: " + averr(e)); av_dict_free(&md); goto out; }
         av_dict_free(&md);
     }
     // --- ciklas
@@ -295,7 +295,7 @@ void worker(Ctx& cx, Stream& s) {
             av_frame_free(&it.video);
             if (e < 0) ++s.encode_errors;
             else {
-                while ((e = avcodec_receive_packet(vc, pkt)) == 0) {
+                while (avcodec_receive_packet(vc, pkt) == 0) {
                     ++s.packets_video;
                     s.bytes_video += pkt->size;
                     pkt->stream_index = 0;
@@ -391,14 +391,12 @@ int run_enc(const Opts& o) {
         std::string extra = "\"encoder\":\"" + o.encoder + "\",\"preset\":\"" + (nvenc ? o.preset + "/" + o.tune : o.x264_preset) + "\",\"streams\":[";
         for (std::size_t k = 0; k < streams.size(); ++k) {
             const Stream& s = *streams[k];
-            char b[512];
-            std::snprintf(b, sizeof b,
-                          "%s{\"frames_encoded\":%llu,\"packets_video\":%llu,\"packets_audio\":%llu,\"bytes_video\":%llu,"
+            extra += strf("%s{\"frames_encoded\":%llu,\"packets_video\":%llu,\"packets_audio\":%llu,\"bytes_video\":%llu,"
                           "\"mux_errors\":%llu,\"encode_errors\":%llu,\"encode_p50_ms\":%.3f,\"encode_p99_ms\":%.3f,\"error\":",
                           k ? "," : "", (unsigned long long)s.frames_encoded, (unsigned long long)s.packets_video,
                           (unsigned long long)s.packets_audio, (unsigned long long)s.bytes_video, (unsigned long long)s.mux_errors,
-                          (unsigned long long)s.encode_errors, s.encode_ms.quantile(0.5) / 1e6, s.encode_ms.quantile(0.99) / 1e6);
-            extra += b;
+                          (unsigned long long)s.encode_errors, static_cast<double>(s.encode_ms.quantile(0.5)) / 1e6,
+                          static_cast<double>(s.encode_ms.quantile(0.99)) / 1e6);
             // klaidos tekstas — bet kokio ilgio ir su bet kokiais simboliais (libav žurnalo eilutė): ne per fiksuotą buferį
             mxlv::json_escape_into(extra, s.error);
             extra += "}";
@@ -417,9 +415,8 @@ int run_enc(const Opts& o) {
     if (!cpu) {
         const int dev = cuda_device(o.device_uuid);
         if (dev < 0) { st.fatal = "CUDA įrenginys"; return finish(2); }
-        char ord[8];
-        std::snprintf(ord, sizeof ord, "%d", dev);
-        if (int e = av_hwdevice_ctx_create(&cx.hw, AV_HWDEVICE_TYPE_CUDA, ord, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT); e < 0) {
+        if (int e = av_hwdevice_ctx_create(&cx.hw, AV_HWDEVICE_TYPE_CUDA, std::to_string(dev).c_str(), nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
+            e < 0) {
             st.fatal = "av_hwdevice_ctx_create: " + averr(e);
             return finish(2);
         }
@@ -756,8 +753,8 @@ int run_enc(const Opts& o) {
                 case engine::Outcome::GapClock: fs.inc("clock_skips_frames"); audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::Skipped: st.proc["clock_backward"]++; audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::OutputError: fs.inc("output_errors"); audio_of_dropped(n, ut.index); return;  // sink: neturėtų būti
-                case engine::Outcome::GapNoContent: audio_of_dropped(n, ut.index); return;
-                case engine::Outcome::GapStartup: audio_of_dropped(n, ut.index); return;  // enc laukia įėjimų prieš variklį
+                case engine::Outcome::GapNoContent:
+                case engine::Outcome::GapStartup:   // enc laukia įėjimų prieš variklį
                 case engine::Outcome::GapUpstream:  // video — INVALID (aukštupio spraga): gap_upstream_frames, ne praradimas
                 case engine::Outcome::GapAlign: audio_of_dropped(n, ut.index); return;
                 case engine::Outcome::GapLate:

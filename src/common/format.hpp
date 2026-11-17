@@ -13,6 +13,8 @@
 #include <cstdlib>
 #include <string>
 
+#include "common/parse_num.hpp"
+#include "common/textf.hpp"
 #include "gfx/raster.hpp"
 #include "timing/index.hpp"
 
@@ -134,7 +136,8 @@ inline bool parse_format(const std::string& s, VideoFormat& out, std::string& er
     if (k == 0 || k >= s.size() || k > 4) return bad("tikimasi <aukštis><i|p><dažnis>");
     const char scan = s[k];
     if (scan != 'i' && scan != 'p') return bad("skenavimas turi būti i arba p");
-    const int h = std::atoi(s.substr(0, k).c_str());
+    int h = 0;
+    if (std::string_view digits(s.data(), k); !mxlv::take_num(digits, h)) return bad("tikimasi <aukštis><i|p><dažnis>");
     const std::string rate = s.substr(k + 1);
     const detail_fmt::Size* size = nullptr;
     for (const auto& z : detail_fmt::kSizes)
@@ -197,20 +200,17 @@ inline bool format_from_flow_def(const std::string& json, VideoFormat& out, std:
 inline std::string video_flow_def(const std::string& id, const std::string& label, const VideoFormat& f, const std::string& group_hint,
                                   const std::string& extra_tags = {}) {
     const gfx::Raster& r = f.raster;
-    char b[2048];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"%s","label":"%s",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["%s"]%s},)"
-                  R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
-                  R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
-                  R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
-                  R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
-                  id.c_str(), label.c_str(), label.c_str(), group_hint.c_str(), extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210",
-                  static_cast<long long>(f.frame_rate.num), static_cast<long long>(f.frame_rate.den), r.w, r.h,
-                  r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
-    return b;
+    return mxlv::strf(R"({"id":"%s","description":"%s","label":"%s",)"
+                R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["%s"]%s},)"
+                R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
+                R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
+                R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
+                R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
+                R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
+                R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
+                id.c_str(), label.c_str(), label.c_str(), group_hint.c_str(), extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210",
+                static_cast<long long>(f.frame_rate.num), static_cast<long long>(f.frame_rate.den), r.w, r.h,
+                r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
 }
 
 }  // namespace vramflow

@@ -30,6 +30,8 @@
 
 #include "common/crc32c.hpp"
 #include "common/index_math.hpp"
+#include "common/parse_num.hpp"
+#include "common/textf.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
 #include "media/media_ref.hpp"
@@ -136,23 +138,20 @@ int verify_ingest(const Opts& o, Stats& st, std::string& extra) {
     // etalonas: barkodas → CRC32C (programinis dekoderis + nepriklausomas split)
     std::map<std::uint32_t, std::uint32_t> ref_crc;
     if (!o.ref_crc.empty()) {
-        FILE* f = std::fopen(o.ref_crc.c_str(), "r");
-        if (!f) {
+        std::string text;
+        if (!read_file(o.ref_crc, text)) {
             st.fatal = "nėra --ref failo";
             mxlDestroyInstance(inst);
             return 1;
         }
-        unsigned mk = 0, crc = 0;
-        int ch = 0;
-        while ((ch = std::fgetc(f)) != EOF)
-            if (ch == '[' && std::fscanf(f, "%u,%u]", &mk, &crc) == 2) ref_crc[mk] = crc;
-        std::fclose(f);
+        ref_crc = parse_ref_crc(text);
     }
     std::vector<runtime::InputSlot> vin;
     std::vector<AudioIn> ain(o.audio ? N : 0);
     vin.reserve(N);
     for (std::uint32_t n = 0; n < N && o.video; ++n) vin.push_back(make_input(o, flow_id(kRoleIngest, o.flow_base + n), nullptr));
     std::vector<runtime::InputSlot*> all;
+    all.reserve(vin.size());
     for (auto& s : vin) all.push_back(&s);
     auto release_all = [&] {
         for (auto* s : all) s->release();
@@ -191,7 +190,7 @@ int verify_ingest(const Opts& o, Stats& st, std::string& extra) {
     std::vector<float> l(cap), r(cap);
     std::vector<FlowScan> fs(N);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / static_cast<double>(rate.denominator));
     const std::uint64_t i0 = i;
     while (!stop.load() && now_tai() < end_tai) {
         wait_until(rate, i + lag, 0, stop);
@@ -259,9 +258,7 @@ int verify_ingest(const Opts& o, Stats& st, std::string& extra) {
                             }
                             if (fok && !o.dump_dir.empty() && sc.dumped < o.dump_count) {
                                 const std::string path = o.dump_dir + "/ingest_" + std::to_string(n) + "_m" + std::to_string(m) + ".v210";
-                                if (FILE* df = std::fopen(path.c_str(), "wb")) {
-                                    std::fwrite(full.data(), 4, gwords, df);
-                                    std::fclose(df);
+                                if (write_file(path, full.data(), gwords * 4)) {
                                     ++sc.dumped;
                                     f.inc("dumped");
                                 }

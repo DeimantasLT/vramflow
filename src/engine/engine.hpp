@@ -77,7 +77,7 @@ public:
     Clock& clock();
     Index index() const;
     void no_content(std::uint32_t unit);                  // šaltinis: šiam indeksui turinio nėra → K3
-    void fail_unit(std::uint32_t unit, std::string why);  // K17: vienetas sustabdomas, kiti tęsia
+    void fail_unit(std::uint32_t unit, const std::string& why);  // K17: vienetas sustabdomas, kiti tęsia
     void fatal(int exit_code, std::string why);
     void count(std::uint32_t unit, CounterId id, std::uint64_t n = 1);
     void hist(HistId id, std::uint64_t ns);

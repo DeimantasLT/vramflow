@@ -281,6 +281,7 @@ int run_gen(const Opts& o) {
     });
     std::vector<FaultyOutput> faulty;
     std::vector<engine::OutputPort*> optr;
+    optr.reserve(ports.size());
     for (auto& p : ports) optr.push_back(&p);
     optr = output_ports(optr, o, faulty);
     engine::SystemClock clk;

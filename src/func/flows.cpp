@@ -11,21 +11,19 @@
 #include <cstring>
 #include <thread>
 
+#include "common/textf.hpp"
 #include "media/v210.hpp"
 #include "mxlio/slots.hpp"
 
 namespace mxlv::func {
 
 std::string flow_id(int role, std::uint32_t n) {
-    char b[64];
-    std::snprintf(b, sizeof b, "4d584c47-00%02d-4000-8000-%012x", role, n);
-    return b;
+    return strf("4d584c47-00%02d-4000-8000-%012x", role, n);
 }
 
 std::string video_def(int role, std::uint32_t n, std::uint64_t run_seed, const vramflow::VideoFormat& f, const std::string& extra_tags) {
-    char label[128], hint[160];
-    std::snprintf(label, sizeof label, "vramflow-func %d/%u", role, n);
-    std::snprintf(hint, sizeof hint, "vramflow-func-%016llx-%d:Video %u", static_cast<unsigned long long>(run_seed), role, n);
+    const std::string label = strf("vramflow-func %d/%u", role, n);
+    const std::string hint = strf("vramflow-func-%016llx-%d:Video %u", static_cast<unsigned long long>(run_seed), role, n);
     vramflow::VideoFormat v = f;
     v.raster.alpha = false;
     return vramflow::video_flow_def(flow_id(role, n), label, v, hint, extra_tags);
@@ -36,20 +34,17 @@ namespace {
 std::string raster_flow_def(const std::string& id, const char* what, std::uint32_t n, std::uint32_t k, int role,
                             const vramflow::gfx::Raster& r, vramflow::Rational rate, std::uint64_t run_seed,
                             const std::string& extra_tags = {}) {
-    char b[2048];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"vramflow-func %s %u/%u","label":"vramflow-func %s %u/%u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:%s %u/%u"]%s},)"
-                  R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
-                  R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
-                  R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
-                  R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
-                  R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
-                  id.c_str(), what, n, k, what, n, k, static_cast<unsigned long long>(run_seed), role,
-                  what[0] == 'g' ? "Gfx" : "Comp", n, k, extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210", static_cast<long long>(rate.num), static_cast<long long>(rate.den), r.w, r.h,
-                  r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
-    return b;
+    return strf(R"({"id":"%s","description":"vramflow-func %s %u/%u","label":"vramflow-func %s %u/%u",)"
+                R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:%s %u/%u"]%s},)"
+                R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"%s",)"
+                R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%d,"frame_height":%d,)"
+                R"("interlace_mode":"%s","colorspace":"BT709","components":[)"
+                R"({"name":"Y","width":%d,"height":%d,"bit_depth":10},)"
+                R"({"name":"Cb","width":%d,"height":%d,"bit_depth":10},)"
+                R"({"name":"Cr","width":%d,"height":%d,"bit_depth":10}]})",
+                id.c_str(), what, n, k, what, n, k, static_cast<unsigned long long>(run_seed), role,
+                what[0] == 'g' ? "Gfx" : "Comp", n, k, extra_tags.c_str(), r.alpha ? "video/v210a" : "video/v210", static_cast<long long>(rate.num), static_cast<long long>(rate.den), r.w, r.h,
+                r.interlaced ? "interlaced_tff" : "progressive", r.w, r.h, r.w / 2, r.h, r.w / 2, r.h);
 }
 // Seni kvietėjai: interlaced 25/1 (grain'ų ritmas 50/1), progresyvus 50/1.
 constexpr vramflow::Rational legacy_rate(const vramflow::gfx::Raster& r) { return {r.interlaced ? 25 : 50, 1}; }
@@ -72,26 +67,20 @@ std::string comp_def(std::uint32_t n, const vramflow::VideoFormat& f, std::uint6
 }
 
 std::string audio_def(std::uint32_t n, std::uint64_t run_seed, const std::string& extra_tags) {
-    char b[1024];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"vramflow-func audio %u","label":"vramflow-func audio %u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-1:Audio %u"]%s},)"
-                  R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
-                  R"("channel_count":2,"bit_depth":32,"parents":[]})",
-                  flow_id(kRoleAudio, n).c_str(), n, n, static_cast<unsigned long long>(run_seed), n, extra_tags.c_str());
-    return b;
+    return strf(R"({"id":"%s","description":"vramflow-func audio %u","label":"vramflow-func audio %u",)"
+                R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-1:Audio %u"]%s},)"
+                R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
+                R"("channel_count":2,"bit_depth":32,"parents":[]})",
+                flow_id(kRoleAudio, n).c_str(), n, n, static_cast<unsigned long long>(run_seed), n, extra_tags.c_str());
 }
 
 std::string ingest_audio_def(std::uint32_t n, std::uint64_t run_seed, int channels, const std::string& extra_tags) {
-    char b[1024];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"vramflow-func ingest audio %u","label":"vramflow-func %d/%u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:Audio %u"]%s},)"
-                  R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
-                  R"("channel_count":%d,"bit_depth":32,"parents":[]})",
-                  flow_id(kRoleIngestAudio, n).c_str(), n, kRoleIngestAudio, n, static_cast<unsigned long long>(run_seed), kRoleIngest, n,
-                  extra_tags.c_str(), channels);
-    return b;
+    return strf(R"({"id":"%s","description":"vramflow-func ingest audio %u","label":"vramflow-func %d/%u",)"
+                R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-func-%016llx-%d:Audio %u"]%s},)"
+                R"("format":"urn:x-nmos:format:audio","media_type":"audio/float32","sample_rate":{"numerator":48000},)"
+                R"("channel_count":%d,"bit_depth":32,"parents":[]})",
+                flow_id(kRoleIngestAudio, n).c_str(), n, kRoleIngestAudio, n, static_cast<unsigned long long>(run_seed), kRoleIngest, n,
+                extra_tags.c_str(), channels);
 }
 
 std::uint64_t now_tai() { return mxlGetTime(); }
@@ -100,8 +89,8 @@ bool ClockWatch::stepped() {
     // Lyginam su CLOCK_MONOTONIC_RAW: steady_clock (CLOCK_MONOTONIC) slew'inamas kartu su realtime, todėl jo atžvilgiu
     // slew'o nesimato (išmatuota: chrony vijosi +4,4 % — steady_clock jo „nematė").
     timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-    const std::int64_t raw = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000ll + ts.tv_nsec;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) ts = timespec{};  // Linux šiam laikrodžiui klaidos negrąžina
+    const std::int64_t raw = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
     const std::int64_t off = static_cast<std::int64_t>(now_tai()) - raw;
     const bool step = last != INT64_MIN && (off - last > 5'000'000 || last - off > 5'000'000);
     if (step && off < last) back_ns += static_cast<std::uint64_t>(last - off);
@@ -182,10 +171,10 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
     }
     if (!created) { existed = true; err = "flow jau egzistavo (created=false)"; return false; }
     if (const std::string bad = check_rate(cfg.common.grainRate, f); !bad.empty()) { err = bad; return false; }
-    if ((st = mxlFlowWriterGetStorageLayout(w, &layout)) != MXL_STATUS_OK) { err = "GetStorageLayout " + std::to_string(st); return false; }
+    if (st = mxlFlowWriterGetStorageLayout(w, &layout); st != MXL_STATUS_OK) { err = "GetStorageLayout " + std::to_string(st); return false; }
     slots.assign(layout.slotCount, mxlGrainStorage{});
     black_slot.assign(layout.slotCount, 0);  // naujas flow'as — nė vienas slot'as dar nelaiko juodo
-    if ((st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data())) != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
+    if (st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data()); st != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
     mxlFlowWriterGetStorageLayout(w, &layout);
     if (const std::string bad = check_layout(layout, r); !bad.empty()) { err = "lauko " + bad; return false; }
     // MXL cuda-linear įskiepis naują žiedą nulina asinchroniškai — cudaMemset numatytajame sraute — ir pabaigos nelaukia

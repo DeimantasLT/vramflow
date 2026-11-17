@@ -19,6 +19,7 @@
 #include <sstream>
 #include <string>
 
+#include "common/textf.hpp"
 #include "runtime/domain_lease.hpp"
 #include "runtime/safe_files.hpp"
 
@@ -118,7 +119,8 @@ private:
                 std::string k;
                 if (!string(k)) return false;
                 ws();
-                if (p_ >= s_.size() || s_[p_++] != ':') return false;
+                if (p_ >= s_.size() || s_[p_] != ':') return false;
+                ++p_;
                 if (v.get(k)) return false;  // pasikartojantis raktas — netinkamas talpos failas
                 v.keys.push_back(std::move(k));
                 v.arr.emplace_back();
@@ -182,9 +184,7 @@ std::string upper_uuid(std::string u) {
 }
 
 std::string fmt2(double v) {  // „829,44“ — lietuviškas dešimtainis kablelis (pranešimai operatoriui)
-    char b[64];
-    std::snprintf(b, sizeof b, "%.2f", v);
-    std::string s = b;
+    std::string s = strf("%.2f", v);
     for (char& c : s)
         if (c == '.') c = ',';
     return s;
@@ -276,9 +276,7 @@ bool parse_capacity(const std::string& json, Capacity& out, std::string& err) {
     auto whole = [&](const JVal* v, const std::string& k, double max, double& o, bool null_ok) {
         if (!num(v, k, o, null_ok)) return false;
         if (o > max || o != std::floor(o)) {
-            char b[64];
-            std::snprintf(b, sizeof b, "%.0f", max);
-            err = "talpos failo laukas " + k + " — ne sveikasis skaičius 0…" + b;
+            err = "talpos failo laukas " + k + " — ne sveikasis skaičius 0…" + strf("%.0f", max);
             return false;
         }
         return true;
@@ -504,7 +502,7 @@ bool Ledger::open(const std::string& domain, const std::string& device_uuid, Led
         return false;
     };
     const DirLock lock(ld, kAdmLock);
-    if (!lock.ok()) return fail("priėmimo knyga: " + dir + "/" + kAdmLock + ": " + std::strerror(errno));
+    if (!lock.ok()) return fail("priėmimo knyga: " + dir + "/" + kAdmLock + ": " + errno_text(errno));
     // Failas sukuriamas ir užrakinamas po bendru užraktu: kitas skaitytojas (irgi po juo) niekada nemato neužrakinto failo
     std::string name;
     int fd = -1;
@@ -513,9 +511,9 @@ bool Ledger::open(const std::string& domain, const std::string& device_uuid, Led
         fd = create_file_at(ld, name);  // O_EXCL | O_NOFOLLOW: esamo vardo (ir nuorodos) neperrašo
         if (fd < 0 && errno != EEXIST) break;
     }
-    if (fd < 0) return fail("priėmimo knyga: " + dir + "/" + name + ": " + std::strerror(errno));
+    if (fd < 0) return fail("priėmimo knyga: " + dir + "/" + name + ": " + errno_text(errno));
     if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        const std::string e = "priėmimo knyga: flock " + dir + "/" + name + ": " + std::strerror(errno);
+        const std::string e = "priėmimo knyga: flock " + dir + "/" + name + ": " + errno_text(errno);
         ::close(fd);
         ::unlinkat(ld.fd, name.c_str(), 0);
         return fail(e);
@@ -527,7 +525,7 @@ bool Ledger::open(const std::string& domain, const std::string& device_uuid, Led
     out.path_ = dir + "/" + name;
     out.device_ = device_uuid;
     if (!out.write_own()) {
-        err = "priėmimo knyga: rašymas " + out.path_ + ": " + std::strerror(errno);
+        err = "priėmimo knyga: rašymas " + out.path_ + ": " + errno_text(errno);
         out.close();
         return false;
     }
@@ -536,12 +534,9 @@ bool Ledger::open(const std::string& domain, const std::string& device_uuid, Led
 
 bool Ledger::write_own() {
     std::string t = "device=" + device_ + "\npid=" + std::to_string(::getpid()) + "\n";
-    char b[160];
-    for (const auto& [id, d] : res_) {
-        std::snprintf(b, sizeof b, " %.6f %.6f %d %llu\n", d.nvdec_mpix_s, d.nvenc_mpix_s, d.nvenc_sessions,
-                      static_cast<unsigned long long>(d.vram_bytes));
-        t += "r " + id + b;
-    }
+    for (const auto& [id, d] : res_)
+        t += "r " + id +
+             strf(" %.6f %.6f %d %llu\n", d.nvdec_mpix_s, d.nvenc_mpix_s, d.nvenc_sessions, static_cast<unsigned long long>(d.vram_bytes));
     if (::ftruncate(fd_, 0) != 0) return false;
     return write_all(fd_, t);
 }
@@ -597,7 +592,7 @@ Decision Ledger::reserve(const std::string& id_in, const Demand& d, const Capaci
     // užraktas užimtas ilgiau nei riba arba nuomos katalogas pašalintas veikiant procesui.
     if (!lock.ok()) return Decision{false, "ledger", 0, 0, 0};
     res_.erase(std::remove_if(res_.begin(), res_.end(), [&](const auto& r) { return r.first == id; }), res_.end());
-    const Decision dec = decide(others(true) + own(), d, c);
+    Decision dec = decide(others(true) + own(), d, c);
     if (dec.admit || force) {
         res_.emplace_back(id, d);
         if (!write_own()) return Decision{false, "ledger", 0, 0, 0};

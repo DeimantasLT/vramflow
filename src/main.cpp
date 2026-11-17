@@ -85,6 +85,7 @@ int run_role(const Options& o, const std::string& role) {
 
     const std::uint64_t end_tai = now_tai_ns() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     std::vector<std::thread> ts;
+    ts.reserve(o.flows);
     for (std::uint32_t i = 0; i < o.flows; ++i)
         ts.emplace_back([&, i] {
             if (role == "writer") run_writer_flow(o, o.flow_base + i, *states[i], dev, g_stop, end_tai);
@@ -147,7 +148,7 @@ int hog(std::size_t leave_free_mb) {
     std::size_t fr = 0, tot = 0;
     cudaMemGetInfo(&fr, &tot);
     std::printf("{\"hog_blocks\":%zu,\"held_mb\":%zu,\"free_mb\":%zu}\n", blocks.size(), blocks.size() * 64, fr >> 20);
-    std::fflush(stdout);
+    if (std::fflush(stdout) != 0) return 2;  // kvietėjas laukia šios eilutės; be jos laikyti VRAM nėra prasmės
     while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     for (void* p : blocks) cudaFree(p);
     return 0;

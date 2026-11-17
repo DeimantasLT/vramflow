@@ -157,7 +157,7 @@ std::string load_png_rgba(const std::string& path, std::vector<std::uint8_t>& rg
     av_dict_free(&opts);
     if (e < 0) return "avformat_open_input(" + path + "): " + av_err(e);
     std::unique_ptr<AVFormatContext, FmtDel> ic(raw_ic);
-    if ((e = avformat_find_stream_info(ic.get(), nullptr)) < 0) return "avformat_find_stream_info: " + av_err(e);
+    if (e = avformat_find_stream_info(ic.get(), nullptr); e < 0) return "avformat_find_stream_info: " + av_err(e);
     const int si = av_find_best_stream(ic.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (si < 0) return "nėra vaizdo srauto: " + path;
     const AVCodecParameters* par = ic->streams[si]->codecpar;
@@ -166,8 +166,8 @@ std::string load_png_rgba(const std::string& path, std::vector<std::uint8_t>& rg
     if (!dec) return "nėra PNG dekoderio";
     std::unique_ptr<AVCodecContext, CodecDel> cc(avcodec_alloc_context3(dec));
     if (!cc) return "avcodec_alloc_context3";
-    if ((e = avcodec_parameters_to_context(cc.get(), par)) < 0) return "avcodec_parameters_to_context: " + av_err(e);
-    if ((e = avcodec_open2(cc.get(), dec, nullptr)) < 0) return "avcodec_open2: " + av_err(e);
+    if (e = avcodec_parameters_to_context(cc.get(), par); e < 0) return "avcodec_parameters_to_context: " + av_err(e);
+    if (e = avcodec_open2(cc.get(), dec, nullptr); e < 0) return "avcodec_open2: " + av_err(e);
     std::unique_ptr<AVPacket, PktDel> pkt(av_packet_alloc());
     std::unique_ptr<AVFrame, FrameDel> fr(av_frame_alloc());
     if (!pkt || !fr) return "av_packet_alloc/av_frame_alloc";
@@ -175,7 +175,7 @@ std::string load_png_rgba(const std::string& path, std::vector<std::uint8_t>& rg
     bool got = false;
     while (!got && av_read_frame(ic.get(), pkt.get()) >= 0) {
         if (pkt->stream_index == si) {
-            if ((e = avcodec_send_packet(cc.get(), pkt.get())) < 0) {
+            if (e = avcodec_send_packet(cc.get(), pkt.get()); e < 0) {
                 av_packet_unref(pkt.get());
                 return "avcodec_send_packet: " + av_err(e);
             }

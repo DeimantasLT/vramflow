@@ -16,13 +16,13 @@
 #include <thread>
 
 #include "common/pattern.hpp"
+#include "common/parse_num.hpp"
+#include "common/textf.hpp"
 
 namespace mxlv {
 
 std::string flow_id(std::uint32_t n) {
-    char b[64];
-    std::snprintf(b, sizeof b, "4d584c56-0000-4000-8000-%012x", n);
-    return b;
+    return strf("4d584c56-0000-4000-8000-%012x", n);
 }
 
 std::uint64_t flow_seed(std::uint64_t run_seed, std::uint32_t n) { return splitmix64(run_seed ^ n); }
@@ -30,20 +30,17 @@ std::uint64_t flow_seed(std::uint64_t run_seed, std::uint32_t n) { return splitm
 std::uint32_t v210_grain_bytes(std::uint32_t w, std::uint32_t h) { return (w + 47) / 48 * 128 * h; }
 
 std::string flow_def_json(const Options& o, std::uint32_t n) {
-    char b[2048];
-    std::snprintf(b, sizeof b,
-                  R"({"id":"%s","description":"vramflow-verify flow %u","label":"vramflow-verify flow %u",)"
-                  R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-verify-%016llx:Video %u"]},)"
-                  R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"video/v210",)"
-                  R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%u,"frame_height":%u,)"
-                  R"("interlace_mode":"progressive","colorspace":"BT709","components":[)"
-                  R"({"name":"Y","width":%u,"height":%u,"bit_depth":10},)"
-                  R"({"name":"Cb","width":%u,"height":%u,"bit_depth":10},)"
-                  R"({"name":"Cr","width":%u,"height":%u,"bit_depth":10}]})",
-                  flow_id(n).c_str(), n, n, static_cast<unsigned long long>(o.run_seed), n, static_cast<long long>(o.rate_num),
-                  static_cast<long long>(o.rate_den), o.width, o.height, o.width, o.height, o.width / 2, o.height,
-                  o.width / 2, o.height);
-    return b;
+    return strf(R"({"id":"%s","description":"vramflow-verify flow %u","label":"vramflow-verify flow %u",)"
+                R"("tags":{"urn:x-nmos:tag:grouphint/v1.0":["vramflow-verify-%016llx:Video %u"]},)"
+                R"("format":"urn:x-nmos:format:video","parents":[],"media_type":"video/v210",)"
+                R"("grain_rate":{"numerator":%lld,"denominator":%lld},"frame_width":%u,"frame_height":%u,)"
+                R"("interlace_mode":"progressive","colorspace":"BT709","components":[)"
+                R"({"name":"Y","width":%u,"height":%u,"bit_depth":10},)"
+                R"({"name":"Cb","width":%u,"height":%u,"bit_depth":10},)"
+                R"({"name":"Cr","width":%u,"height":%u,"bit_depth":10}]})",
+                flow_id(n).c_str(), n, n, static_cast<unsigned long long>(o.run_seed), n, static_cast<long long>(o.rate_num),
+                static_cast<long long>(o.rate_den), o.width, o.height, o.width, o.height, o.width / 2, o.height,
+                o.width / 2, o.height);
 }
 
 std::string writer_options(const Options& o, const std::string& uuid) {
@@ -64,9 +61,7 @@ void json_escape_into(std::string& out, const std::string& s) {
             out.push_back('\\');
             out.push_back(ch);
         } else if (static_cast<unsigned char>(ch) < 0x20) {
-            char b[8];
-            std::snprintf(b, sizeof b, "\\u%04x", ch);
-            out += b;
+            out += strf("\\u%04x", ch);
         } else {
             out.push_back(ch);
         }
@@ -78,9 +73,7 @@ std::string versions_json(bool device) {
     std::string j = "{";
     mxlVersionType v{};
     if (mxlGetVersion(&v) == MXL_STATUS_OK) {
-        char b[128];
-        std::snprintf(b, sizeof b, "\"mxl\":\"%u.%u.%u\",", v.major, v.minor, v.bugfix);
-        j += b;
+        j += strf("\"mxl\":\"%u.%u.%u\",", v.major, v.minor, v.bugfix);
     }
     int rt = 0, drv = 0;
     cudaRuntimeGetVersion(&rt);
@@ -116,9 +109,9 @@ int count_fds() {
 
 long rss_kb() {
     long pages = 0, resident = 0;
-    if (FILE* f = std::fopen("/proc/self/statm", "r")) {
-        if (std::fscanf(f, "%ld %ld", &pages, &resident) != 2) resident = 0;
-        std::fclose(f);
+    if (std::string t; read_file("/proc/self/statm", t)) {  // „<visi puslapiai> <rezidentiniai> …“
+        std::string_view v = t;
+        if (!(take_num(v, pages) && take_char(v, ' ') && take_num(v, resident))) resident = 0;
     }
     return resident * (sysconf(_SC_PAGESIZE) / 1024);
 }
@@ -133,10 +126,8 @@ const char* kFlowCsvHeader =
 double us(std::uint64_t ns) { return static_cast<double>(ns) / 1000.0; }
 
 std::string hist_json(const Histogram& h) {
-    char b[256];
-    std::snprintf(b, sizeof b, "{\"count\":%" PRIu64 ",\"p50_us\":%.1f,\"p99_us\":%.1f,\"p999_us\":%.1f,\"max_us\":%.1f}",
-                  h.count(), us(h.quantile(0.5)), us(h.quantile(0.99)), us(h.quantile(0.999)), us(h.max()));
-    return b;
+    return strf("{\"count\":%" PRIu64 ",\"p50_us\":%.1f,\"p99_us\":%.1f,\"p999_us\":%.1f,\"max_us\":%.1f}",
+                h.count(), us(h.quantile(0.5)), us(h.quantile(0.99)), us(h.quantile(0.999)), us(h.max()));
 }
 
 }  // namespace
@@ -206,7 +197,7 @@ void Reporter::tick(bool) {
                          us(c2v.quantile(0.5)), us(c2v.quantile(0.99)), us(c2v.max()), us(e2e.quantile(0.5)),
                          us(e2e.quantile(0.99)), us(gpu.quantile(0.5)), us(gpu.quantile(0.99)), us(jit.quantile(0.99)),
                          static_cast<double>(stale) / 1e6);
-            std::fflush(f);
+            (void)std::fflush(f);  // klaida lieka srauto būsenoje — tikrinama uždarant
         }
     }
     if (proc_csv_) {
@@ -217,17 +208,18 @@ void Reporter::tick(bool) {
         timex tx{};
         adjtimex(&tx);
         long threads = 0;
-        if (FILE* f = std::fopen("/proc/self/status", "r")) {
-            char line[256];
-            while (std::fgets(line, sizeof line, f))
-                if (std::sscanf(line, "Threads: %ld", &threads) == 1) break;
-            std::fclose(f);
+        if (std::string t; read_file("/proc/self/status", t)) {  // eilutė „Threads:<tarpai><skaičius>“
+            if (const std::size_t p = t.find("\nThreads:"); p != std::string::npos) {
+                std::string_view v = std::string_view(t).substr(p + 9);
+                skip_spaces(v);
+                if (!take_num(v, threads)) threads = 0;
+            }
         }
         std::fprintf(proc_csv_, "%" PRIu64 ",%" PRIu64 ",%ld,%d,%ld,%ld,%ld,%zu,%zu,%" PRId64 ",%d\n", tai, mono, rss_kb(),
                      count_fds(), threads, ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000,
                      ru.ru_stime.tv_sec * 1000 + ru.ru_stime.tv_usec / 1000, fr >> 20, tot >> 20,
                      static_cast<std::int64_t>(tai - mono), tx.tai);
-        std::fflush(proc_csv_);
+        (void)std::fflush(proc_csv_);  // klaida lieka srauto būsenoje — tikrinama uždarant
     }
 }
 
@@ -248,9 +240,7 @@ void Reporter::write_summary(const std::string& version_json, int exit_code) {
         verify += c.verification_errors();
         capacity += c.capacity_errors();
         if (i) j += ",";
-        char b[4096];
-        std::snprintf(
-            b, sizeof b,
+        j += strf(
             "{\"flow\":%u,\"id\":\"%s\",\"storage\":\"%s\",\"slot_count\":%u,\"grain_size\":%u,\"first_index\":%" PRIu64
             ",\"last_index\":%" PRIu64 ",\"counters\":{\"grains_ok\":%" PRIu64 ",\"grains_invalid\":%" PRIu64
             ",\"gap_grains\":%" PRIu64 ",\"too_late_events\":%" PRIu64 ",\"too_early_timeouts\":%" PRIu64
@@ -269,7 +259,6 @@ void Reporter::write_summary(const std::string& version_json, int exit_code) {
             c.mismatch_words.load(), c.checksum_fail.load(), c.dup.load(), c.seq_break.load(), c.host_crosschecks.load(),
             c.host_crosscheck_fail.load(), c.cuda_errors.load(), c.commits.load(), c.writer_late_skips.load(),
             c.clock_backward.load(), c.injections.load(), c.coverage_low.load(), s.coverage, s.exit_code);
-        j += b;
         {
             std::lock_guard g(s.lat.m);
             j += ",\"latency\":{\"commit_to_verified\":" + hist_json(s.lat.tot_c2v) +
@@ -277,10 +266,8 @@ void Reporter::write_summary(const std::string& version_json, int exit_code) {
                  ",\"wake\":" + hist_json(s.lat.tot_wake) + ",\"period_jitter\":" + hist_json(s.lat.tot_jitter) +
                  ",\"stale_max_ms\":" + std::to_string(static_cast<double>(s.lat.stale_max_ns) / 1e6) + "}";
             // lag_grains: kiek grain'ų head buvo priekyje patikros metu (vienetai — grain'ai, ne laikas)
-            char lb[160];
-            std::snprintf(lb, sizeof lb, ",\"lag_grains\":{\"count\":%" PRIu64 ",\"p50\":%" PRIu64 ",\"p99\":%" PRIu64 ",\"max\":%" PRIu64 "}",
-                          s.lat.tot_lag.count(), s.lat.tot_lag.quantile(0.5), s.lat.tot_lag.quantile(0.99), s.lat.tot_lag.max());
-            j += lb;
+            j += strf(",\"lag_grains\":{\"count\":%" PRIu64 ",\"p50\":%" PRIu64 ",\"p99\":%" PRIu64 ",\"max\":%" PRIu64 "}",
+                      s.lat.tot_lag.count(), s.lat.tot_lag.quantile(0.5), s.lat.tot_lag.quantile(0.99), s.lat.tot_lag.max());
             m_c2v.merge(s.lat.tot_c2v);
             m_e2e.merge(s.lat.tot_e2e);
             m_gpu.merge(s.lat.tot_gpu);
@@ -318,14 +305,13 @@ void Reporter::write_summary(const std::string& version_json, int exit_code) {
     j += ",\"totals\":{\"verification_errors\":" + std::to_string(verify) +
          ",\"capacity_errors\":" + std::to_string(capacity) + "}}";
     const std::string p = o_.out + "/summary-" + role_ + ".json";
-    if (FILE* f = std::fopen(p.c_str(), "w")) {
-        std::fputs(j.c_str(), f);
-        std::fputc('\n', f);
-        std::fclose(f);
-    }
-    for (FILE* f : flow_csv_)
-        if (f) std::fclose(f);
-    if (proc_csv_) std::fclose(proc_csv_);
+    j += "\n";
+    if (!write_file(p, j.data(), j.size()))
+        std::fprintf(stderr, "[%s] santraukos %s įrašyti nepavyko: %s\n", role_.c_str(), p.c_str(), errno_text(errno).c_str());
+    bool csv_ok = true;  // rašymo klaida lieka srauto būsenoje — tikrinama uždarant
+    for (FILE* f : flow_csv_) csv_ok = close_checked(f) && csv_ok;
+    csv_ok = close_checked(proc_csv_) && csv_ok;
+    if (!csv_ok) std::fprintf(stderr, "[%s] CSV failų kataloge %s įrašyti nepavyko\n", role_.c_str(), o_.out.c_str());
     flow_csv_.clear();
     proc_csv_ = nullptr;
 }

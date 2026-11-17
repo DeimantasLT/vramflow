@@ -15,6 +15,7 @@
 // AudioRing: išvesties mėginiai absoliučiomis 48 kHz pozicijomis (MXL tęstinio flow'o indeksai); rašo garso gija, skaito tick'as
 // (grain'o intervalas [sample_begin(i), sample_begin(i + 1))). Neparašytos pozicijos skaitomos tyla ir skaičiuojamos.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -66,7 +67,8 @@ public:
         }
         if (a <= c_.deadband) return s;
         s.comp = s.err;
-        s.distance = std::max<std::int64_t>(c_.min_distance, static_cast<std::int64_t>(static_cast<double>(a) * 1e6 / c_.max_ppm + 0.5));
+        s.distance =
+            std::max<std::int64_t>(c_.min_distance, static_cast<std::int64_t>(std::llround(static_cast<double>(a) * 1e6 / c_.max_ppm)));
         return s;
     }
     void produced(std::int64_t n) { next_ += n; }

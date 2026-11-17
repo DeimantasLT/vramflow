@@ -113,7 +113,7 @@ int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, 
 // Sugedusio vieneto išėjimų atlaisvinimas (K-T11): MxlVideoOutput::release_fn → VideoOut::release(inst); atkūrimas (D8):
 // reopen(n) — flow'as n sukuriamas iš naujo (kviečia variklio atkūrimo gija; tuščias — neatkuriama).
 void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst,
-                 std::function<bool(std::size_t)> reopen = {});
+                 const std::function<bool(std::size_t)>& reopen = {});
 
 // Variklio statistika funkcijai: StatsLines (--stats-file, įvykiai į stderr) + StatsHub. finish() — po run(): paskutinė
 // (nepilno intervalo) eilutė ir publikavimo gijos sustabdymas.

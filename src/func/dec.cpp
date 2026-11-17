@@ -28,6 +28,7 @@ extern "C" {
 #include <vector>
 
 #include "common/crc32c.hpp"
+#include "common/textf.hpp"
 #include "engine/engine.hpp"
 #include "engine/mxl_ports.hpp"
 #include "func/engine_glue.hpp"
@@ -90,17 +91,16 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
     AVCodecContext* c = nullptr;
     AVPacket* pkt = av_packet_alloc();
     AVFrame* fr = av_frame_alloc();
-    char url[256];
     // be UDP `timeout`: tylą ir sustabdymą sprendžia pertraukimo kabliukas (anksčiau timeout=20 s — darbininkas baigdavosi
     // visam laikui, o sustabdymas laukdavo iki 20 s)
-    std::snprintf(url, sizeof url, "udp://127.0.0.1:%d?fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608", o.port_base + s.idx);
+    const std::string url = strf("udp://127.0.0.1:%d?fifo_size=131072&overrun_nonfatal=1&buffer_size=8388608", o.port_base + s.idx);
     ingest::attach_interrupt(ic, &intr);
     // Trumpas zondavimas: numatytasis probesize 5 MB prie 8,5 Mbit/s = ~4,7 s, o sukaupti paketai po to
     // dekoduojami pliūpsniu. TS H.264 parametrai žinomi iš SPS per < 0,5 s.
     AVDictionary* io = nullptr;
     av_dict_set(&io, "probesize", "1000000", 0);
     av_dict_set(&io, "analyzeduration", "500000", 0);
-    int e = avformat_open_input(&ic, url, av_find_input_format("mpegts"), &io);  // klaidoje ic atlaisvinamas
+    int e = avformat_open_input(&ic, url.c_str(), av_find_input_format("mpegts"), &io);  // klaidoje ic atlaisvinamas
     av_dict_free(&io);
     int vs = -1;
     const AVCodec* codec = nullptr;
@@ -108,7 +108,7 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
     s.pts0 = AV_NOPTS_VALUE;  // nauja sesija — siuntėjas galėjo pradėti iš naujo (PTS nuo nulio)
     s.prev_n = -1;
     if (e < 0) { why = "open_input: " + averr(e); goto out; }
-    if ((e = avformat_find_stream_info(ic, nullptr)) < 0) { why = "find_stream_info: " + averr(e); goto out; }
+    if (e = avformat_find_stream_info(ic, nullptr); e < 0) { why = "find_stream_info: " + averr(e); goto out; }
     vs = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (vs < 0) { why = "nėra video srauto"; goto out; }
     if (o.impl == "cpu") {
@@ -156,7 +156,7 @@ bool dec_session(const Opts& o, AVBufferRef* hw, DecStream& s, const std::atomic
             const int r = avcodec_receive_frame(c, fr);
             if (r != 0) {
                 if (!pkt_pending) break;   // paketas priimtas ir kadrų daugiau nėra
-                if (r != AVERROR(EAGAIN)) { ++s.decode_errors; pkt_pending = false; break; }
+                if (r != AVERROR(EAGAIN)) { ++s.decode_errors; break; }
                 continue;                  // dar laukiam vietos dekoderyje
             }
             const AVPixelFormat want_fmt = o.impl == "cpu" ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_CUDA;
@@ -239,9 +239,8 @@ int run_dec(const Opts& o) {
         // FFmpeg pirmas sukuria primary kontekstą (žr. enc.cpp), CUDA runtime prisijungia po to.
         dev = cuda_device(o.device_uuid);
         if (dev < 0) { st.fatal = "CUDA įrenginys"; return finish(2); }
-        char ord[8];
-        std::snprintf(ord, sizeof ord, "%d", dev);
-        if (int e = av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, ord, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT); e < 0) {
+        if (int e = av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_CUDA, std::to_string(dev).c_str(), nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
+            e < 0) {
             st.fatal = "hwdevice: " + averr(e);
             return finish(2);
         }
@@ -347,7 +346,7 @@ int run_dec(const Opts& o) {
                     // playout_frames. anchor[n]: INT64_MIN — dar pildomas buferis, 0 — groja.
                     std::lock_guard g(s.m);
                     const std::uint64_t now = now_tai();
-                    const bool in_warm = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
+                    const bool in_warm = static_cast<double>(now) < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
                     if (anchor[n] == INT64_MIN) {
                         if (static_cast<int>(s.q.size()) < o.playout_frames) {
                             st.flows[n].inc("waiting_buffer");
@@ -368,7 +367,8 @@ int run_dec(const Opts& o) {
                     // į gylį; per daug sukaupta virš ribos (+1 s sugeria dekoderio pliūpsnius) — seniausi išmetami: perpildymas.
                     const timing::ClockQueueBudget::Tick qt =
                         cq[n].on_frame_tick(s.q.size(), static_cast<std::uint64_t>(o.playout_frames),
-                                            static_cast<std::uint64_t>(o.playout_frames + fps_i), s.overflow_drops - ov_seen[n]);
+                                            static_cast<std::uint64_t>(o.playout_frames) + static_cast<std::uint64_t>(fps_i),
+                                            s.overflow_drops - ov_seen[n]);
                     for (std::uint64_t k = 0; k < qt.clock_drop + qt.overrun_drop; ++k) {
                         av_frame_free(&s.q.front().f);
                         s.q.pop_front();
@@ -393,7 +393,7 @@ int run_dec(const Opts& o) {
                 }
                 if (!cur[n]) {
                     const std::uint64_t now = now_tai();
-                    const bool w = now < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
+                    const bool w = static_cast<double>(now) < warm || first_play[n] == 0 || now < first_play[n] + 2'000'000'000ull;
                     st.flows[n].inc(w ? "warmup_underrun_fields" : "underrun_fields");
                     ctx.no_content(n);
                     continue;
@@ -598,7 +598,8 @@ int run_ref_crc(const Opts& o, const std::string& path) {
     std::vector<std::uint32_t> field(media::grain_words(d, inter));
     std::printf("{\"fields\":[");
     bool first = true;
-    while (std::fread(nv12.data(), 1, nv12.size(), f) == nv12.size()) {
+    const std::size_t need = nv12.size();
+    while (std::fread(nv12.data(), 1, need, f) == need) {
         for (int p = 0; p < (inter ? 2 : 1); ++p) {
             if (inter) media::ref::split_nv12(nv12.data(), nv12.data() + ysz, d.w, d.w, d, p, media::ChromaMode::FieldSited, field.data());
             else media::ref::split_nv12_progressive(nv12.data(), nv12.data() + ysz, d.w, d.w, d, field.data());
@@ -609,7 +610,7 @@ int run_ref_crc(const Opts& o, const std::string& path) {
         }
     }
     std::printf("]}\n");
-    std::fclose(f);
+    close_read(f);
     return 0;
 }
 
@@ -622,8 +623,8 @@ int run_split_raw(const Opts& o, const std::string& in, const std::string& out, 
     FILE* fi = std::fopen(in.c_str(), "rb");
     FILE* fo = std::fopen(out.c_str(), "wb");
     if (!fi || !fo) {
-        if (fi) std::fclose(fi);
-        if (fo) std::fclose(fo);
+        close_read(fi);
+        close_read(fo);
         std::fprintf(stderr, "split-raw: nepavyko atidaryti failų\n");
         return 1;
     }
@@ -632,7 +633,8 @@ int run_split_raw(const Opts& o, const std::string& in, const std::string& out, 
     std::vector<std::uint8_t> nv12(ysz * 3 / 2);
     std::vector<std::uint32_t> frame(media::grain_words(d, false)), field(media::grain_words(d, true));
     int rc = 0;
-    while (std::fread(nv12.data(), 1, nv12.size(), fi) == nv12.size()) {
+    const std::size_t need = nv12.size();
+    while (std::fread(nv12.data(), 1, need, fi) == need) {
         if (frame_chroma) {
             media::ref::split_nv12_progressive(nv12.data(), nv12.data() + ysz, d.w, d.w, d, frame.data());
         } else {
@@ -645,8 +647,8 @@ int run_split_raw(const Opts& o, const std::string& in, const std::string& out, 
         }
         if (std::fwrite(frame.data(), 4, frame.size(), fo) != frame.size()) { rc = 2; break; }
     }
-    std::fclose(fi);
-    if (std::fclose(fo) != 0) rc = 2;
+    close_read(fi);
+    if (!close_checked(fo)) rc = 2;
     return rc;
 }
 

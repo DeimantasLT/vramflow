@@ -136,7 +136,7 @@ bool is_mem_playlist_io(const AVIOContext* io) { return io != nullptr && io->rea
 void free_mem_playlist_io(AVIOContext** io) {
     if (!io || !*io) return;
     free_mem(static_cast<MemIo*>((*io)->opaque));
-    av_freep(&(*io)->buffer);
+    av_freep(static_cast<void*>(&(*io)->buffer));
     avio_context_free(io);
 }
 
@@ -223,7 +223,7 @@ AVIOContext* free_peek_io(AVIOContext** io) {
     auto* p = static_cast<PeekIo*>((*io)->opaque);
     AVIOContext* inner = p->inner;
     av_free(p);
-    av_freep(&(*io)->buffer);
+    av_freep(static_cast<void*>(&(*io)->buffer));
     avio_context_free(io);
     return inner;
 }
@@ -343,7 +343,7 @@ bool hls_precheck(const std::string& url, AVIOInterruptCB* cb, const HlsLimits& 
                 return false;
             }
             if (!check_playlist(fv.location, pv, false, lim, err)) return false;
-            if ((seg_bytes += segment_bytes(fv.location, pv) * mult) > lim.max_session_bytes) {
+            if (seg_bytes += segment_bytes(fv.location, pv) * mult; seg_bytes > lim.max_session_bytes) {
                 err = "libav segmentų sąmata visiems grojaraščiams " + std::to_string(seg_bytes >> 10) + " KiB > riba " +
                       std::to_string(lim.max_session_bytes >> 10) + " KiB" + (mult > 1 ? " (" + redact_url(vu) + " — " + std::to_string(mult) +
                       " libav grojaraščiai)" : std::string{});
@@ -770,7 +770,7 @@ int Demux::post_open(AVFormatContext* s, AVIOContext** pb, const std::string& u)
     const PlaylistInfo pi = parse_playlist(f.text);
     if (!check_playlist(f.location, pi, false, lim_, why)) return refuse(why);
     // F: libav kiekvieno perkrovimo EXT-X-MAP init sekcijas kaupia iki sesijos pabaigos (hls.c n6.1:456, 251-269) — sesijos sąmata
-    if ((init_bytes_ += init_section_bytes(f.location, pi)) > lim_.max_init_bytes)
+    if (init_bytes_ += init_section_bytes(f.location, pi); init_bytes_ > lim_.max_init_bytes)
         return refuse("EXT-X-MAP init sekcijų sąmata per sesiją " + std::to_string(init_bytes_ >> 10) + " KiB > riba " +
                       std::to_string(lim_.max_init_bytes >> 10) + " KiB (libav jų neatlaisvina iki sesijos pabaigos)");
     // M2: libav segmentų sąrašas — kiekvieno grojaraščio paskutinio analizavimo (ankstesnis atlaisvinamas, hls.c n6.1:1010-1027);

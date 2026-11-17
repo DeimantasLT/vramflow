@@ -66,7 +66,6 @@ struct InputSlot::Helper {
                 InputSlot::try_attach(x);
                 lk.lock();
                 a = std::move(x);
-                x.in.r = nullptr;
                 pending = false;
                 done = true;
             }
@@ -213,7 +212,6 @@ void InputSlot::try_attach(Attempt& a) {
         }
     }
     a.in = std::move(fresh);
-    fresh.r = nullptr;
     a.kind = Attempt::Kind::Ok;
 }
 

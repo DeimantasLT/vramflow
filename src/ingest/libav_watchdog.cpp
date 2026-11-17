@@ -21,7 +21,7 @@ LibavWatchdog::LibavWatchdog(std::uint64_t margin_ns, int exit_code, Clock now, 
                          name.c_str(), what, static_cast<double>(elapsed_ns) / 1e9,
                          why == Stuck::Deadline ? "viršyta pertraukimo riba" : "pertraukimo kabliukas nekviečiamas", static_cast<double>(margin) / 1e9,
                          code);
-            std::fflush(stderr);
+            (void)std::fflush(stderr);  // prieš _Exit — daugiau nieko padaryti nebegalima
             std::_Exit(code);
         };
     }

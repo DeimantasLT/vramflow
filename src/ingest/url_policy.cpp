@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
 #include "ingest/url_policy.hpp"
+#include "common/textf.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -417,9 +418,7 @@ bool check_playlist(const std::string& base, const PlaylistInfo& pi, bool allow_
         return false;
     }
     if (pi.target_s > lim.max_target_s) {
-        char b[160];
-        std::snprintf(b, sizeof b, "#EXT-X-TARGETDURATION %.0f s > riba %.0f s (--hls-max-target-s)", pi.target_s, lim.max_target_s);
-        why = b;
+        why = strf("#EXT-X-TARGETDURATION %.0f s > riba %.0f s (--hls-max-target-s)", pi.target_s, lim.max_target_s);
         return false;
     }
     std::string r;

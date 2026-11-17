@@ -31,6 +31,8 @@
 
 #include "common/crc32c.hpp"
 #include "common/index_math.hpp"
+#include "common/parse_num.hpp"
+#include "common/textf.hpp"
 #include "gfx/gfx_content.hpp"
 #include "gfx/gfx_ref.hpp"
 
@@ -148,11 +150,11 @@ int verify_composite(const Opts& o, Stats& st) {
         for (const std::string& w : strict ? o.layer_absent : o.layer_either) {
             unsigned k = 0, fl = 0;
             unsigned long long a = 0, b = 0;
-            int used = 0, used2 = 0;
-            const bool parsed = std::sscanf(w.c_str(), "%u:%llu-%llu%n", &k, &a, &b, &used) == 3;
-            const bool at = parsed && static_cast<std::size_t>(used) < w.size() &&
-                            std::sscanf(w.c_str() + used, "@%u%n", &fl, &used2) == 1 && static_cast<std::size_t>(used + used2) == w.size();
-            if (!parsed || (static_cast<std::size_t>(used) != w.size() && !at) || k >= K || b < a || (at && fl >= N)) {
+            std::string_view v = w;
+            const bool parsed = take_num(v, k) && take_char(v, ':') && take_num(v, a) && take_char(v, '-') && take_num(v, b);
+            const bool more = parsed && !v.empty();  // po „K:I1-I2“ dar kažkas yra — leidžiama tik „@N“
+            const bool at = more && take_char(v, '@') && take_num(v, fl) && v.empty();
+            if (!parsed || (more && !at) || k >= K || b < a || (at && fl >= N)) {
                 st.fatal = std::string(strict ? "--layer-absent" : "--layer-either") + " '" + w +
                            "': tikimasi K:I1-I2[@N] (K < --layers, I1 <= I2, N < --flows)";
                 return 1;
@@ -271,11 +273,11 @@ int verify_composite(const Opts& o, Stats& st) {
         f.inc("mismatch_words", bad);
         if (dumped.fetch_add(1) < 8) {  // diagnostika: faktinis ir laukiamas grain'as
             const std::string stem = o.out + "/mismatch_n" + std::to_string(job.n) + "_i" + std::to_string(job.i);
-            for (int x = 0; x < 2; ++x)
-                if (FILE* df = std::fopen((stem + (x ? ".expected." : ".actual.") + (out_alpha ? "v210a" : "v210")).c_str(), "wb")) {
-                    std::fwrite(x ? exp.data() : job.act.data(), 1, out_bytes, df);
-                    std::fclose(df);
-                }
+            for (int x = 0; x < 2; ++x) {
+                const std::string path = stem + (x ? ".expected." : ".actual.") + (out_alpha ? "v210a" : "v210");
+                if (!write_file(path, x ? exp.data() : job.act.data(), out_bytes))
+                    std::fprintf(stderr, "[verify] diagnostikos failo %s įrašyti nepavyko: %s\n", path.c_str(), errno_text(errno).c_str());
+            }
         }
     };
     for (std::uint32_t w = 0; w < W; ++w) {
@@ -306,7 +308,7 @@ int verify_composite(const Opts& o, Stats& st) {
     // ring'as trumpas (MXL numatytasis 200 ms: 1080p25 — tik 5 grain'ai).
     const std::uint64_t lag = std::min<std::uint64_t>(o.lag_fields, gc > 3 ? gc - 3 : 1);
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / static_cast<double>(rate.denominator));
     std::vector<std::uint8_t> act(out_bytes), ibuf;
     const std::vector<std::uint8_t> black = black_grain(out_r);
     while (!stop.load() && now_tai() < end_tai) {
@@ -399,7 +401,7 @@ int verify_audio(const Opts& o, Stats& st) {
     std::vector<float> l(cap), r(cap);
     const std::uint64_t lag = o.lag_fields;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
-    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
+    std::uint64_t i = mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / static_cast<double>(rate.denominator));
     while (!stop.load() && now_tai() < end_tai) {
         wait_until(rate, i + lag, 0, stop);
         if (stop.load()) break;
@@ -478,13 +480,9 @@ int run_verify(const Opts& o_in) {
     // dec: etalonas barkodas → laukų CRC32C iš programinio dekoderio (ref-crc); be --ref tikrinamas tik barkodas
     std::map<std::uint32_t, std::uint32_t> ref_crc;
     if (dec_mode && !o.ref_crc.empty()) {
-        FILE* f = std::fopen(o.ref_crc.c_str(), "r");
-        if (!f) { st.fatal = "nėra --ref failo"; return finish(1); }
-        unsigned mk = 0, crc = 0;
-        int ch = 0;
-        while ((ch = std::fgetc(f)) != EOF)
-            if (ch == '[' && std::fscanf(f, "%u,%u]", &mk, &crc) == 2) ref_crc[mk] = crc;
-        std::fclose(f);
+        std::string text;
+        if (!read_file(o.ref_crc, text)) { st.fatal = "nėra --ref failo"; return finish(1); }
+        ref_crc = parse_ref_crc(text);
         if (ref_crc.empty()) { st.fatal = "tuščias --ref"; return finish(1); }
     }
     std::vector<std::int64_t> seq_offset(o.flows, INT64_MIN);
@@ -507,6 +505,7 @@ int run_verify(const Opts& o_in) {
     for (std::uint32_t n = 0; n < o.flows; ++n) out.push_back(make_input(o, flow_id(out_role, o.flow_base + n), &o.fmt));
     for (std::uint32_t n = 0; logo_mode && n < o.flows; ++n) in.push_back(make_input(o, flow_id(o.in_role, o.flow_base + n), &o.fmt));
     std::vector<runtime::InputSlot*> all;
+    all.reserve(out.size() + in.size());
     for (auto& s : out) all.push_back(&s);
     for (auto& s : in) all.push_back(&s);
     auto release_all = [&] {
@@ -533,7 +532,7 @@ int run_verify(const Opts& o_in) {
     std::vector<std::uint8_t> ibuf;
     const std::uint64_t end_tai = now_tai() + static_cast<std::uint64_t>(o.duration_s * 1e9);
     const std::uint64_t warm_idx =
-        mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / rate.denominator);
+        mxlGetCurrentIndex(&rate) + static_cast<std::uint64_t>(o.warmup_s * static_cast<double>(rate.numerator) / static_cast<double>(rate.denominator));
     std::uint64_t i = warm_idx;
     // logotipo stačiakampis grupėmis (už jo išėjimas turi sutapti su įėjimu)
     const int g0 = o.logo_x / 6, g1 = (o.logo_x + logo.w + 5) / 6;
@@ -573,7 +572,7 @@ int run_verify(const Opts& o_in) {
         // verify sąmoningai atsilieka lag_fields laukų, todėl ilgas laukimas čia nėra laikrodžio šuolis
         wait_until(rate, i + lag, 0, stop);
         if (stop.load()) break;
-        if ((rc = poll_inputs(all, inst, st.fatal)) != 0) break;
+        if (rc = poll_inputs(all, inst, st.fatal); rc != 0) break;
         for (std::uint32_t n = 0; n < o.flows; ++n) {
             mxlGrainInfo info{};
             const std::uint32_t* p = nullptr;
@@ -673,10 +672,9 @@ int run_verify(const Opts& o_in) {
                         if (dumped < 24) {
                             ++dumped;
                             const std::string p = o.out + "/mismatch_clip" + std::to_string(idx) + "_i" + std::to_string(i) + ".v210";
-                            if (FILE* df = std::fopen(p.c_str(), "wb")) {
-                                std::fwrite(ho.data(), 1, gwords * 4, df);
-                                std::fclose(df);
-                            }
+                            if (!write_file(p, ho.data(), gwords * 4))
+                                std::fprintf(stderr, "[verify] diagnostikos failo %s įrašyti nepavyko: %s\n", p.c_str(),
+                                             errno_text(errno).c_str());
                         }
                     }
                     else f.inc(near_loop ? "dec_bitexact_near_loop" : "dec_bitexact");

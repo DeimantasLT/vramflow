@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "common/format.hpp"
+#include "common/textf.hpp"
 #include "engine/engine.hpp"
 #include "engine/system_clock.hpp"
 #include "func/flows.hpp"
@@ -107,8 +108,8 @@ const DriverCtx& driver_ctx() {
         if (cudaGetDriverEntryPointByVersion("cuCtxGetCurrent", &g, 12000, cudaEnableDefault, &qg) == cudaSuccess &&
             cudaGetDriverEntryPointByVersion("cuCtxSetCurrent", &s, 12000, cudaEnableDefault, &qs) == cudaSuccess &&
             qg == cudaDriverEntryPointSuccess && qs == cudaDriverEntryPointSuccess && g && s) {
-            std::memcpy(&r.get, &g, sizeof g);
-            std::memcpy(&r.set, &s, sizeof s);
+            std::memcpy(static_cast<void*>(&r.get), static_cast<const void*>(&g), sizeof g);
+            std::memcpy(static_cast<void*>(&r.set), static_cast<const void*>(&s), sizeof s);
         } else {
             cudaGetLastError();
         }
@@ -200,9 +201,7 @@ std::string json_escape(const std::string& s) {
             o.push_back('\\');
             o.push_back(ch);
         } else if (c < 0x20) {
-            char b[8];
-            std::snprintf(b, sizeof b, "\\u%04x", c);
-            o += b;
+            o += mxlv::strf("\\u%04x", c);
         } else {
             o.push_back(ch);
         }
@@ -976,8 +975,10 @@ static int guarded(vfgfx_writer w, F&& f) noexcept {
             if (w) w->fail(VFGFX_ERR_INTERNAL, std::string("internal exception: ") + e.what());
             else g_create_error = std::string("internal exception: ") + e.what();
         } catch (...) {
+            // C ABI: klaidos teksto įrašyti nepavyko (atmintis) — kvietėjas vis tiek gauna VFGFX_ERR_INTERNAL
         }
     } catch (...) {
+        // C ABI: ne std::exception — per bibliotekos ribą išimtis nepraleidžiama, grąžinamas VFGFX_ERR_INTERNAL
     }
     return VFGFX_ERR_INTERNAL;
 }
@@ -1443,6 +1444,7 @@ void vfgfx_writer_destroy(vfgfx_writer w) {
     try {
         destroy_impl(w);
     } catch (...) {
+        // C ABI: naikinimas klaidos grąžinti negali, o per bibliotekos ribą išimtis nepraleidžiama
     }
 }
 

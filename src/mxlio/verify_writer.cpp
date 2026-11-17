@@ -89,9 +89,9 @@ int run_writer_flow(const Options& o, std::uint32_t n, FlowState& s, int cuda_de
     if (!created) return fatal(s, "flow jau egzistavo (created=false) — paleisk su --gc-before-create");
 
     mxlGrainStorageLayout layout{};
-    if ((st = mxlFlowWriterGetStorageLayout(r.w, &layout)) != MXL_STATUS_OK) return fatal(s, "GetStorageLayout " + std::to_string(st));
+    if (st = mxlFlowWriterGetStorageLayout(r.w, &layout); st != MXL_STATUS_OK) return fatal(s, "GetStorageLayout " + std::to_string(st));
     std::vector<mxlGrainStorage> slots(layout.slotCount);
-    if ((st = mxlFlowWriterMapSlots(r.w, layout.slotCount, slots.data())) != MXL_STATUS_OK)
+    if (st = mxlFlowWriterMapSlots(r.w, layout.slotCount, slots.data()); st != MXL_STATUS_OK)
         return fatal(s, "MapSlots " + std::to_string(st));
     const bool cuda = is_cuda_layout(layout);
     if (!cuda && !is_host_layout(layout)) return fatal(s, "nežinomas storage tipas " + storage_name(layout));
@@ -195,7 +195,7 @@ int run_writer_flow(const Options& o, std::uint32_t n, FlowState& s, int cuda_de
             if (!cuda && !ce) ce = cudaMemcpy(dst, scratch, bytes, cudaMemcpyDeviceToHost);
             info.validSlices = info.totalSlices;
             if (!ce) {
-                if ((st = mxlFlowWriterCommitGrain(r.w, &info)) != MXL_STATUS_OK) { fatal(s, "CommitGrain " + std::to_string(st)); break; }
+                if (st = mxlFlowWriterCommitGrain(r.w, &info); st != MXL_STATUS_OK) { fatal(s, "CommitGrain " + std::to_string(st)); break; }
                 committed_early = true;
                 s.add_committed(index);
                 usleep(inj.late_write_ms * 1000);
@@ -225,7 +225,7 @@ int run_writer_flow(const Options& o, std::uint32_t n, FlowState& s, int cuda_de
         const std::uint64_t t1 = now_tai_ns();
         if (!committed_early) {
             info.validSlices = info.totalSlices;
-            if ((st = mxlFlowWriterCommitGrain(r.w, &info)) != MXL_STATUS_OK) { fatal(s, "CommitGrain " + std::to_string(st)); break; }
+            if (st = mxlFlowWriterCommitGrain(r.w, &info); st != MXL_STATUS_OK) { fatal(s, "CommitGrain " + std::to_string(st)); break; }
             s.add_committed(index);
         }
         const std::uint64_t t_commit = now_tai_ns();

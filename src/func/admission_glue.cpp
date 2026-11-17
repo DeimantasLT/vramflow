@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "common/textf.hpp"
 #include "func/engine_glue.hpp"
 #include "func/func_common.hpp"
 #include "func/stats_lines.hpp"
@@ -22,15 +23,12 @@ namespace mxlv::func {
 
 namespace {
 std::string mb(std::uint64_t b) {
-    char s[32];
-    std::snprintf(s, sizeof s, "%.0f", static_cast<double>(b) / (1024.0 * 1024.0));
-    return s;
+    return strf("%.0f", static_cast<double>(b) / (1024.0 * 1024.0));
 }
 std::string num2(double v) {  // lietuviškas dešimtainis kablelis, kaip runtime::describe
-    char s[32];
-    std::snprintf(s, sizeof s, "%.2f", v);
-    for (char* c = s; *c; ++c)
-        if (*c == '.') *c = ',';
+    std::string s = strf("%.2f", v);
+    for (char& c : s)
+        if (c == '.') c = ',';
     return s;
 }
 const char* mode_name(runtime::AdmissionMode m) {

@@ -34,6 +34,7 @@
 #include <utility>
 #include <vector>
 
+#include "common/parse_num.hpp"
 #include "engine/engine.hpp"
 #include "engine/system_clock.hpp"
 #include "func/cuda_upload.hpp"
@@ -64,7 +65,8 @@ bool parse_layer_geoms(const Opts& o, std::vector<Raster>& out, std::string& err
         int w = 0, h = 0;
         if (t == "logo") r = Raster{384, 216, inter, true};
         else if (t == "full") r = full;
-        else if (std::sscanf(t.c_str(), "%dx%d", &w, &h) == 2 && w >= 256 && h > 0) r = Raster{w, h, inter, true};
+        else if (std::string_view v = t; take_num(v, w) && take_char(v, 'x') && take_num(v, h) && v.empty() && w >= 256 && h > 0)
+            r = Raster{w, h, inter, true};
         else { err = "netinkama geometrija '" + t + "' (logo | full | WxH, W >= 256)"; return false; }
         if (!vramflow::gfx::raster_ok(r)) { err = "netinkamas rastras '" + t + "' (lyginis plotis ir aukštis)"; return false; }
         out.push_back(r);
@@ -158,7 +160,7 @@ struct GfxgenFn final : engine::TickFunction {
     }
 
     void end_tick(engine::Index i, engine::TickContext& ctx) override {
-        if (t_done >= warm) {
+        if (static_cast<double>(t_done) >= warm) {
             st.add_hist("write_ms", t_done - t_wake);
             st.add_hist("commit_lateness", t_done - mxlIndexToTimestamp(&rate, i));
         }
@@ -173,7 +175,7 @@ struct GfxgenFn final : engine::TickFunction {
                 ctx.fatal(2, st.fatal);
                 return;
             }
-            if (t_done >= warm) st.add_hist("prep_ms", now_tai() - t0);
+            if (static_cast<double>(t_done) >= warm) st.add_hist("prep_ms", now_tai() - t0);
         }
     }
 };

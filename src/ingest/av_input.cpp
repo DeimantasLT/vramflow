@@ -12,6 +12,7 @@ extern "C" {
 #include <cstdio>
 #include <thread>
 
+#include "common/textf.hpp"
 #include "ingest/url_policy.hpp"
 
 namespace mxlv::ingest {
@@ -88,14 +89,13 @@ void reconnect_loop(const std::string& name, const std::atomic<bool>& stop, cons
         if (stop.load()) break;
         if (fatal) {
             error = why;
-            log(name + ": " + why + " — srautas sustabdytas");
+            log(strf("%s: %s — srautas sustabdytas", name.c_str(), why.c_str()));
             break;
         }
         ++reconnects;
         if (tai_now() - t0 >= 60'000'000'000ull) backoff = 1;
-        char b[64];
-        std::snprintf(b, sizeof b, "%.0f", backoff);
-        log(name + ": " + why + " — jungiamasi iš naujo po " + b + " s (" + std::to_string(reconnects) + ")");
+        log(strf("%s: %s — jungiamasi iš naujo po %.0f s (%llu)", name.c_str(), why.c_str(), backoff,
+                 static_cast<unsigned long long>(reconnects)));
         const std::uint64_t until = tai_now() + static_cast<std::uint64_t>(backoff * 1e9);
         while (!stop.load() && tai_now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(20));
         backoff = std::min(30.0, 2 * backoff);

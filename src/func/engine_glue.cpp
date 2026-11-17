@@ -8,9 +8,12 @@
 #include <sys/timex.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+
+#include "common/textf.hpp"
 
 namespace mxlv::func {
 
@@ -22,7 +25,7 @@ std::int64_t deadline_ns(const Opts& o) {
 InEdge in_edge(mxlInstance inst, const std::string& flow_id, const Opts& o, std::int64_t untagged_ns) {
     InEdge e;
     e.t.index_offset = o.input_offset;
-    e.t.expect_ns = o.input_expect_ms >= 0 ? static_cast<std::int64_t>(o.input_expect_ms * 1e6 + 0.5) : untagged_ns;
+    e.t.expect_ns = o.input_expect_ms >= 0 ? static_cast<std::int64_t>(std::llround(o.input_expect_ms * 1e6)) : untagged_ns;
     std::string err;
     const std::string def = inst ? read_flow_def(inst, flow_id, err) : std::string{};
     e.exists = !def.empty();
@@ -37,12 +40,8 @@ InEdge in_edge(mxlInstance inst, const std::string& flow_id, const Opts& o, std:
 
 std::int64_t domain_history_ns(const std::string& domain) {
     constexpr std::int64_t kDefault = 200'000'000;  // MXL Instance::_historyDuration
-    std::FILE* f = std::fopen((domain + "/options.json").c_str(), "r");
-    if (!f) return kDefault;
     std::string s;
-    char b[1024];
-    for (std::size_t n; (n = std::fread(b, 1, sizeof b, f)) > 0;) s.append(b, n);
-    std::fclose(f);
+    if (!read_file(domain + "/options.json", s)) return kDefault;
     const std::string key = "\"urn:x-mxl:option:history_duration/v1.0\"";
     std::size_t p = s.find(key);
     if (p == std::string::npos) return kDefault;
@@ -77,9 +76,9 @@ bool plan_edges(const Opts& o, engine::EngineConfig& cfg, const std::vector<InEd
     std::fprintf(stderr,
                  "[%s] briaunos sutartis: įėjimai laukiami iki T + %.3f ms (%llu su žyma, %llu be), tick'as T + %.3f ms, "
                  "skelbiama commit'o riba T + %.3f ms, turinio vėlinimas %.3f ms\n",
-                 who, cfg.cuts.expect_ns / 1e6, static_cast<unsigned long long>(tagged),
-                 static_cast<unsigned long long>(in.size() - tagged), engine::phase_ns(cfg.cuts) / 1e6, plan.out.commit_bound_ns / 1e6,
-                 plan.out.content_delay_ns / 1e6);
+                 who, static_cast<double>(cfg.cuts.expect_ns) / 1e6, static_cast<unsigned long long>(tagged),
+                 static_cast<unsigned long long>(in.size() - tagged), static_cast<double>(engine::phase_ns(cfg.cuts)) / 1e6,
+                 static_cast<double>(plan.out.commit_bound_ns) / 1e6, static_cast<double>(plan.out.content_delay_ns) / 1e6);
     if (in.empty()) return true;
     const engine::RingCheck r = engine::ring_check(cfg.cuts, o.input_offset, domain_history_ns(o.domain));
     st.proc["ring_lag_us"] = us(r.lag_ns);
@@ -253,7 +252,7 @@ int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, 
 }
 
 void set_release(std::vector<engine::MxlVideoOutput>& ports, std::vector<VideoOut>& outs, mxlInstance inst,
-                 std::function<bool(std::size_t)> reopen) {
+                 const std::function<bool(std::size_t)>& reopen) {
     for (std::size_t n = 0; n < ports.size() && n < outs.size(); ++n) {
         ports[n].release_fn = [&outs, n, inst] { outs[n].release(inst); };
         if (reopen) ports[n].reopen_fn = [reopen, n] { return reopen(n); };

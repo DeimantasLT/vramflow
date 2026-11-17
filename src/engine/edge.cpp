@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "engine/edge.hpp"
 
+#include "common/textf.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -51,24 +53,21 @@ RingCheck ring_check(const CutConfig& k, std::int32_t index_offset, std::int64_t
     r.safe_ns = std::max<std::int64_t>(0, slots - 2) * p;
     if (r.lag_ns <= r.safe_ns / 2) return r;
     r.fit = r.lag_ns > r.safe_ns ? RingFit::Refuse : RingFit::Warn;
-    char b[512];
-    std::snprintf(b, sizeof b,
-                  "%s: įėjimas skaitomas iki T + %.1f ms (fazė E %.1f ms + riba D %.1f ms%s), o ring'as saugus iki %.1f ms "
+    const std::int64_t need_ns = ((r.lag_ns * 2) / p + 3) * p;  // siūloma domeno istorija
+    const auto ms = [](std::int64_t ns) { return static_cast<double>(ns) / 1e6; };
+    r.text = strf("%s: įėjimas skaitomas iki T + %.1f ms (fazė E %.1f ms + riba D %.1f ms%s), o ring'as saugus iki %.1f ms "
                   "(domeno istorija %.0f ms = %lld grain'ų, 2 — atsarga). Padidinkite domeno istoriją: <domenas>/options.json "
                   "{\"urn:x-mxl:option:history_duration/v1.0\": %lld} (ns) PRIEŠ kuriant flow'us, arba trumpinkite grandinę "
                   "(--deadline-ms, mažiau pakopų viename laikrodžio domene)",
-                  r.fit == RingFit::Refuse ? "ring'as per seklus" : "ring'o atsarga maža", r.lag_ns / 1e6, k.expect_ns / 1e6,
-                  d / 1e6, index_offset < 0 ? " + --input-offset" : "", r.safe_ns / 1e6, history_ns / 1e6,
-                  static_cast<long long>(slots), static_cast<long long>(((r.lag_ns * 2) / p + 3) * p));
-    r.text = b;
+                  r.fit == RingFit::Refuse ? "ring'as per seklus" : "ring'o atsarga maža", ms(r.lag_ns), ms(k.expect_ns),
+                  ms(d), index_offset < 0 ? " + --input-offset" : "", ms(r.safe_ns), ms(history_ns),
+                  static_cast<long long>(slots), static_cast<long long>(need_ns));
     return r;
 }
 
 std::string timing_tags_json(const OutputTiming& t) {
-    char b[256];
-    std::snprintf(b, sizeof b, R"(,"%s":["%lld"],"%s":["%lld"])", kTagCommitBound, static_cast<long long>(t.commit_bound_ns),
-                  kTagContentDelay, static_cast<long long>(t.content_delay_ns));
-    return b;
+    return strf(R"(,"%s":["%lld"],"%s":["%lld"])", kTagCommitBound, static_cast<long long>(t.commit_bound_ns),
+                kTagContentDelay, static_cast<long long>(t.content_delay_ns));
 }
 
 namespace {

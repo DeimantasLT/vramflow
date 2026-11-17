@@ -40,6 +40,8 @@
 //    (*_skips, gap_left, commit_errors). Lap'as — atšaukimas + spraga pagal politiką (lapped++).
 #include "engine/engine.hpp"
 
+#include "common/textf.hpp"
+
 #include <pthread.h>
 #include <sched.h>
 
@@ -704,7 +706,7 @@ struct TickEngine::Impl {
 
     // K17 / K-T11: vienetas sustabdomas VIENAS — jo išėjimai atlaisvinami (žemupys mato flow dingusį), kiti tęsia. Kai sugenda
     // visi vienetai — fatalu (exit 2) su paskutinio priežastimi. Vykdomas vienetas (stage != None) baigiamas OutputError.
-    void fail_unit(Unit& u, std::string why) {
+    void fail_unit(Unit& u, const std::string& why) {
         if (u.failed) return;
         u.failed = u.ever_failed = true;
         if (u.fail_index == kNoIndex) u.fail_index = ctx_index;
@@ -718,9 +720,8 @@ struct TickEngine::Impl {
             u.backoff_s = flap ? std::min(cfg.retry_max_s, 2 * u.backoff_s) : cfg.retry_min_s;
             u.retry_at = mono + static_cast<std::int64_t>(u.backoff_s * 1e9);
         }
-        char t[160];
-        std::snprintf(t, sizeof t, "%s; bandymas po %.0f s", why.c_str(), cfg.retry_min_s > 0 ? u.backoff_s : 0.0);
-        emit(EventKind::UnitFailed, u.hub, u.cur, static_cast<std::int64_t>(u.backoff_s * 1000), t);
+        const std::string t = strf("%s; bandymas po %.0f s", why.c_str(), cfg.retry_min_s > 0 ? u.backoff_s : 0.0);
+        emit(EventKind::UnitFailed, u.hub, u.cur, static_cast<std::int64_t>(u.backoff_s * 1000), t.c_str());
         if (u.slots_open) {  // iš process(): atidaryti slot'ai atšaukiami — rašytojas neatlaisvinamas su atviru grain'u
             for (std::uint32_t m = 0; m < u.nout; ++m) outs[u.out0 + m].port->cancel();
             u.slots_open = false;
@@ -800,9 +801,8 @@ struct TickEngine::Impl {
                 ++res.unit_retries;
                 u.backoff_s = std::min(cfg.retry_max_s, 2 * std::max(u.backoff_s, cfg.retry_min_s));
                 u.retry_at = mono + static_cast<std::int64_t>(u.backoff_s * 1e9);
-                char t[96];
-                std::snprintf(t, sizeof t, "atkurti nepavyko; kitas bandymas po %.0f s", u.backoff_s);
-                emit(EventKind::UnitRetryFailed, u.hub, kNoIndex, static_cast<std::int64_t>(u.backoff_s * 1000), t);
+                const std::string t = strf("atkurti nepavyko; kitas bandymas po %.0f s", u.backoff_s);
+                emit(EventKind::UnitRetryFailed, u.hub, kNoIndex, static_cast<std::int64_t>(u.backoff_s * 1000), t.c_str());
                 rst[k].store(kRetryIdle, std::memory_order_release);
             }
         }
@@ -933,10 +933,10 @@ struct TickEngine::Impl {
         launch(r, 1, [&](const Unit& u) { return ready(u, final_b); });
         for (Unit& u : units) {
             if (u.stage == Stage::None || u.cur != r.idx) continue;
-            if (!at_cut) {  // B paleista anksčiau — nesulaukti iki savo ribos C fazėje (has_c ? c : b)
+            // B paleista anksčiau (ne ties riba) — nesulaukti iki savo ribos C fazėje (has_c ? c : b); ties riba, kai yra C
+            // fazė, — pernešimas (T8). Abiem atvejais laukiantis B vienetas pereina į C; kitaip — praleista.
+            if (!at_cut || r.cuts.has_c) {
                 if (u.stage == Stage::WaitB) u.stage = Stage::WaitC;
-            } else if (r.cuts.has_c) {
-                if (u.stage == Stage::WaitB) u.stage = Stage::WaitC;  // T8: pernešimas
             } else {
                 finalize_miss(u, 1);
             }
@@ -1022,9 +1022,8 @@ struct TickEngine::Impl {
         }
         step_in_tick = true;
         last_step_mono = clk.now_mono_raw();
-        char t[64];
-        std::snprintf(t, sizeof t, "laikrodžio žingsnis %+.3f ms", static_cast<double>(d) / 1e6);
-        emit(EventKind::ClockStep, 0, kNoIndex, d, t);
+        const std::string t = strf("laikrodžio žingsnis %+.3f ms", static_cast<double>(d) / 1e6);
+        emit(EventKind::ClockStep, 0, kNoIndex, d, t.c_str());
         // Atviri tick'ai uždaromi: priežastis — laikrodis. Antras ratas — prisijungę po pernešimo (jų indeksas
         // irgi turi baigtis spraga, ne tyla).
         for (int pass = 0; pass < 2; ++pass)
@@ -1100,7 +1099,7 @@ struct TickEngine::Impl {
         pivot_slice = false;
         auto consider = [&](const Unit& u) {
             for (std::uint32_t k = 0; k < u.nin; ++k) {
-                const auto gk = static_cast<std::int64_t>(u.in0 + k);
+                const auto gk = static_cast<std::int64_t>(u.in0) + static_cast<std::int64_t>(k);
                 if (!waitable(ins[static_cast<std::size_t>(gk)])) continue;
                 // A aibėje — ne įėjimas, laukiamas po A ribos (kitaip ašis jo lauktų iki a(i), brolių nepastebėdama)
                 if (u.stage == Stage::WaitA && after_a(u, ins[static_cast<std::size_t>(gk)])) continue;
@@ -1151,7 +1150,7 @@ struct TickEngine::Impl {
                 if (pivot < 0 || rank < best_rank || (rank == best_rank && e <= best_exp)) {
                     best_rank = rank;
                     best_exp = e;
-                    pivot = static_cast<std::int64_t>(u.in0 + k);
+                    pivot = static_cast<std::int64_t>(u.in0) + static_cast<std::int64_t>(k);
                 }
             }
         }
@@ -1325,17 +1324,17 @@ struct TickEngine::Impl {
             for (int c : cfg.cpu_affinity)
                 if (c >= 0 && c < CPU_SETSIZE) CPU_SET(c, &set);
             if (const int e = pthread_setaffinity_np(pthread_self(), sizeof set, &set)) {
-                res.warn += std::string("--cpu-affinity: ") + std::strerror(e) + "; ";
-                emit(EventKind::Warning, 0, kNoIndex, e, ("--cpu-affinity: " + std::string(std::strerror(e))).c_str());
+                res.warn += std::string("--cpu-affinity: ") + errno_text(e) + "; ";
+                emit(EventKind::Warning, 0, kNoIndex, e, ("--cpu-affinity: " + errno_text(e)).c_str());
             }
         }
         if (cfg.rt_priority > 0) {
             sched_param sp{};
             sp.sched_priority = cfg.rt_priority;
             if (const int e = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp)) {
-                res.warn += std::string("--rt-priority: ") + std::strerror(e) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO); ";
+                res.warn += std::string("--rt-priority: ") + errno_text(e) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO); ";
                 emit(EventKind::Warning, 0, kNoIndex, e,
-                     ("--rt-priority: " + std::string(std::strerror(e)) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO)").c_str());
+                     ("--rt-priority: " + errno_text(e) + " (reikia CAP_SYS_NICE / RLIMIT_RTPRIO)").c_str());
             }
         }
     }
@@ -1443,9 +1442,9 @@ struct TickEngine::Impl {
 Clock& TickContext::clock() { return static_cast<TickEngine::Impl*>(e_)->clk; }
 Index TickContext::index() const { return static_cast<const TickEngine::Impl*>(e_)->ctx_index; }
 void TickContext::no_content(std::uint32_t unit) { static_cast<TickEngine::Impl*>(e_)->units[unit].no_content = true; }
-void TickContext::fail_unit(std::uint32_t unit, std::string why) {
+void TickContext::fail_unit(std::uint32_t unit, const std::string& why) {
     auto* d = static_cast<TickEngine::Impl*>(e_);
-    d->fail_unit(d->units[unit], std::move(why));
+    d->fail_unit(d->units[unit], why);
 }
 void TickContext::fatal(int exit_code, std::string why) {
     static_cast<TickEngine::Impl*>(e_)->end_fatal(EndReason::Fatal, exit_code, std::move(why));
