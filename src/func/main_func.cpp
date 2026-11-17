@@ -79,6 +79,8 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--test-out-error-after", o.test_out_error_after_s)->group("");
     c->add_option("--test-out-error-count", o.test_out_error_count)->group("");
     c->add_option("--test-out-error-flow", o.test_out_error_flow)->group("");
+    // klaidų kelių testai (tests/functional/faults.py): K-ojo video išėjimo saugyklos skirti „nepavyksta“
+    c->add_option("--test-create-fail", o.test_create_fail)->group("");
 }
 // Įėjimus skaitančios funkcijos (logo, composite, verify, enc): laukimas ir formato pasikeitimas po re-attach (planas §P6).
 void inputs(CLI::App* c, Opts& o) {
@@ -122,6 +124,7 @@ int main(int argc, char** argv) {
                   "„vėlaus commit'o“ slenkstis (eilutė ir late_commits): žemupio riba, ms; 0 — auto 3·P/4 (numatyta)");
     g->add_option("--audio", o.audio);
     g->add_option("--video", o.video);
+    g->add_option("--test-cuda-fail-after", o.test_cuda_fail_after_s)->group("");  // klaidų kelių testui (faults.py)
     g->add_option("--audio-late-ms", o.audio_late_ms,
                   "garsas rašomas ne anksčiau kaip T(i) + N ms (realaus laiko garso rašytojo modelis; 0 — iškart po video)");
     auto* gg = app.add_subcommand("gfxgen", "N × K sintetinių v210a grafikos šaltinių (tik libvramflow-gfx)");
@@ -143,6 +146,7 @@ int main(int argc, char** argv) {
     l->add_option("--deadline-ms", o.deadline_ms, kDeadlineHelp);
     l->add_option("--read-offset-us", o.read_offset_us);
     l->add_option("--test-fault-proc-delay-ms", o.test_fault_proc_delay_ms)->group("");  // izoliacijos vartų meta-testui
+    l->add_option("--test-cuda-fail-after", o.test_cuda_fail_after_s)->group("");        // klaidų kelių testui (faults.py)
     auto* cp = app.add_subcommand("composite", "bazė + K grafikos sluoksnių → v210 / v210a (MXL → MXL, C/H/G)");
     common(cp, o);
     inputs(cp, o);

@@ -203,6 +203,7 @@ struct LogoFn final : engine::TickFunction {
             }
         }
         if (!cpu && !ce) ce = cudaStreamSynchronize(stream);
+        if (!cpu) ce = static_cast<cudaError_t>(test_cuda_fault(o, "logo", ce));
         if (ce) {
             st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce);
             ctx.fatal(2, st.fatal);
@@ -389,8 +390,9 @@ int run_logo(const Opts& o_in) {
     if (host_gpu)
         for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
             std::uint32_t *a = nullptr, *b = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&a), gbytes) != cudaSuccess ||
-                cudaMalloc(reinterpret_cast<void**>(&b), gbytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; }
+            cudaError_t e = cudaMalloc(reinterpret_cast<void**>(&a), gbytes);
+            if (e == cudaSuccess) e = cudaMalloc(reinterpret_cast<void**>(&b), gbytes);
+            if (e != cudaSuccess) { st.fatal = cuda_alloc_fail("scratch", e); rc = 2; }
             s_in.push_back(a);
             s_out.push_back(b);
         }

@@ -153,6 +153,13 @@ struct Opts {
     // vieneto įėjimo nėra (spraga atidarant — GapBlocked). Izoliacijos vartų „dantų“ meta-testui (tests/functional/isolation.py fiso_teeth):
     // funkcija, kuri dėl sugedusio įėjimo vėluoja ir sveikiems, vartuose turi būti FAIL. 0 — išjungta.
     std::uint32_t test_fault_proc_delay_ms = 0;
+    // Testinės (paslėptos) klaidų kelių injekcijos (tests/functional/faults.py; planas 2026-11-17 §2.5):
+    //   test_cuda_fail_after_s — gen, logo: praėjus tiek sekundžių nuo pirmo tick'o, tick'o pabaigos CUDA patikra grąžina
+    //       klaidą (toliau — tas pats kelias kaip tikros cudaStreamSynchronize klaidos). 0 — išjungta.
+    //   test_create_fail — K-ojo (nuo 0) šio proceso video išėjimo saugyklos skirti „nepavyksta“ (create_output): tikrinama,
+    //       kad jau sukurti išėjimai atlaisvinami. < 0 — išjungta.
+    double test_cuda_fail_after_s = 0;
+    int test_create_fail = -1;
     // dec
     int playout_frames = 6;  // atkūrimo buferio gylis (kadrai)
     // dec: įėjimas, gavęs bent vieną paketą, tylus ilgiau nei tiek — sesija nutraukiama ir jungiamasi iš naujo (atidėjimas
@@ -375,5 +382,14 @@ bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const
                    const vramflow::VideoFormat& f, const Opts& o, std::string& err);
 bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
                    const Opts& o, std::string& err, int channels = 2);
+
+// --- Klaidų tekstai ir testinės klaidų injekcijos (planas 2026-11-17 §2.5; runtime/fail_text.hpp) -----------------------
+// CUDA atminties skyrimo klaidos tekstas „fatal“ laukui: kas nepavyko, CUDA klaidos tekstas ir išmatuota laisva VRAM.
+// cuda_error — cudaError_t reikšmė (int, kad šiai antraštei nereikėtų CUDA).
+std::string cuda_alloc_fail(const char* what, int cuda_error);
+// Tick'o pabaigos CUDA klaidos patikra su testine injekcija (--test-cuda-fail-after S). Be parinkties arba kai klaida jau
+// yra — grąžina cuda_error nepakeistą. Su ja: praėjus S sekundžių nuo pirmo kvietimo grąžina cudaErrorUnknown ir stderr
+// parašo eilutę su TAI laiku (testas nuo jos matuoja laiką iki proceso pabaigos).
+int test_cuda_fault(const Opts& o, const char* who, int cuda_error);
 
 }  // namespace mxlv::func

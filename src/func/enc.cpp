@@ -36,6 +36,8 @@ extern "C" {
 #include "func/func_common.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
+#include "mxlio/common_io.hpp"
+#include "runtime/fail_text.hpp"
 #include "runtime/input_slot.hpp"
 #include "timing/audio_timeline.hpp"
 
@@ -53,6 +55,20 @@ std::string averr(int e) {
     char b[AV_ERROR_MAX_STRING_SIZE]{};
     av_strerror(e, b, sizeof b);
     return b;
+}
+
+// libav žurnalas: eilutės spausdinamos kaip ir anksčiau (stderr, lygis — av_log_get_level), bet paskutinė klaidos lygio
+// eilutė šioje gijoje dar ir įsimenama. avcodec_open2 grąžina tik kodą („Invalid argument“), o tikroji priežastis — pvz.
+// „OpenEncodeSessionEx failed: incompatible client key (21)“, kai viršyta NVENC sesijų riba — yra tik žurnale; iš jos
+// sudaromas srauto klaidos tekstas (runtime::nvenc_open_fail_text). Kiekvienas darbininkas koderį atidaro savo gijoje.
+thread_local std::string t_av_error;
+void remembering_av_log(void* avcl, int level, const char* fmt, va_list vl) {
+    if (level > av_log_get_level()) return;
+    static thread_local int prefix = 1;
+    char line[1024];
+    av_log_format_line2(avcl, level, fmt, vl, line, sizeof line, &prefix);
+    if (level <= AV_LOG_ERROR) t_av_error = line;
+    std::fputs(line, stderr);
 }
 
 struct Item {
@@ -215,9 +231,10 @@ void worker(Ctx& cx, Stream& s) {
             av_dict_set(&d, "level", h264_level(fmt), 0);
             av_dict_set(&d, "x264-params", inter ? "tff=1:nal-hrd=cbr:force-cfr=1:scenecut=0:aud=1" : "nal-hrd=cbr:force-cfr=1:scenecut=0:aud=1", 0);
         }
+        t_av_error.clear();
         e = avcodec_open2(vc, vcodec, &d);
         av_dict_free(&d);
-        if (e < 0) { fail("video avcodec_open2: " + averr(e)); goto out; }
+        if (e < 0) { fail(runtime::nvenc_open_fail_text(averr(e), t_av_error)); goto out; }
     }
     // --- audio koderis
     if (o.audio) {
@@ -358,6 +375,7 @@ int run_enc(const Opts& o) {
     st.set_seconds(o.seconds_kept);  // sekundžių žiedai — dabar (ne tick'e)
     auto& stop = stop_flag();
     const bool nvenc = o.encoder == "nvenc";
+    av_log_set_callback(remembering_av_log);  // koderio atidarymo klaidos priežastis — iš libav žurnalo eilutės
     Ctx cx;
     cx.o = &o;
     cx.w = o.fmt.raster.w;
@@ -376,12 +394,14 @@ int run_enc(const Opts& o) {
             char b[512];
             std::snprintf(b, sizeof b,
                           "%s{\"frames_encoded\":%llu,\"packets_video\":%llu,\"packets_audio\":%llu,\"bytes_video\":%llu,"
-                          "\"mux_errors\":%llu,\"encode_errors\":%llu,\"encode_p50_ms\":%.3f,\"encode_p99_ms\":%.3f,\"error\":\"%s\"}",
+                          "\"mux_errors\":%llu,\"encode_errors\":%llu,\"encode_p50_ms\":%.3f,\"encode_p99_ms\":%.3f,\"error\":",
                           k ? "," : "", (unsigned long long)s.frames_encoded, (unsigned long long)s.packets_video,
                           (unsigned long long)s.packets_audio, (unsigned long long)s.bytes_video, (unsigned long long)s.mux_errors,
-                          (unsigned long long)s.encode_errors, s.encode_ms.quantile(0.5) / 1e6, s.encode_ms.quantile(0.99) / 1e6,
-                          s.error.c_str());
+                          (unsigned long long)s.encode_errors, s.encode_ms.quantile(0.5) / 1e6, s.encode_ms.quantile(0.99) / 1e6);
             extra += b;
+            // klaidos tekstas — bet kokio ilgio ir su bet kokiais simboliais (libav žurnalo eilutė): ne per fiksuotą buferį
+            mxlv::json_escape_into(extra, s.error);
+            extra += "}";
         }
         extra += "]";
         write_summary(o, "enc", st, extra);
@@ -475,7 +495,11 @@ int run_enc(const Opts& o) {
             for (int k = 0; k < kQueueMax + 3; ++k) s->pinned.push_back(static_cast<std::uint8_t*>(std::malloc(nv12)));
             s->pinned_fallback = true;
         } else if (!nvenc) {
-            if (cudaMalloc(reinterpret_cast<void**>(&s->d_stage), nv12) != cudaSuccess) { st.fatal = "staging"; rc = 2; break; }
+            if (const cudaError_t e = cudaMalloc(reinterpret_cast<void**>(&s->d_stage), nv12); e != cudaSuccess) {
+                st.fatal = cuda_alloc_fail("staging", e);
+                rc = 2;
+                break;
+            }
             for (int k = 0; k < kQueueMax + 3; ++k) {
                 std::uint8_t* p = nullptr;
                 if (cudaHostAlloc(reinterpret_cast<void**>(&p), nv12, cudaHostAllocDefault) != cudaSuccess) {

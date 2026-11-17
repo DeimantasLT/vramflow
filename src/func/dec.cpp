@@ -267,7 +267,7 @@ int run_dec(const Opts& o) {
     if (!rc && !plan_edges(o, ecfg, {}, true, "dec", st, plan, err)) rc = 2;
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (!create_output(inst, out[n], flow_id(kRoleDec, o.flow_base + n), video_def(kRoleDec, o.flow_base + n, o.run_seed, o.fmt, plan.tags),
-                           opts, o.fmt, o, err)) { st.fatal = err; rc = 2; }  // nuoma + savininko run_id klaidoje (§P6)
+                           opts, o.fmt, o, err)) { st.fatal = "out " + std::to_string(n) + ": " + err; rc = 2; }  // + savininko run_id (§P6)
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         auto s = std::make_unique<DecStream>();
         s->idx = static_cast<int>(n);

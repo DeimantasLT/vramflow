@@ -148,6 +148,7 @@ struct GenFn final : engine::TickFunction {
                                        static_cast<std::uint32_t>(grain.num), static_cast<std::uint32_t>(grain.den), stream);
             if (!ce) ce = cudaStreamSynchronize(stream);
         }
+        if (!cpu) ce = static_cast<cudaError_t>(test_cuda_fault(o, "gen", ce));
         if (ce) {
             st.fatal = std::string("CUDA: ") + cudaGetErrorString(ce);
             ctx.fatal(2, st.fatal);
@@ -253,7 +254,11 @@ int run_gen(const Opts& o) {
     if (host_gpu)
         for (std::size_t n = 0; n < vout.size(); ++n) {
             std::uint32_t* p = nullptr;
-            if (cudaMalloc(reinterpret_cast<void**>(&p), gbytes) != cudaSuccess) { st.fatal = "scratch"; rc = 2; break; }
+            if (const cudaError_t e = cudaMalloc(reinterpret_cast<void**>(&p), gbytes); e != cudaSuccess) {
+                st.fatal = cuda_alloc_fail("scratch", e);
+                rc = 2;
+                break;
+            }
             scratch.push_back(p);
         }
     // Bendras tick variklis (planas V8): N šaltinio vienetų (be įėjimų), išėjimas — video flow'as (jei yra), garsas —

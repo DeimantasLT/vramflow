@@ -4,9 +4,12 @@
 
 #include <cuda_runtime_api.h>
 #include <signal.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
 
 #include <mxl/time.h>
 
+#include <cerrno>
 #include <cinttypes>
 #include <csignal>
 #include <cstdio>
@@ -14,7 +17,9 @@
 #include <future>
 #include <thread>
 
+#include "func/engine_glue.hpp"
 #include "mxlio/common_io.hpp"
+#include "runtime/fail_text.hpp"
 
 namespace mxlv::func {
 
@@ -116,16 +121,64 @@ int poll_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, st
     return 0;
 }
 
+namespace {
+// Kodėl MXL nesukūrė išėjimo flow (ne „jau egzistuoja“): statusas priežasties nepasako, todėl ji išmatuojama čia — ar
+// domeno katalogas rašomas, kiek laisvos VRAM (cuda-linear) arba vietos domene (host) ir kiek reikia žiedui. Žiedo dydis —
+// pagal MXL formulę (Instance.cpp): grain'ų skaičius = domeno istorija × grain'ų dažnis (sveikoji dalis).
+std::string storage_note(const Opts& o, const vramflow::VideoFormat& f, bool cuda) {
+    runtime::StorageFacts s;
+    s.cuda = cuda;
+    s.writable = ::access(o.domain.c_str(), W_OK | X_OK) == 0 || errno != EACCES;
+    const vramflow::Rational g = f.grain_rate();
+    const std::uint64_t grains = static_cast<std::uint64_t>(domain_history_ns(o.domain)) * g.num / (1'000'000'000ull * g.den);
+    s.need = grains * vramflow::gfx::grain_bytes(f.raster);
+    if (cuda) {
+        std::size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+            s.free = free_b;
+            s.total = total_b;
+        }
+    } else {
+        struct statvfs v {};
+        if (::statvfs(o.domain.c_str(), &v) == 0) {
+            s.free = static_cast<std::uint64_t>(v.f_bavail) * v.f_frsize;
+            s.total = static_cast<std::uint64_t>(v.f_blocks) * v.f_frsize;
+        }
+    }
+    return runtime::storage_fail_text(s);
+}
+}  // namespace
+
 bool create_output(mxlInstance inst, VideoOut& out, const std::string& id, const std::string& def, const std::string& options,
                    const vramflow::VideoFormat& f, const Opts& o, std::string& err) {
-    if (out.create(inst, def, options, err, f)) {
+    static int ordinal = 0;  // šio proceso video išėjimo eilės numeris — tik testinei injekcijai (--test-create-fail)
+    if (o.test_create_fail >= 0 && ordinal++ == o.test_create_fail) {
+        out.create_status = MXL_ERR_UNKNOWN;  // toliau — tas pats kelias kaip tikros saugyklos klaidos
+        err = "mxlCreateFlowWriter status " + std::to_string(MXL_ERR_UNKNOWN) + " (--test-create-fail: dirbtinė klaida)";
+    } else if (out.create(inst, def, options, err, f)) {
         lease_output(id);
         return true;
     }
     const bool exists = out.existed || out.create_status == MXL_ERR_CONFLICT;
     out.release(inst);  // created=false — prisijungta prie svetimo flow; atlaisvinam prieš tikrindami, kas jį laiko
     if (exists) err += exists_note(inst, o, id);
+    else if (out.create_status != MXL_STATUS_OK) err += storage_note(o, f, !options.empty());  // MXL klaida — pridedama priežastis
     return false;
+}
+
+std::string cuda_alloc_fail(const char* what, int cuda_error) {
+    std::size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) != cudaSuccess) free_b = total_b = 0;
+    return runtime::cuda_alloc_fail_text(what, cudaGetErrorString(static_cast<cudaError_t>(cuda_error)), free_b, total_b);
+}
+
+int test_cuda_fault(const Opts& o, const char* who, int cuda_error) {
+    if (o.test_cuda_fail_after_s <= 0 || cuda_error != cudaSuccess) return cuda_error;
+    static const std::uint64_t at = mxlGetTime() + static_cast<std::uint64_t>(o.test_cuda_fail_after_s * 1e9);
+    const std::uint64_t now = mxlGetTime();
+    if (now < at) return cuda_error;
+    std::fprintf(stderr, "[%s] --test-cuda-fail-after: dirbtinė CUDA klaida, TAI %llu\n", who, static_cast<unsigned long long>(now));
+    return cudaErrorUnknown;
 }
 
 bool create_output(mxlInstance inst, AudioOut& out, const std::string& id, const std::string& def, vramflow::Rational grain_rate,
