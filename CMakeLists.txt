@@ -23,6 +23,7 @@ set(MXL_SOURCE_DIR "$ENV{HOME}/src/mxl-pr653" CACHE PATH "MXL šaltinis (CudaLin
 # Catch2 ir CLI11 imami iš MXL vcpkg (ta pati baseline, nieko papildomai nesiunčiam)
 set(MXL_VCPKG_PREFIX "${MXL_SOURCE_DIR}/build/Linux-Clang-Release/vcpkg_installed/x64-linux" CACHE PATH "")
 option(MXLV_ENABLE_SANITIZERS "ASan + UBSan host kodui" OFF)
+option(MXLV_ENABLE_TSAN "ThreadSanitizer host kodui (tik CPU keliui; su MXLV_ENABLE_SANITIZERS nesuderinama)" OFF)
 option(MXLV_BUILD_TESTS "Unit ir GPU testai" ON)
 
 include(${CMAKE_SOURCE_DIR}/cmake/hardening.cmake)  # vramflow_hardening(<tikslas>) — kviečiama iš vramflow_warnings()
@@ -33,9 +34,21 @@ find_package(CUDAToolkit REQUIRED)
 find_package(mxl CONFIG REQUIRED)
 find_package(CLI11 CONFIG REQUIRED)
 
+# Sanitizerių build'ai (scripts/linux/50-sanitizers.sh; planas 2026-11-17 §2.1, §2.2). ASan ir TSan viename binare neveikia
+# (skirtingi šešėlinės atminties išdėstymai) — abi parinktys kartu yra konfigūravimo klaida, ne tylus vienos pasirinkimas.
+if(MXLV_ENABLE_SANITIZERS AND MXLV_ENABLE_TSAN)
+  message(FATAL_ERROR "MXLV_ENABLE_TSAN ir MXLV_ENABLE_SANITIZERS kartu neįjungiamos: ASan ir TSan viename binare neveikia. "
+                      "Kiekvienam — atskiras build katalogas (scripts/linux/50-sanitizers.sh asan | tsan).")
+endif()
 if(MXLV_ENABLE_SANITIZERS)
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined> $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>)
+  # -fno-sanitize-recover: UBSan radinys baigia procesą (kitaip tik eilutė stderr, o exit kodas lieka 0)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined> $<$<COMPILE_LANGUAGE:CXX>:-fno-sanitize-recover=undefined>
+                      $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>)
   add_link_options(-fsanitize=address,undefined)
+endif()
+if(MXLV_ENABLE_TSAN)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=thread> $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>)
+  add_link_options(-fsanitize=thread)
 endif()
 
 add_library(mxlv_common INTERFACE)
@@ -63,7 +76,8 @@ if(MXLV_BUILD_TESTS)
   find_package(Catch2 3 CONFIG REQUIRED)
   enable_testing()
   include(Catch)
-  add_executable(mxlv-unit tests/unit/test_common.cpp tests/unit/test_format.cpp tests/unit/test_second_ring.cpp)
+  add_executable(mxlv-unit tests/unit/test_common.cpp tests/unit/test_format.cpp tests/unit/test_second_ring.cpp tests/unit/test_textf.cpp
+                 tests/unit/test_parse_num.cpp)
   vramflow_warnings(mxlv-unit)
   target_link_libraries(mxlv-unit PRIVATE mxlv_common Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-unit)
