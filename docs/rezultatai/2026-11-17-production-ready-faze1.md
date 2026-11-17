@@ -112,3 +112,12 @@ skaitytojas tebeskaito (testas tai tikrina po kiekvienos netikrų antraščių s
 `ffmt_logo720`, `ffmt_comp`, `ffmt_enc`, `ffmt_dec`, `fstart_restart`, `fstart_attach`): 49 iš 49 PASS.
 
 Kas lieka: GPU branduolių ribų patikra `compute-sanitizer` (planas 2.3) — S3 GPU pusė iki tol remiasi šiais testais.
+
+### 1.2 papildymas: grupei bendras domenas
+
+Peržiūrint savo 1.2 kodą rasta spraga: kai domeną dalijasi skirtingi vartotojai per vieną grupę (pvz. konteineriai su bendru
+`fsGroup`), naujas nuomos katalogas gaudavo kūrėjo pirminę grupę, todėl kitas vartotojas jo nepriimdavo. Dabar naujas
+katalogas gauna domeno grupę ir `setgid` bitą (failai jame paveldi grupę). Testas `safe_files: grupei bendras domenas …`
+(tik root: vaiko procesas kito vartotojo ir grupės teisėmis, abi tvarkos — katalogą pirmas sukuria root arba kitas
+vartotojas): be pataisos krenta (katalogo grupė 0 arba 54323 vietoje 54321, antras vartotojas nuomos negauna), su pataisa —
+`[safe_files]` 10 atvejų, 149 tvirtinimai.

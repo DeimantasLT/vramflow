@@ -91,7 +91,13 @@ int open_lease_dir(const std::string& domain, bool create, std::string& err) {
             ::close(fd);
             return -1;
         }
-        if (::fchmod(fd, made ? dom_mode : (have & dom_mode)) != 0) {
+        mode_t want = made ? dom_mode : (have & dom_mode);
+        // Grupei bendras domenas (skirtingi vartotojai, viena grupė — pvz. konteineriai su bendru fsGroup): naujas nuomos
+        // katalogas gauna domeno grupę ir setgid bitą — kiti grupės nariai jį priima, o jame kuriami failai paveldi tą pačią
+        // grupę. fchown nepavykus (procesas ne tos grupės narys) lieka kūrėjo grupė: kitas vartotojas katalogo nepriims
+        // (aiški klaida), bet niekas nesugadinama.
+        if (made && have_dom && (dom_mode & 0070) != 0 && ::fchown(fd, static_cast<uid_t>(-1), ds.st_gid) == 0) want |= S_ISGID;
+        if (::fchmod(fd, want) != 0) {
             err = what + "fchmod: " + std::strerror(errno);
             ::close(fd);
             return -1;

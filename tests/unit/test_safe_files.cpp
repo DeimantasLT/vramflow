@@ -5,6 +5,7 @@
 // vietinis vartotojas gali jį sukurti pirmas arba padėti jame simbolinę nuorodą ar FIFO. Testai — per viešą sąsają
 // (DomainLease, Ledger); GPU ir MXL nereikia.
 #include <fcntl.h>
+#include <grp.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -205,6 +206,64 @@ TEST_CASE("safe_files: svetimam priklausantis nuomos katalogas atmetamas", "[saf
     Ledger g;
     CHECK_FALSE(Ledger::open(b.d(), kUuid, g, err));
     CHECK(DomainLease::live_owners(b.d()).empty());
+}
+
+// Grupei bendras domenas: skirtingi vartotojai, viena grupė (pvz. konteineriai su bendru fsGroup). Nuomos katalogą gali
+// sukurti bet kuris iš jų; kitas turi jį priimti, gauti savo nuomą ir matyti pirmojo rezervaciją. Kito vartotojo pirminė
+// grupė — ne domeno (domeno grupė tik papildoma): be fchown į domeno grupę katalogas liktų svetimos grupės.
+TEST_CASE("safe_files: grupei bendras domenas — kitas tos grupės vartotojas gauna nuomą ir mato knygą", "[safe_files][lease]") {
+    if (::geteuid() != 0) SKIP("reikia root (kito vartotojo ir grupės imitacijai)");
+    constexpr gid_t kShared = 54321, kPrimary = 54323;
+    constexpr uid_t kOther = 54322;
+    const Capacity c = cap1000();
+    // Vaikas kito vartotojo teisėmis: nuoma + knyga; exit 0 — pavyko ir knygoje mato `expect` Mpix/s
+    auto as_other = [&](const std::string& dom, const char* run, double expect, double reserve) {
+        return child_exit_within(
+            [&] {
+                const gid_t groups[] = {kShared};
+                if (::setgroups(1, groups) != 0 || ::setgid(kPrimary) != 0 || ::setuid(kOther) != 0) return 9;
+                DomainLease l;
+                Ledger g;
+                std::string err;
+                if (!DomainLease::acquire(dom, run, l, err)) return 3;
+                if (!Ledger::open(dom, kUuid, g, err)) return 4;
+                if (g.total().nvdec_mpix_s != expect) return 5;
+                if (reserve > 0 && !g.reserve("f", nvdec(reserve), c).admit) return 6;
+                return 0;
+            },
+            3000);
+    };
+    SECTION("katalogą pirmas sukuria root, kitas vartotojas prisijungia") {
+        Base b(0770);
+        REQUIRE(::chmod(b.root.c_str(), 01777) == 0);  // tėvinis katalogas — kaip /dev/shm: kurti gali visi
+        REQUIRE(::chown(b.dom.c_str(), 0, kShared) == 0);
+        DomainLease l;
+        Ledger g;
+        std::string err;
+        REQUIRE(DomainLease::acquire(b.d(), "run-root", l, err));
+        REQUIRE(Ledger::open(b.d(), kUuid, g, err));
+        REQUIRE(g.reserve("f0", nvdec(100), c).admit);
+        struct stat st {};
+        REQUIRE(::stat(b.lease().c_str(), &st) == 0);
+        CHECK(st.st_gid == kShared);          // domeno grupė
+        CHECK((st.st_mode & S_ISGID) != 0);   // failai paveldi grupę
+        CHECK(as_other(b.d(), "run-other", 100, 0) == 0);
+    }
+    SECTION("katalogą pirmas sukuria kitas vartotojas, root prisijungia") {
+        Base b(0770);
+        REQUIRE(::chmod(b.root.c_str(), 01777) == 0);  // tėvinis katalogas — kaip /dev/shm: kurti gali visi
+        REQUIRE(::chown(b.dom.c_str(), 0, kShared) == 0);
+        REQUIRE(as_other(b.d(), "run-other", 0, 0) == 0);  // sukuria katalogą ir išeina (nuoma atlaisvinama)
+        struct stat st {};
+        REQUIRE(::stat(b.lease().c_str(), &st) == 0);
+        CHECK(st.st_uid == kOther);
+        CHECK(st.st_gid == kShared);
+        DomainLease l;
+        std::string err;
+        CHECK(DomainLease::acquire(b.d(), "run-root", l, err));
+        INFO(err);
+        CHECK(DomainLease::live_owners(b.d()) == std::vector<std::string>{"run-root"});
+    }
 }
 
 // [RF-2] Tas pats domenas kitu keliu (simbolinė nuoroda, `/./`, galinis `/`) turi turėti vieną nuomos katalogą ir vieną
