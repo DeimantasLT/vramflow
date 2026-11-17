@@ -549,11 +549,15 @@ failas arba commit.
 
 - Ar `clang++-18` kompiliuotas kodas susiejamas su `clang++-19` kompiliuota MXL ir ar ASan build'as su `MXLV_BUILD_FUNC=ON`
   iš viso susirenka (2.1).
-- Ar `-fstack-clash-protection`, `-fcf-protection=full` ir `-D_FORTIFY_SOURCE=3` praeina su `-Werror` abiem
-  kompiliatoriais (`clang++-19` ir `g++` per `nvcc -Xcompiler`) (1.1).
-- Ar visas funkcinis rinkinys praeina vartotojo `mxltest` vardu (patikrinta tik tai, kad jam veikia CUDA) (1.3).
 - FFmpeg `h264_cuvid` numatytasis paviršių skaičius ir ar jo mažinimas tikrai mažina VRAM (4.3).
 - Ar U1–U3 pataisos taikosi PR #653 viršūnei ir ar VRAMFlow su ja kompiliuojasi (5.2).
 - Ar `cuda-linear` fd perdavimas veikia tarp konteinerių (5.4).
 - Kiek užtrunka `clang-tidy` visam `src/` ir kiek radinių duoda pasirinktas rinkinys (2.4).
 - Visi natyvaus Linux skaičiai: šis planas vykdomas WSL2; natyvus matavimas — lauko bandymas (6.1).
+
+Patikrinta 1 fazėje ir iš sąrašo išbraukta (`docs/rezultatai/2026-11-17-production-ready-faze1.md`):
+
+- grūdinimo vėliavos su `-Werror`: švarus build — 0 įspėjimų C, C++ (`clang++-19`) ir CUDA host daliai
+  (`nvcc -Xcompiler`); `ctest build_hardening` — 104 vertimo vienetai ir 22 ELF failai (1.1);
+- visas funkcinis rinkinys vartotojo `mxltest` vardu: 353 rezultatai, root neprireikė nė vienam testui (1.3, ant
+  `b8168d6`). Po peržiūros pataisų ne root pakartoti tik 28 testai, einantys per pakeistą kodą.

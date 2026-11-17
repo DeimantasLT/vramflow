@@ -224,6 +224,7 @@ vartotojai (`SECURITY.md`).
 testas pakibo); visas `mxlv-admission-unit` — 40 atvejų, 613 tvirtinimų; `[hostile]` — 4 atvejai, 111 tvirtinimų, dabar
 reikalaujantys būtent `MXL_ERR_INTERNAL`. Švarus build — 0 įspėjimų; `ctest` 509 / 509; funkciniai 28 iš 28 kaip root ir
 28 iš 28 kaip `mxltest`.
+
 Fuzzeriai pakartoti su nutraukiančiu UBSan (`-fno-sanitize-recover=undefined`): `flow_def` — 224 285 703 vykdymai per 600 s;
 `capacity` — 4 321 715, `playlist` — 1 050 200, `url` — 3 055 160 per 120 s; radinių nėra. Dažnio skaitymo testas `format:
 flow aprašo grain_rate …` prieš seną kodą krenta (`25e3`, `25.5`, `+25`, 1 000 001 ir didesni buvo priimami).
@@ -233,10 +234,16 @@ flow aprašo grain_rate …` prieš seną kodą krenta (`25e3`, `25.5`, `+25`, 1
 Paskutinė patikra ant `31997b4`: švarus build — 0 įspėjimų; `ctest` 510 / 510. Kriterijai: S1, S2, S4, S5, S6, S7 — PASS;
 S3 — skaitymo kelias PASS, GPU branduolių `compute-sanitizer` lieka paketui 2.3; K8 — šios fazės peržiūra atlikta.
 
+Po dokumentų commit'o `646dbd5` (kodas tas pats: `ninja: no work to do`) `ctest` pakartotas: 509 / 510, 136 s. Krito tik
+žinomas nestabilus laiko testas `gap_policy … < 1 ms`. Jo 20 pakartojimų ant to paties build: 14 praėjo, 6 krito — tiek pat,
+kiek bazėje (6 iš 20, plano §3). Kritusių reikšmės: 1,251; 1,252; 1,252; 1,253; 1,258; 1,296 ms prieš 1 ms ribą. Penkios iš
+šešių telpa į 7 µs — tai stebėjimas, ne paaiškinimas; priežasties paieška — 3 fazės darbas (kriterijus G3).
+
 Kas šioje fazėje nepatikrinta:
 
-- visas funkcinis rinkinys (2 h 25 min) po peržiūros pataisų: kaip root nekartotas iš viso, kaip ne root — tik 28 testai;
-  paskutiniai pilni paleidimai — root ant `8bd366d`, ne root ant `b8168d6`;
+- visas funkcinis rinkinys (2 h 25 min) po peržiūros pataisų: pilnas nekartotas nei kaip root, nei kaip ne root — abiem
+  vartotojais paleisti tik 28 testai, einantys per pakeistą kodą; paskutiniai pilni paleidimai — root ant `8bd366d`, ne root
+  ant `b8168d6`;
 - natyvus Linux (viskas matuota WSL2) ir konteineriai;
 - `clang++-18` sanitizerių build'as visam projektui (kol kas tik fuzz taikiniams) — paketas 2.1;
 - grupei bendro domeno scenarijus tikrais vartotojais ir tikra grupe (testuose — išgalvoti uid / gid per `setuid`).
