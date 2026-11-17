@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "func/flows.hpp"
 
+#include <cuda_runtime_api.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -186,6 +188,15 @@ bool VideoOut::create(mxlInstance inst, const std::string& def, const std::strin
     if ((st = mxlFlowWriterMapSlots(w, layout.slotCount, slots.data())) != MXL_STATUS_OK) { err = "MapSlots " + std::to_string(st); return false; }
     mxlFlowWriterGetStorageLayout(w, &layout);
     if (const std::string bad = check_layout(layout, r); !bad.empty()) { err = "lauko " + bad; return false; }
+    // MXL cuda-linear įskiepis naują žiedą nulina asinchroniškai — cudaMemset numatytajame sraute — ir pabaigos nelaukia
+    // (CudaLinearBackend.cpp, prepare; išmatuota: grįžus cudaStreamQuery(0) == cudaErrorNotReady). Funkcijos į žiedą rašo
+    // kernel'iais non-blocking sraute, kuris su numatytuoju nesinchronizuojamas, o klaidos kelyje flow atlaisvinamas iškart —
+    // abiem atvejais GPU dar dirbtų su ta pačia atmintimi. Todėl grįžtama tik baigus nulinimą (kaina — kelios ms kuriant).
+    if (is_cuda_layout(layout))
+        if (const cudaError_t ce = cudaStreamSynchronize(nullptr); ce != cudaSuccess) {
+            err = std::string("žiedo nulinimas: CUDA ") + cudaGetErrorString(ce);
+            return false;
+        }
     return true;
 }
 

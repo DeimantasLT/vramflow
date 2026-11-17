@@ -12,6 +12,7 @@ must understand every line (AGENTS.md). Nothing here has been pushed or posted.
 | U3 | Catch2 test: partial grains (slice-by-slice commit, `minValidSlices` reads, `TOO_EARLY` for one slice more, reopen keeps progress) with a payload backend | test (runs in CI without GPU) | `U3-…/ctest.txt` — PASS |
 | U4 | Catch2 tests: `video/v210a` (fill + key planes) with `cuda-linear`: plane count and sizes, both planes reach the reader, partial grains on both planes | test (needs a CUDA device, SKIP without) | `U4-…/ctest.txt` — PASS |
 | U6 | Report: the `cuda-linear` backend switches the caller thread to the primary CUDA context (`cuCtxSetCurrent` + `cudaSetDevice`) and does not restore it | issue (facts + repro, no patch) | `U6-cuda-context/README.md` — repro exit 1 |
+| U7 | Report: the `cuda-linear` backend returns from flow creation while its `cudaMemset` of the new ring is still running (`cudaStreamQuery` says not ready); a quick release then leaves GPU work on unmapped memory | issue (facts + repro, no patch) | `U7-cuda-linear-async-memset/README.md` — repro exit 1; `compute-sanitizer` 3 of 5 runs with an error before the workaround, 0 of 6 after |
 
 All three together on PR head: **full ctest 136/136 passed** as a non-root user (WSL2 Ubuntu 24.04, Clang 19, CUDA 13.2,
 RTX 4070 Laptop), except `Reader on a peer GPU` (skipped: one GPU) and `Reader in another container` (excluded: no docker) —

@@ -525,7 +525,7 @@ failas arba commit.
 | G4 | nepradėta | | |
 | G5 | nepradėta | | |
 | K1 | nepradėta | bazė: `ctest` 482 / 483; funkcinis 351 / 352. Po 1 fazės (`dad306b`): `ctest` 510 / 510 ir 509 / 510 (krito tik `gap_policy … < 1 ms`); visas funkcinis rinkinys kaip root — 353 iš 353, vienas paleidimas (kriterijui reikia trijų iš eilės, 6.3) | §3; `docs/rezultatai/2026-11-17-production-ready-faze1.md` |
-| K2 | nepradėta | | |
+| K2 | vyksta | `compute-sanitizer`: `memcheck` 5 GPU testų binarams ir rašytojo / skaitytojo porai, `racecheck`, `synccheck` — 0 klaidų, 3 paleidimai iš eilės (9 eilutės `PASS`). Rado MXL `cuda-linear` įskiepio lenktynes (asinchroninis `cudaMemset`): pataisyta pas mus, juodraštis `upstream/U7`. ASan + UBSan ir TSan — dar ne | `scripts/linux/50-sanitizers.sh cs`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.3 |
 | K3 | nepradėta | | |
 | K4 | PASS | 7 klaidų kelių testai (10 atvejų) praeina kaip root ir ne root; nuo gedimo iki pabaigos 0,06–1,92 s (riba 5 s); domenas po gedimo švarus; kaimyno pora — 0 praradimų ir 0 vėlavimų po gedimo. VRAM išsekimas hog'u — `SKIP` ×3: WSL2 jo nesukelia (išmatuota), tą patį kelią dengia `fault_alloc_fail`; tikras išsekimas — NEPATIKRINAMA ČIA. Kaimyno vėlavimai startuojant kitam GPU procesui (6 per 34 poras) — ne gedimo pasekmė, perkelta į G3 | `tests/functional/faults.py`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.5 |
 | K5 | nepradėta | | |
@@ -534,7 +534,7 @@ failas arba commit.
 | K8 | vyksta | 1 fazė: nepriklausoma peržiūra — 9 radinių grupės, pataisyta arba dokumentuota | `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.7 |
 | S1 | PASS | grėsmių modelis: 17 grėsmių, kiekviena su testu arba „nepriimta, nes …“; `SECURITY.md` | `docs/architektura/2026-11-17-gresmiu-modelis.md`; `SECURITY.md` |
 | S2 | PASS | 4 taikiniai po 600 s be radinių (203,6 mln. / 23,7 mln. / 2,5 mln. / 7,0 mln. vykdymų); vienas radinys trumpame paleidime pataisytas ir įdėtas į korpusą | `scripts/linux/56-fuzz.sh`; `ctest fuzz_replay_*`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.5 |
-| S3 | vyksta | skaitymo kelias (host ir `cuda-linear`) — PASS: 4 atvejai, prieš pataisą krito 3; GPU branduolių `compute-sanitizer` — paketas 2.3 | `tests/gpu/test_hostile_writer.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.4 |
+| S3 | PASS | skaitymo kelias (host ir `cuda-linear`): 4 piktybiško rašytojo atvejai, prieš pataisą krito 3; GPU pusė: `compute-sanitizer memcheck` visiems branduolių testams ir flow'ų skaitymo testams (tarp jų piktybiško rašytojo) — 0 klaidų | `tests/gpu/test_hostile_writer.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.4; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.3 |
 | S4 | PASS | `[safe_files]` 16 atvejų, 305 tvirtinimai (po peržiūros: prieiga pagal rašymo teisę į domeną, riboti užraktai, šalinimas po užraktu); `fstart_*`, `overload_*` 28 iš 28 kaip root ir ne root | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
 | S5 | PASS | `mxltest`: build 0 įspėjimų, `ctest` 503 / 503, funkciniai 353 — 351 PASS / INFO; 2 FAIL (`fgold_dec`) buvo skripto klaida, po pataisos praeina (28 iš 28 pakartotų). Po peržiūros pataisų visas rinkinys ne root nekartotas | `scripts/linux/45-nonroot.sh`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.3 |
 | S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |

@@ -98,3 +98,97 @@ Praradimai (praleisti indeksai, patikros klaidos, exit kodai) vertinami visada i
 
 **Tai neišspręsta, tik atskirta nuo gedimų.** ~20 ms kaimyno sustojimas startuojant kitam GPU procesui yra tikras
 poveikis kitiems procesams; jo priežastis ir dažnis — 3 fazės darbas (G3).
+
+## 2.3 `compute-sanitizer` GPU branduoliams (K2, S3)
+
+Etapas `cs` skripte `scripts/linux/50-sanitizers.sh`: `memcheck` penkiems GPU testų binarams, `racecheck` ir `synccheck`
+atstovaujamiems testams, `memcheck` rašytojo ir skaitytojo porai atskiruose procesuose.
+
+### Pirmas paleidimas
+
+| Eilutė | Rezultatas |
+|---|---|
+| `memcheck`: `mxlv-gpu-tests`, `mxlv-media-gpu-tests`, `vramflow-gfx-gpu-tests`, `vramflow-v210a-gpu-tests` | 0 klaidų |
+| `memcheck`: `vramflow-flows-tests` | **10 klaidų**, exit 86; vienas testas krito |
+| `racecheck`, `synccheck`: `mxlv-gpu-tests` | 0 |
+| `memcheck`: rašytojas | exit 143, suvestinės nėra |
+| `memcheck`: skaitytojas | exit 3 „netikėtas layout“, 0 klaidų |
+
+Trys skirtingos priežastys.
+
+**1. Tikras radinys — MXL `cuda-linear` įskiepis.** Visos 10 klaidų — „Internal Sanitizer Error: The Sanitizer failed to
+handle a hardware exception“ ir po jos einančios CUDA API klaidos. Įskiepis naują žiedą nulina `cudaMemset`
+(`CudaLinearBackend.cpp:1277`) ir grįžta nelaukdamas; įrenginio atminčiai `cudaMemset` yra asinchroninis. Testas flow
+sukuria ir po kelių milisekundžių atlaisvina — GPU darbas lieka atminčiai, kuri jau atjungiama.
+
+| Matavimas | Prieš | Po |
+|---|---|---|
+| Vienas testas po `memcheck`, paleidimų su klaida | 3 iš 5 | 0 iš 6 |
+| `cudaStreamQuery(0)` iškart po `mxlCreateFlowWriter` (atskira programa be mūsų kodo) | „dar vyksta“ 20 iš 20 (53 MiB žiedas) ir 20 iš 20 (527 MiB) | — |
+| Naujas testas `flows: cuda-linear VideoOut::create grįžta tik baigus žiedo nulinimą` | krito 6 iš 6 | praėjo 6 iš 6 |
+| Visas `vramflow-flows-tests` po `memcheck` | 10 klaidų | 0 klaidų, 3 iš 3 |
+
+Pataisa — pas mus: `VideoOut::create` (`src/func/flows.cpp`) `cuda-linear` flow'ui laukia numatytojo srauto
+(`cudaStreamSynchronize(nullptr)`). Kaina — kelios ms kuriant flow. Tas pats laukimas pridėtas testų pagalbininkui, kuris
+MXL kviečia tiesiogiai (`tests/gpu/test_v210a_cuda_linear.cpp`): be jo antrame etapo paleidime klaida pasirodė ir ten.
+Radinys aprašytas MXL projektui kaip juodraštis `upstream/U7-cuda-linear-async-memset/` (faktai, minimalus pavyzdys,
+siūlomas pakeitimas). Niekur nesiųsta.
+
+Ko **nepavyko** parodyti: kad dėl to prarandami duomenys. Testas iškart po sukūrimo trijose 527 MiB žiedo vietose įrašo po
+64 KiB kitame (non-blocking) sraute ir perskaito — 8 paleidimuose neprarasta nė baito. Šis pavojus lieka teorinis.
+
+**2. Skripto klaida — rašytojas.** Po skaitytojo skriptas siųsdavo `SIGTERM` pačiam `compute-sanitizer`, ir šis
+baigdavosi be suvestinės. Dabar rašytojas baigia pats (`--duration`).
+
+**3. Skripto klaida — skaitytojas.** Pora leidžiama 5 kadrų per sekundę greičiu (sanitizeris lėtina 10–100 kartų). Su
+numatytąja 200 ms istorija toks flow turi vieno grain'o žiedą, o skaitytojas tokio nepriima. Dabar domenui nustatoma 2 s
+istorija. Taip buvo ir senojoje skripto versijoje — ši eilutė, tikėtina, niekada nebuvo žalia.
+
+### Rezultatas
+
+Trys paleidimai iš eilės, kiekviename 9 eilutės `PASS`, 0 `FAIL`: `memcheck` — 5 binarai, rašytojas ir skaitytojas po
+0 klaidų; `racecheck` — 0 pavojų; `synccheck` — 0 klaidų. `initcheck` nevykdomas: jis nepalaiko IPC / VMM alokacijų
+(NVIDIA „Known Issues“).
+
+Kraštiniai rastrai GPU testuose jau buvo, naujų nepridėta: `media` — 1280×720 (plotis ne 48 kartotinis) ir 3840×2160;
+`gfx` — pločiai 1920, 1280, 382 ir 94, rastrai 382×32 ir 382×64; `verify` branduoliai — ilgis 1 000 003 (nesidalija iš
+256). Tikslaus 382×40 rastro nėra — yra to paties pločio 382×32 ir 382×64.
+
+Vienas dalykas paliktas: `vramflow-verify writer` flow kuria per MXL tiesiogiai ir nulinimo nelaukia. Jo eilutė po
+`memcheck` švari (3 iš 3), todėl nekeista — įrašyta kaip smulkmena.
+
+## 2.4 `clang-tidy` (K3)
+
+Konfigūracija — `.clang-tidy`, paleidimas — `scripts/linux/55-clang-tidy.sh` (visi `src/` `.cpp` ir `.c` vertimo vienetai;
+`.cu` failų `clang-tidy` netikrina, nes juos kompiliuoja `nvcc`). Rinkinys: `bugprone-*`, `cert-*`, `concurrency-*`,
+`performance-*`, `clang-analyzer-*`.
+
+### Bazė — prieš bet kokius taisymus
+
+62 vertimo vienetai, 122 s, **480 unikalių radinių** 24 tikrinimuose, kompiliavimo klaidų 0.
+
+| Tikrinimas | Radinių | Sprendimas |
+|---|---|---|
+| `cert-err33-c` (nepatikrinta grąžinama reikšmė) | 152 | sukonfigūruota ir taisoma — žr. žemiau |
+| `bugprone-easily-swappable-parameters` | 97 | **išjungta**: žymi kiekvieną (w, h), (x, y), (num, den) porą; ištaisoma tik stipriais tipais visose sąsajose |
+| `bugprone-implicit-widening-of-multiplication-result` | 84 | **išjungta**: visi 84 — indeksai eilutės viduje (`16 * g`, `3 * i`); rastras ribotas formato patikra (≤ 7680 × 4320), eilutė × pitch visur jau `size_t` |
+| `concurrency-mt-unsafe` | 26 | funkcijų rinkinys `glibc` (tikslinė platforma): lieka 19 `strerror` — taisoma; `getenv` (5) ir `readdir` (3) glibc dokumentuoja kaip saugius mūsų naudojimui |
+| `bugprone-narrowing-conversions` | 23 | taisoma (aiškūs `static_cast<double>`) |
+| `performance-enum-size` | 20 | **išjungta**: viešos C antraštės enum'ų keisti negalima (ABI), kitur naudos nėra |
+| `bugprone-assignment-in-if-condition` | 18 | taisoma (`if (e = f(); e < 0)`) |
+| `cert-err34-c` (`atoi`, `sscanf` be klaidų) | 9 | taisoma |
+| `performance-inefficient-vector-operation` | 8 | taisoma (`reserve`) |
+| `clang-analyzer-unix.Stream` | 7 | taisoma |
+| `bugprone-multi-level-implicit-pointer-conversion` | 6 | taisoma (aiškūs `static_cast<void*>`) |
+| `bugprone-misplaced-widening-cast` | 5 | taisoma |
+| `bugprone-branch-clone` | 4 | taisoma (vienodos šakos sujungtos, komentarai palikti) |
+| `bugprone-incorrect-roundings` | 3 | taisoma (`llround`) |
+| `bugprone-empty-catch` | 3 | palikta su komentaru „C ABI:“ — tuščias `catch` leidžiamas tik C sąsajos riboje |
+| `clang-analyzer-optin.performance.Padding` | 3 | **išjungta**: laukų pertvarkymas dėl užpildo; objektų po vieną procese |
+| kiti aštuoni tikrinimai (po 1–2) | 12 | taisoma |
+
+Išjungti keturi tikrinimai — 204 radiniai iš 480. Kiekvieno priežastis parašyta `.clang-tidy` faile šalia.
+
+`cert-err33-c`: iš 152 radinių 67 — `fprintf(stderr, …)`, t. y. diagnostika, kurios rašymo klaidos nėra kam pranešti.
+Todėl iš CERT funkcijų sąrašo pašalintos penkios išvedimo funkcijos (`fprintf`, `fputc`, `fputs`, `putc`, `vfprintf`): jų
+klaida lieka srauto būsenoje, o rašant į failą ji patikrinama uždarant — `fclose` ir `fflush` sąraše lieka.

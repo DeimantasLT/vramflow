@@ -16,8 +16,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "func/flows.hpp"
 #include "gfx/raster.hpp"
@@ -48,14 +50,16 @@ std::string device_uuid() {
     return r;
 }
 
-// Laikinas domenas /dev/shm/vf-flows-<pid>-<n> + instancija.
+// Laikinas domenas /dev/shm/vf-flows-<pid>-<n> + instancija. history_ms > 0 — domeno ring'o istorija (options.json).
 struct Domain {
     std::filesystem::path dir;
     mxlInstance inst = nullptr;
-    explicit Domain(int n) {
+    explicit Domain(int n, int history_ms = 0) {
         dir = std::filesystem::path("/dev/shm") / ("vf-flows-" + std::to_string(::getpid()) + "-" + std::to_string(n));
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
+        if (history_ms > 0)
+            std::ofstream(dir / "options.json") << "{\"urn:x-mxl:option:history_duration/v1.0\": " << history_ms << "000000}";
         inst = mxlCreateInstance(dir.c_str(), "");
         if (!inst) throw std::runtime_error("mxlCreateInstance");
     }
@@ -156,6 +160,46 @@ TEST_CASE("flows: cuda-linear v210a writer — key iškart po fill", "[flows][mx
     CHECK(o.layout.planes[0].offset == 0);
     CHECK(o.layout.planes[1].offset == o.layout.planes[0].size);
     CHECK(o.layout.planes[1].size == gfx::key_bytes(v210a_1080i()));
+    o.release(d.inst);
+}
+
+// MXL cuda-linear įskiepis naują žiedą nulina asinchroniškai (cudaMemset numatytajame sraute) ir pabaigos nelaukia
+// (CudaLinearBackend.cpp, prepare). Funkcijos į žiedą rašo kernel'iais non-blocking sraute, kuris su numatytuoju
+// nesinchronizuojamas: kol nulinimas nebaigtas, ką tik įrašyti duomenys gali būti perrašyti nuliais, o greitas
+// atlaisvinimas palieka GPU darbą atlaisvintai atminčiai (compute-sanitizer: „failed to handle a hardware exception“,
+// 3 paleidimai iš 5). VideoOut::create privalo grįžti tik baigus nulinimą.
+TEST_CASE("flows: cuda-linear VideoOut::create grįžta tik baigus žiedo nulinimą — kitame sraute įrašyti duomenys nedingsta", "[flows][mxl][gpu]") {
+    if (!have_gpu()) SKIP("nėra CUDA įrenginio");
+    Domain d(8, 2000);  // 2 s istorija: 100 × 5,5 MiB 1080p50 grain'ų = 527 MiB — nulinimas trunka pakankamai ilgai
+    VideoOut o;
+    std::string err;
+    const std::string opts = R"({"payload":{"backend":"cuda-linear","deviceUuid":")" + device_uuid() + R"("}})";
+    const gfx::Raster r{1920, 1080, false, false};
+    REQUIRE(o.create(d.inst, def("7a210a00-0000-4000-8000-0000000000f8", "video/v210", false, 50), opts, err, vramflow::VideoFormat{r, {50, 1}}));
+    // Tiesioginis požymis: numatytajame sraute (ten įskiepis paleido cudaMemset) nebėra nebaigto darbo
+    const cudaError_t pending = cudaStreamQuery(nullptr);
+    CHECK(pending == cudaSuccess);  // cudaErrorNotReady (600) — create() grįžo nulinimui dar vykstant
+    REQUIRE(is_cuda_layout(o.layout));
+    REQUIRE(o.layout.slotCount >= 50);
+    cudaStream_t s{};
+    REQUIRE(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess);
+    // Rašoma iškart po create(): pirmo, vidurinio ir paskutinio slot'o pabaigoje po 64 KiB baitų 0xA5
+    constexpr std::size_t kN = 64 * 1024;
+    const std::size_t gb = gfx::grain_bytes(r);
+    std::vector<std::uint8_t*> at;
+    for (const std::uint32_t k : {std::uint32_t{0}, o.layout.slotCount / 2, o.layout.slotCount - 1})
+        at.push_back(static_cast<std::uint8_t*>(slot_ptr(o.layout, o.slots[k])) + gb - kN);
+    for (std::uint8_t* p : at) REQUIRE(cudaMemsetAsync(p, 0xA5, kN, s) == cudaSuccess);
+    REQUIRE(cudaStreamSynchronize(s) == cudaSuccess);
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);  // dabar baigtas ir bet koks dar vykęs nulinimas
+    std::vector<std::uint8_t> h(kN);
+    std::size_t lost = 0;
+    for (std::uint8_t* p : at) {
+        REQUIRE(cudaMemcpy(h.data(), p, kN, cudaMemcpyDeviceToHost) == cudaSuccess);
+        lost += static_cast<std::size_t>(std::count_if(h.begin(), h.end(), [](std::uint8_t v) { return v != 0xA5; }));
+    }
+    CHECK(lost == 0);
+    cudaStreamDestroy(s);
     o.release(d.inst);
 }
 

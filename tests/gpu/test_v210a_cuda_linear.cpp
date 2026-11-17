@@ -107,6 +107,9 @@ struct Pair {
             bool created = false;
             REQUIRE(mxlCreateFlowWriter(d.inst, v210a_def(id).c_str(), opts.c_str(), &w, &cfg, &created) == MXL_STATUS_OK);
             REQUIRE(created);
+            // Įskiepis naują žiedą nulina asinchroniškai ir pabaigos nelaukia (upstream/U7): be šio laukimo trumpas testas
+            // atlaisvina flow nulinimui dar vykstant, ir compute-sanitizer praneša vidinę klaidą (1 paleidimas iš 2).
+            REQUIRE(cudaStreamSynchronize(nullptr) == cudaSuccess);
             REQUIRE(mxlFlowWriterGetStorageLayout(w, &wl) == MXL_STATUS_OK);
             wslots.assign(wl.slotCount, mxlGrainStorage{});
             REQUIRE(mxlFlowWriterMapSlots(w, wl.slotCount, wslots.data()) == MXL_STATUS_OK);
