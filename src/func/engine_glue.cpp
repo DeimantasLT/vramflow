@@ -236,12 +236,18 @@ bool parse_cpu_list(const std::string& s, std::vector<int>& out) {
 
 bool strict_exit(const Opts& o) { return o.strict_exit == "on" || (o.strict_exit == "auto" && o.duration_s > 0); }
 
+std::size_t& admission_refused() {
+    static std::size_t n = 0;
+    return n;
+}
+
 int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, Stats& st) {
     const bool strict = strict_exit(o);
     st.strict = strict ? 1 : 0;
     st.any_loss = loss;
     if (rc != 0) return exit_code(rc);
     if (failed_units) return 2;  // abiem režimais (D8): sustabdant dar sugedęs vienetas
+    if (admission_refused() != 0) return kExitAdmission;  // planas §P4: dalis srautų atmesta (priimti veikė) — abiem režimais
     if (!strict) return 0;
     return loss ? 4 : 0;
 }

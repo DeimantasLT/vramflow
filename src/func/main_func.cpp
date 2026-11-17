@@ -64,6 +64,15 @@ void common(CLI::App* c, Opts& o) {
     c->add_option("--format", o.format, "flow formatas: 1080i50 (numatytasis), 1080p25, 1080p50, 720p50, 1080i59.94, 2160p50 …");
     c->add_option("--run-id", o.run_id, "paleidimo ID domeno nuomoje <domain>.vramflow/ (numatyta <subkomanda>-<pid>-<8 hex>)");
     c->add_flag("--allow-bad-clock", o.allow_bad_clock, "paleisti ir tada, kai TAI poslinkis ≠ 37 s (indeksai nesutaps su kitais procesais)");
+    // Priėmimo kontrolė (planas §P4): verify ir --impl cpu — netaikoma
+    c->add_option("--admission", o.admission,
+                  "priėmimo kontrolė pagal išmatuotą talpą: off | warn (numatyta: viršijimas — įspėjimas) | enforce (netelpantys srautai "
+                  "nepaleidžiami, visi netilpę — exit 5; be talpos failo — exit 1)")
+        ->check(CLI::IsMember({"off", "warn", "enforce"}));
+    c->add_option("--capacity-file", o.capacity_file,
+                  "talpos failas (tests/perf/capacity_file.py) arba katalogas su capacity-<GPU UUID>.json (numatyta — VRAMFLOW_CAPACITY)");
+    c->add_option("--admission-headroom", o.admission_headroom, "riba = talpa × atsarga (Mpix/s, VRAM; NVENC sesijoms netaikoma), numatyta 0.85")
+        ->check(CLI::Range(0.05, 1.0));
     // testinės parinktys (paslėptos --help): išėjimo klaidų injekcija (logo, gen; tests/functional startstop fout_error)
     c->add_option("--test-out-error", o.test_out_error)->check(CLI::IsMember({"open", "commit"}))->group("");
     c->add_option("--test-out-error-after", o.test_out_error_after_s)->group("");
@@ -309,6 +318,32 @@ int main(int argc, char** argv) {
         if (!mxlv::runtime::DomainLease::acquire(o.domain, o.run_id, domain_lease(), err)) {
             std::fprintf(stderr, "[%s] domeno nuoma: %s\n", sub.c_str(), err.c_str());
             return 2;
+        }
+    }
+    // Priėmimo kontrolė (planas §P4): talpa ir knyga; funkcijos be zondavimo priima srautus čia (ingest — po zondavimo, kai
+    // žinomas formatas). Priimamas prefiksas: o.flows sumažinamas; nė vieno — exit 5 su santrauka.
+    {
+        const std::string sub = app.get_subcommands().front()->get_name();
+        std::string fatal;
+        if (const int rc = admission_begin(o, sub, fatal); rc != 0) {
+            std::fprintf(stderr, "[%s] %s\n", sub.c_str(), fatal.c_str());
+            return rc;
+        }
+        if (admission().active && sub != "ingest") {
+            std::string tag;
+            std::vector<mxlv::runtime::Demand> dem = admission_demand(o, sub, tag);
+            std::vector<std::string> names;
+            for (std::uint32_t n = 0; n < o.flows; ++n) names.push_back("flow " + std::to_string(o.flow_base + n));
+            const std::size_t m = admission_admit(tag, std::move(dem), names);
+            if (m == 0) {
+                Stats st;
+                st.fatal = "priėmimo kontrolė: atmesti visi " + std::to_string(o.flows) + " srautai — " + admission().notes.front();
+                st.exit_code = kExitAdmission;
+                write_summary(o, sub, st);
+                std::fprintf(stderr, "[%s] baigta, exit %d %s\n", sub.c_str(), kExitAdmission, st.fatal.c_str());
+                return kExitAdmission;
+            }
+            o.flows = static_cast<std::uint32_t>(m);
         }
     }
     prefetch_versions(o);  // CPU variantas: santraukos versijos fone (ne sustabdymo kelyje)

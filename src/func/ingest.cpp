@@ -1104,6 +1104,39 @@ int run_ingest(const Opts& o_in) {
         return finish(exit_code(rc));
     }
 
+    // 1b. Priėmimo kontrolė (planas §P4) — po zondavimo (formatas žinomas), prieš kuriant flow'us: priimamas šaltinių prefiksas,
+    //     atmestieji sustabdomi (jų flow'ai domene nesukuriami). Paklausa: NVDEC Mpix/s (programiniam dekoderiui — 0) ir VRAM
+    //     įvertis — DPB ≤ 16 + atsarga + kadrai, laikomi iki decode-lead, + išėjimo ring'as (functions.ingest — jei išmatuota).
+    if (admission().active) {
+        std::vector<runtime::Demand> dem(N);
+        std::vector<std::string> names(N);
+        const bool hw_dec = !cpu && decoder != ig::Decoder::Sw;
+        const std::int64_t hist_ns = domain_history_ns(o.domain);
+        for (std::size_t k = 0; k < N; ++k) {
+            names[k] = src[k]->name;
+            if (!src[k]->video) continue;
+            const vramflow::VideoFormat& f = src[k]->fmt;
+            const double fps = static_cast<double>(f.frame_rate.num) / static_cast<double>(f.frame_rate.den);
+            const vramflow::Rational g = f.grain_rate();
+            const int held = static_cast<int>(std::ceil(o.decode_lead_ms * fps / 1000.0)) + 2;
+            const int surfaces = (hw_dec ? 16 + (o.surfaces > 0 ? o.surfaces : 1) : 0) + held;
+            const auto ring = static_cast<std::uint32_t>(std::ceil(static_cast<double>(hist_ns) / 1e9 * static_cast<double>(g.num) / static_cast<double>(g.den))) + 1;
+            dem[k] = runtime::ingest_demand(f, surfaces, ring, hw_dec);
+        }
+        const std::size_t m = admission_admit("ingest", std::move(dem), names);
+        if (m < N) {
+            for (std::size_t k = m; k < N; ++k) src[k]->stop_format("priėmimo kontrolė: atmesta");
+            if (m == 0) {
+                st.fatal = "priėmimo kontrolė: atmesti visi " + std::to_string(N) + " šaltiniai — " + admission().notes.front();
+                abort_sources();
+                return finish(kExitAdmission);
+            }
+            src.resize(m);  // ~Source: gijos baigiasi (fmt_stopped) ir sujungiamos
+            st.flows.resize(m);
+            o.flows = static_cast<std::uint32_t>(m);
+        }
+    }
+
     // 2. Variklio dažnis — didžiausias grain'ų dažnis; kiti šaltiniai — kas k-tą indeksą (k sveikas)
     vramflow::VideoFormat efmt = vramflow::kFmt1080i50;  // tik garsas — 50 Hz blokai (960 mėginių)
     bool have_video = false, any_inter = false;

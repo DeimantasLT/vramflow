@@ -223,6 +223,18 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
         j += ",\"fatal\":";
         mxlv::json_escape_into(j, s.fatal);
     }
+    if (const AdmissionRun& a = admission(); a.active) {  // planas §P4: priėmimo kontrolės rezultatas
+        const char* mode = a.mode == runtime::AdmissionMode::Enforce ? "enforce" : "warn";
+        j += std::string(",\"admission\":{\"mode\":\"") + mode + "\",\"capacity\":";
+        mxlv::json_escape_into(j, a.have_capacity ? a.cap.source : std::string{});
+        j += ",\"requested\":" + std::to_string(a.requested) + ",\"admitted\":" + std::to_string(a.admitted) +
+             ",\"refused\":" + std::to_string(a.refused) + ",\"over\":" + std::to_string(a.over) + ",\"notes\":[";
+        for (std::size_t k = 0; k < a.notes.size(); ++k) {
+            if (k) j += ",";
+            mxlv::json_escape_into(j, a.notes[k]);
+        }
+        j += "]}";
+    }
     if (!extra_json.empty()) j += "," + extra_json;
     j += "}";
     const std::string p = o.out + "/summary-" + role + ".json";

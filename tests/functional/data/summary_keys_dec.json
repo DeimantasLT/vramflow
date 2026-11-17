@@ -44,7 +44,9 @@
   ]
  },
  "optional": {
-  "top": [],
+  "top": [
+   "admission"
+  ],
   "proc": [
    "clock_backward",
    "failed_units",

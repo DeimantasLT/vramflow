@@ -582,4 +582,53 @@ void Ledger::release(const std::string& id_in) {
     write_own();
 }
 
+// --- Priėmimas iš eilės ----------------------------------------------------------------------------------------------
+bool parse_admission_mode(const std::string& s, AdmissionMode& out) {
+    if (s == "off") out = AdmissionMode::Off;
+    else if (s == "warn") out = AdmissionMode::Warn;
+    else if (s == "enforce") out = AdmissionMode::Enforce;
+    else return false;
+    return true;
+}
+
+AdmitResult admit_in_order(Ledger& l, const std::string& prefix, const Demand& process, const std::vector<Demand>& flows,
+                           const Capacity& c, AdmissionMode mode) {
+    AdmitResult r;
+    r.decisions.resize(flows.size());
+    if (mode == AdmissionMode::Off) {
+        r.admitted = flows.size();
+        return r;
+    }
+    const bool force = mode == AdmissionMode::Warn;
+    const bool any_process = process.nvdec_mpix_s > 0 || process.nvenc_mpix_s > 0 || process.nvenc_sessions > 0 || process.vram_bytes > 0;
+    if (any_process) {
+        const Decision d = l.reserve(prefix + "-proc", process, c, force);
+        if (!d.admit && !force) {
+            r.process_refused = true;
+            for (Decision& x : r.decisions) x = d;
+            return r;
+        }
+        if (!d.admit) ++r.over;
+    }
+    bool stopped = false;  // enforce: po pirmo atmetimo — visi tolesni atmetami
+    for (std::size_t k = 0; k < flows.size(); ++k) {
+        const std::string id = prefix + "-" + std::to_string(k);
+        if (stopped) {
+            Decision d = decide(l.total(), flows[k], c);
+            if (d.admit) d = Decision{false, "order", 0, 0, 0};
+            r.decisions[k] = d;
+            continue;
+        }
+        const Decision d = l.reserve(id, flows[k], c, force);
+        r.decisions[k] = d;
+        if (d.admit || force) {
+            ++r.admitted;
+            if (!d.admit) ++r.over;
+        } else {
+            stopped = true;
+        }
+    }
+    return r;
+}
+
 }  // namespace mxlv::runtime

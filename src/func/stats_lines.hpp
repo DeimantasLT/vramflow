@@ -66,5 +66,7 @@ private:
 std::string utc_of_tai(std::uint64_t tai_ns);
 // Operatoriaus žurnalo eilutė į stderr: „[vramflow <laikas>] <role>: <tekstas>“ (ne tick gijoje).
 void log_line(const char* role, const std::string& text);
+// Veikiančios NVIDIA tvarkyklės versija („596.49“) per NVML (dlopen); tuščia — NVML nėra (priėmimo kontrolės talpos failo patikrai).
+std::string nvml_driver_version();
 
 }  // namespace mxlv::func

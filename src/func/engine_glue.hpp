@@ -106,6 +106,8 @@ bool parse_cpu_list(const std::string& s, std::vector<int>& out);
 //   švelnus (off; auto ir --duration 0): 0 (praradimai — santraukoje: any_loss, skaitikliai, gyva statistika).
 // Įrašo st.strict ir st.any_loss (santraukos laukai strict_exit, any_loss).
 bool strict_exit(const Opts& o);
+// Priėmimo kontrolės atmestų srautų skaičius šiame procese (planas §P4; rašo admission_glue.cpp): > 0 ir kitaip exit 0 → exit 5.
+std::size_t& admission_refused();
 int exit_code_for(const Opts& o, int rc, bool loss, std::uint32_t failed_units, Stats& st);
 
 // Sugedusio vieneto išėjimų atlaisvinimas (K-T11): MxlVideoOutput::release_fn → VideoOut::release(inst); atkūrimas (D8):

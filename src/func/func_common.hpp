@@ -21,6 +21,7 @@
 #include "func/thread_pool.hpp"
 #include "common/format.hpp"
 #include "gfx/raster.hpp"
+#include "runtime/admission.hpp"
 #include "runtime/domain_lease.hpp"
 #include "runtime/input_slot.hpp"
 #include "runtime/open_policy.hpp"
@@ -63,6 +64,11 @@ struct Opts {
     // "<subkomanda>-<pid>-<8 hex>"). input_wait_ms: 0 — įėjimų laukti neribotai (numatyta), N > 0 — riba (exit 4).
     // on_format_change: exit (įėjimas grįžo kitu formatu → exit 6) | wait (laukti, kol grįš tuo pačiu formatu).
     std::string run_id;
+    // Priėmimo kontrolė (planas §P4): off | warn (numatyta; K13) | enforce; talpos failas arba katalogas (capacity-<uuid>.json;
+    // tuščias — aplinkos VRAMFLOW_CAPACITY); atsarga (riba = talpa × headroom; NVENC sesijoms netaikoma).
+    std::string admission = "warn";
+    std::string capacity_file;
+    double admission_headroom = 0.85;
     std::int64_t input_wait_ms = 0;
     std::string on_format_change = "exit";
     // Briaunos laiko sutartis (V24, planas §6 D7): įėjimo laukimas po T(j) — aukštupio žyma commit-bound-ns; flow'ui be žymų
@@ -315,8 +321,10 @@ runtime::FormatChange format_change(const Opts& o);  // --on-format-change
 constexpr int kExitInputs = 4;
 constexpr int kExitFormatChange = 6;
 // R13-2 (ingest): libav kvietimas užstrigo (libav ≤ 8.0 http nukreipimų kešo kilpa) — gijos atšaukti negalima, procesas baigiamas;
-// prižiūrėtojas paleidžia iš naujo. Kiti kodai: 0, 1 (naudojimas), 2 (paleidimas / vykdymas), 4, 6; vramflow-verify — 3.
+// prižiūrėtojas paleidžia iš naujo. Kiti kodai: 0, 1 (naudojimas), 2 (paleidimas / vykdymas), 4, 5 (priėmimas), 6; vramflow-verify — 3.
 constexpr int kExitLibavStuck = 7;
+// Planas §P4: priėmimo kontrolė (--admission enforce) atmetė srautą (pranešime — variklis, prašoma, užimta, leidžiama).
+constexpr int kExitAdmission = 5;
 // Vidinis kodas: sustabdyta (SIGINT / SIGTERM) belaukiant įėjimų — tvarkinga pabaiga; exit_code() jį paverčia į 0.
 constexpr int kStoppedWaiting = -1;
 constexpr int exit_code(int rc) { return rc < 0 ? 0 : rc; }
@@ -330,6 +338,29 @@ int attach_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, 
 // Tick'o pradžioje: atjungtų įėjimų prisijungimas iš naujo (neblokuoja; prijungtam — be sisteminių kvietimų). 0 — tęsti;
 // kExitFormatChange — įėjimas grįžo kitu formatu / saugykla ir --on-format-change exit (fatal užpildytas).
 int poll_inputs(const std::vector<runtime::InputSlot*>& in, mxlInstance inst, std::string& fatal);
+
+// --- Priėmimo kontrolė (planas §P4; admission_glue.cpp) ---------------------------------------------------------------
+// Proceso būsena: talpa, knyga (laikoma iki proceso pabaigos — rezervacijos gyvos, kol gyvas procesas), santraukos skaitikliai.
+struct AdmissionRun {
+    runtime::AdmissionMode mode = runtime::AdmissionMode::Off;
+    bool active = false;         // taikoma šiam procesui (GPU funkcija, ne off, ne verify)
+    bool have_capacity = false;  // talpos failas įkeltas ir knyga atidaryta
+    runtime::Capacity cap;
+    runtime::Ledger ledger;
+    std::string role;
+    std::size_t requested = 0, admitted = 0, refused = 0, over = 0;
+    std::vector<std::string> notes;  // atmetimai ir viršijimai (santraukai „admission.notes“)
+};
+AdmissionRun& admission();
+// Paleidžiant (main_func, po domeno nuomos): režimas, talpos failas, tvarkyklės patikra, knyga. 0 — tęsti; kitaip exit kodas
+// (enforce be talpos → 1; knygos klaida enforce → 2) ir fatal.
+int admission_begin(const Opts& o, const std::string& role, std::string& fatal);
+// Srautų priėmimas iš eilės (runtime::admit_in_order). tag — talpos failo funkcijos žymė: jei ten yra vram_per_flow_bytes,
+// srauto VRAM = išmatuotas (ir proceso offset rezervuojamas pirma), kitaip — flows[k].vram_bytes (įvertis; 0 — netikrinama).
+// Grąžina priimtų skaičių (prefiksas); kiekvienas atmestas / viršijęs — stderr eilutė su varikliu ir skaičiais.
+std::size_t admission_admit(const std::string& tag, std::vector<runtime::Demand> flows, const std::vector<std::string>& names);
+// main_func: srauto paklausa ir talpos žymė funkcijoms be zondavimo (gen, gfxgen, logo, composite, enc, dec).
+std::vector<runtime::Demand> admission_demand(const Opts& o, const std::string& role, std::string& tag);
 
 // Proceso domeno nuoma (paima main_func.cpp prieš subkomandą; laikoma iki proceso pabaigos).
 runtime::DomainLease& domain_lease();

@@ -33,6 +33,7 @@
  },
  "optional": {
   "top": [
+   "admission",
    "commit_lateness_s"
   ],
   "proc": [

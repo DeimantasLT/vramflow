@@ -122,3 +122,18 @@ TEST_CASE("exit_code_for: sugedęs vienetas → 2 abiem režimais; praradimas �
     CHECK(func::exit_code_for(o, 0, true, 1, st) == 2);
     CHECK(func::exit_code_for(o, 6, true, 1, st) == 6);
 }
+
+TEST_CASE("exit_code_for: priėmimo kontrolė atmetė dalį srautų → 5 abiem režimais; klaidos ir sugedęs vienetas — viršesni", "[func][exit]") {
+    func::Opts o;
+    func::Stats st;
+    func::admission_refused() = 2;
+    o.duration_s = 0;
+    CHECK(func::exit_code_for(o, 0, false, 0, st) == func::kExitAdmission);
+    CHECK(func::kExitAdmission == 5);
+    o.duration_s = 10;
+    CHECK(func::exit_code_for(o, 0, true, 0, st) == 5);  // praradimas (4) — mažiau svarbus nei atmesti srautai
+    CHECK(func::exit_code_for(o, 0, false, 1, st) == 2);
+    CHECK(func::exit_code_for(o, 6, false, 0, st) == 6);
+    func::admission_refused() = 0;
+    CHECK(func::exit_code_for(o, 0, false, 0, st) == 0);
+}

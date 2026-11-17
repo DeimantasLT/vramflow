@@ -35,7 +35,9 @@
   ]
  },
  "optional": {
-  "top": [],
+  "top": [
+   "admission"
+  ],
   "proc": [
    "failed_units",
    "unit_failures",

@@ -107,4 +107,22 @@ private:
     std::vector<std::pair<std::string, Demand>> res_;
 };
 
+// --admission off | warn | enforce (planas K13; numatyta warn — sprendimas docs/rezultatai/2026-11-17-p4-admission.md).
+enum class AdmissionMode { Off, Warn, Enforce };
+bool parse_admission_mode(const std::string& s, AdmissionMode& out);
+
+// Srautų priėmimas iš eilės. Pirma rezervuojama proceso pastovi dalis `process` (funkcijos VRAM offset; nulinė — praleidžiama),
+// tada srautai flows[0], flows[1] … (id: "<prefix>-proc", "<prefix>-<k>"). enforce: pirmas netilpęs srautas ir VISI tolesni
+// atmetami (priimamas prefiksas — „pirmi N“; tolesnis, kuris būtų tilpęs, pažymimas engine == "order"); netilpus pastoviai
+// daliai — atmetami visi (process_refused). warn: visi priimami ir įrašomi į knygą (force), viršijimai skaičiuojami `over`.
+// off — nieko netikrina ir nerašo.
+struct AdmitResult {
+    std::size_t admitted = 0;
+    std::size_t over = 0;              // warn: priimta viršijus talpą
+    bool process_refused = false;
+    std::vector<Decision> decisions;   // kiekvienam srautui; process_refused — visiems ta pati pastovios dalies priežastis
+};
+AdmitResult admit_in_order(Ledger& l, const std::string& prefix, const Demand& process, const std::vector<Demand>& flows,
+                           const Capacity& c, AdmissionMode mode);
+
 }  // namespace mxlv::runtime

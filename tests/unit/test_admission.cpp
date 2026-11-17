@@ -437,3 +437,85 @@ TEST_CASE("ledger: close() — failas pašalintas, rezervacijos dingsta", "[admi
     CHECK_FALSE(std::filesystem::exists(p));
     CHECK(b.total().nvdec_mpix_s == Approx(0));
 }
+
+// --- Priėmimas iš eilės (CLI --admission off | warn | enforce) ---------------------------------------------------------
+TEST_CASE("admit_in_order: režimo vardai", "[admission][order]") {
+    AdmissionMode m{};
+    CHECK(parse_admission_mode("off", m));
+    CHECK(m == AdmissionMode::Off);
+    CHECK(parse_admission_mode("warn", m));
+    CHECK(m == AdmissionMode::Warn);
+    CHECK(parse_admission_mode("enforce", m));
+    CHECK(m == AdmissionMode::Enforce);
+    CHECK_FALSE(parse_admission_mode("on", m));
+}
+
+TEST_CASE("admit_in_order: enforce — 8 srautų, talpa 4: priimti pirmi 4, 5–8 atmesti, knygoje tik 4", "[admission][order]") {
+    TmpDomain dom(7);
+    Ledger l;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, l, err));
+    const Capacity c = nvdec_cap(270, 0.85);
+    const std::vector<Demand> flows(8, nvdec(k1080));
+    const AdmitResult r = admit_in_order(l, "ingest", Demand{}, flows, c, AdmissionMode::Enforce);
+    CHECK(r.admitted == 4);
+    REQUIRE(r.decisions.size() == 8);
+    for (int k = 0; k < 4; ++k) CHECK(r.decisions[static_cast<std::size_t>(k)].admit);
+    for (int k = 4; k < 8; ++k) {
+        CHECK_FALSE(r.decisions[static_cast<std::size_t>(k)].admit);
+        CHECK(r.decisions[static_cast<std::size_t>(k)].engine == "nvdec");
+    }
+    CHECK(r.decisions[4].used == Approx(4 * k1080));
+    CHECK(l.total().nvdec_mpix_s == Approx(4 * k1080));
+}
+
+TEST_CASE("admit_in_order: enforce — po pirmo atmetimo mažesnis srautas irgi atmetamas (tik iš eilės)", "[admission][order]") {
+    TmpDomain dom(8);
+    Ledger l;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, l, err));
+    const Capacity c = nvdec_cap(100);
+    const AdmitResult r = admit_in_order(l, "x", Demand{}, {nvdec(60), nvdec(60), nvdec(10)}, c, AdmissionMode::Enforce);
+    CHECK(r.admitted == 1);
+    CHECK(r.decisions[1].engine == "nvdec");
+    CHECK_FALSE(r.decisions[2].admit);
+    CHECK(r.decisions[2].engine == "order");
+    CHECK(l.total().nvdec_mpix_s == Approx(60));
+}
+
+TEST_CASE("admit_in_order: warn — visi priimami, viršijimai pažymėti, knygoje tikra apkrova", "[admission][order]") {
+    TmpDomain dom(9);
+    Ledger l;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, l, err));
+    const Capacity c = nvdec_cap(270, 0.85);
+    const AdmitResult r = admit_in_order(l, "ingest", Demand{}, std::vector<Demand>(6, nvdec(k1080)), c, AdmissionMode::Warn);
+    CHECK(r.admitted == 6);
+    CHECK(r.decisions[3].admit);
+    CHECK_FALSE(r.decisions[4].admit);  // viršija — įspėjimas, bet paleidžiamas
+    CHECK(r.over == 2);
+    CHECK(l.total().nvdec_mpix_s == Approx(6 * k1080));
+}
+
+TEST_CASE("admit_in_order: proceso pastovi dalis (VRAM offset) rezervuojama pirma; netilpus — visi atmesti", "[admission][order]") {
+    TmpDomain dom(10);
+    Ledger l;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, l, err));
+    Capacity c;
+    c.vram_bytes = 1000;
+    c.headroom = 1.0;
+    Demand proc, flow;
+    proc.vram_bytes = 600;
+    flow.vram_bytes = 150;
+    AdmitResult r = admit_in_order(l, "a", proc, {flow, flow, flow, flow}, c, AdmissionMode::Enforce);
+    CHECK(r.admitted == 2);  // 600 + 2 · 150 = 900 ≤ 1000; trečias — 1050
+    CHECK(l.total().vram_bytes == 900);
+    Ledger l2;
+    REQUIRE(Ledger::open(dom.dir, kUuid, l2, err));
+    r = admit_in_order(l2, "b", proc, {flow}, c, AdmissionMode::Enforce);
+    CHECK(r.admitted == 0);
+    CHECK(r.process_refused);
+    CHECK(r.decisions[0].engine == "vram");
+    CHECK(l2.own().vram_bytes == 0);
+}

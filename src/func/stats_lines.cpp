@@ -26,6 +26,7 @@ using FnUtil = nvmlReturn_t (*)(nvmlDevice_t, nvmlUtilization_t*);
 using FnCodec = nvmlReturn_t (*)(nvmlDevice_t, unsigned int*, unsigned int*);
 using FnMem = nvmlReturn_t (*)(nvmlDevice_t, nvmlMemory_t*);
 using FnShutdown = nvmlReturn_t (*)();
+using FnDriver = nvmlReturn_t (*)(char*, unsigned int);
 
 void ms(std::string& j, const char* k, std::uint64_t ns, bool comma = true) {
     char b[64];
@@ -63,6 +64,22 @@ std::string utc_of_tai(std::uint64_t tai_ns) {
 
 void log_line(const char* role, const std::string& text) {
     std::fprintf(stderr, "[vramflow %s] %s: %s\n", utc_of_tai(mxlGetTime()).c_str(), role, text.c_str());
+}
+
+std::string nvml_driver_version() {
+    void* lib = dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!lib) return {};
+    std::string v;
+    auto init = reinterpret_cast<FnInit>(dlsym(lib, "nvmlInit_v2"));
+    auto drv = reinterpret_cast<FnDriver>(dlsym(lib, "nvmlSystemGetDriverVersion"));
+    auto shut = reinterpret_cast<FnShutdown>(dlsym(lib, "nvmlShutdown"));
+    if (init && drv && init() == NVML_SUCCESS) {
+        char b[96] = {};
+        if (drv(b, sizeof b) == NVML_SUCCESS) v = b;
+        if (shut) shut();
+    }
+    dlclose(lib);
+    return v;
 }
 
 // --- GpuProbe -------------------------------------------------------------------------------------------------------
