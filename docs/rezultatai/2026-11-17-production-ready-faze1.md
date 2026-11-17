@@ -161,3 +161,82 @@ visi skaičiai — baigtiniai; kitaip klaida su lauko vardu. Testas `capacity: s
 `check_layout` ir `format_supported`.
 
 Švarus build — 0 įspėjimų; `ctest` 502 / 503 (krito tik žinomas laiko testas `gap_policy … < 1 ms`).
+
+## 1.3 Paleidimas ne root (kriterijus S5)
+
+**Kas padaryta.** `scripts/linux/45-nonroot.sh <vartotojas> [build | ctest | functional | all]` — tas pats build, `ctest` ir
+funkcinis rinkinys kito vartotojo vardu (`setpriv`). Vartotojo kataloge lieka tik jo paties build ir testų išvestis;
+žurnalus root rašo į savo katalogą. Testų harness'e nebeliko įrašytų `/root/…` kelių (`functional.py`, `chain.py`,
+`interop.py`: MXL įrankiai imami šalia MXL bibliotekos).
+
+**Rezultatai** (vartotojas `mxltest`, uid 1000; WSL2, GPU per `/dev/dxg`):
+
+| Paleidimas | Build | `ctest` | Funkciniai |
+|---|---|---|---|
+| Visas rinkinys ant `b8168d6` | 0 įspėjimų | 503 / 503 | 353 rezultatai: 319 PASS, 34 INFO, 2 FAIL, 0 SKIP |
+| Po skripto ir peržiūros pataisų (§1.7) | 0 įspėjimų | 508 / 509 (tik žinomas `gap_policy … < 1 ms`) | 28 iš 28 (`fstart_*`, `overload_*`, `fcomp1`, `fgold_dec`) |
+
+Abu FAIL pirmame paleidime — `fgold_dec[C]` ir `fgold_dec[G]`: ne teisių, o mano skripto klaida (neperdavė klipo kelio
+`FGOLD_CLIP` / `FGOLD_REF`, testas klipo ieškojo vartotojo namų kataloge). Su pataisytu skriptu abu praeina. Visi kiti testai
+— tie patys PASS kaip root; nė vienam funkciniam testui root neprireikė. Vieneto testai, kuriems reikia kito vartotojo
+imitacijos (`safe_files: …` su `chown` / `setuid`), ne root vartotojui praleidžiami su priežastimi (SKIP).
+
+**Kas nepatikrinta.** Po peržiūros pataisų visas funkcinis rinkinys ne root vartotoju pakartotas nebuvo — tik 28 testai,
+einantys per pakeistą kodą. Natyviame Linux (ne WSL2) ne root paleidimas nebandytas.
+
+## 1.6 Grėsmių modelis ir `SECURITY.md` (kriterijai S1, S7)
+
+`docs/architektura/2026-11-17-gresmiu-modelis.md`: turtas (4), pasitikėjimo ribos (5), 17 grėsmių su priemone, testu ir
+likutine rizika, skyrius „nepriimta, ir kodėl“ (sandbox aplink libav, TLS tikrinimas, turinio parašai, knyga visai GPU).
+`SECURITY.md` (angliškai): kaip pranešti, pasitikėjimo modelis, saugus paleidimas (ne root, domeno ir jo tėvinio katalogo
+teisės, systemd, konteineriai), kas tikrinama automatiškai.
+
+S7 (tinklo įėjimų ribos ir sargas): naujo kodo neprireikė, testai jau yra — eilių ribos kiekiu ir baitais
+(`tests/unit/test_packet_queue.cpp`, 4 atvejai; funkcinis testas su `--max-queue-mb` tikrina `queue_drops` ir RSS), libav sargas
+(`tests/unit/test_libav_watchdog.cpp`, 2 atvejai; `ingest_libav_watchdog[open | sigterm | segment]` — exit 7). Visi jie praėjo ir
+ne root paleidime.
+
+**Reikia autoriaus veiksmo.** `SECURITY.md` nurodo pranešti per GitHub privatų pranešimą („Report a vulnerability“) — jį
+reikia įjungti repo nustatymuose.
+
+## 1.7 Nepriklausoma peržiūra ir pataisos (kriterijus K8)
+
+Fazės saugumo kodą parašiau pats, todėl paprašiau atskiro agento jį peržiūrėti priešiškai (tik skaitymas). Kiekvieną radinį
+patikrinau kode prieš taisydamas.
+
+| # | Radinys | Būsena |
+|---|---|---|
+| 1 | `flock` užtenka skaitymo aprašo: `0755` domenui nuomos failai buvo skaitomi visiems, todėl pašalietis galėjo pakabinti visus domeno procesus (užraktas ant `admission.lock`) arba laikyti mirusio proceso nuomą „gyvą“ | Pataisyta: prieiga prie nuomos katalogo — tik tiems, kam domenas rašomas (`0755` → `0700` / `0600`); užrakto laukiama ne ilgiau kaip 5 s, negavus — rezervacija atmetama |
+| 2 | Konteineriuose nuomos katalogas (šalia domeno) lieka už sumontuoto domeno ribų — kiekvienas konteineris turėtų savo knygą; `SECURITY.md` patarimas buvo klaidingas | Dokumentuota: montuoti tėvinį katalogą; patikra — planas 5.4 |
+| 3 | Negyvos nuomos šalinimas pagal vardą galėjo pašalinti ką tik tuo pačiu `run_id` paskelbtą gyvą nuomą | Pataisyta: skelbimas ir šalinimas — tik po katalogo užraktu `lease.lock`, šalinama tik jei vardas tebenurodo tą patį failą |
+| 4 | Dingus domenui (pvz. perkuriant) esamas grupei bendras katalogas buvo susiaurinamas iki `0700`; siaurinant dingdavo `setgid`; nepavykus `fchown` grupės teisės atitekdavo ne tai grupei | Pataisyta visi trys |
+| 5 | Kūrimo langas: tarp `mkdir` ir `fchmod` kitas procesas failų teises imdavo iš laikinų katalogo teisių; `reserve` / `release` / `total` netikrino, ar užraktas gautas | Pataisyta: failų teisės ir grupė — iš domeno, ne iš katalogo būsenos; be užrakto rezervacija atmetama |
+| 6 | `45-nonroot.sh`: root rašė žurnalus į vartotojo katalogą (nuoroda ten leistų perrašyti bet kurį failą); su vienu argumentu skriptas neveikė | Pataisyta abu |
+| 7 | `grain_rate` skaitomas atlaidžiai (`25e3`, milžiniškos reikšmės perpildytų sandaugas); kito proceso knygos failo neigiama eilutė mažino „užimta“ visiems | Pataisyta: griežtas sveikasis 1…1 000 000; neigiamos ir sugadintos eilutės neskaičiuojamos. Nepakeista: `totalSlices` nelyginamas su eilučių skaičiumi (atminties saugumui neturi įtakos) |
+| 8 | Fuzz build'e UBSan pranešimas nenutraukdavo paleidimo; grūdinimo testas nematė vėlesnės panaikinančios vėliavos; `_FORTIFY_SOURCE` buvo pridedamas ir neoptimizuotam build'ui | Pataisyta visi trys. Ankstesnių fuzz paleidimų žurnaluose UBSan pranešimų nebuvo (patikrinta), tad jų rezultatai galioja |
+| 9 | Testai: trys tvirtinimai negalėjo kristi; grupės testas netikrino dviejų neprivilegijuotų vartotojų; piktybiško rašytojo testas priimdavo bet kokią klaidą (ir laukimo ribą) | Pataisyta: testai sugriežtinti, pridėti trūkstami atvejai |
+
+Likutinė rizika, kurios kodu nepašalinsi: kas pirmas sukuria `<domenas>.vramflow` kataloge, rašomame visiems (pats
+`/dev/shm`), tas neleidžia startuoti (exit 2). Priemonė — domeną laikyti tėviniame kataloge, kurį rašyti gali tik jo
+vartotojai (`SECURITY.md`).
+
+**Testai po pataisų.** `[safe_files]` — 16 atvejų, 305 tvirtinimai (prieš seną kodą `b8168d6` krito 6 iš 15, o užimto užrakto
+testas pakibo); visas `mxlv-admission-unit` — 40 atvejų, 613 tvirtinimų; `[hostile]` — 4 atvejai, 111 tvirtinimų, dabar
+reikalaujantys būtent `MXL_ERR_INTERNAL`. Švarus build — 0 įspėjimų; `ctest` 509 / 509; funkciniai 28 iš 28 kaip root ir
+28 iš 28 kaip `mxltest`.
+Fuzzeriai pakartoti su nutraukiančiu UBSan (`-fno-sanitize-recover=undefined`): `flow_def` — 224 285 703 vykdymai per 600 s;
+`capacity` — 4 321 715, `playlist` — 1 050 200, `url` — 3 055 160 per 120 s; radinių nėra. Dažnio skaitymo testas `format:
+flow aprašo grain_rate …` prieš seną kodą krenta (`25e3`, `25.5`, `+25`, 1 000 001 ir didesni buvo priimami).
+
+## Fazės pabaigos būsena
+
+Paskutinė patikra ant `31997b4`: švarus build — 0 įspėjimų; `ctest` 510 / 510. Kriterijai: S1, S2, S4, S5, S6, S7 — PASS;
+S3 — skaitymo kelias PASS, GPU branduolių `compute-sanitizer` lieka paketui 2.3; K8 — šios fazės peržiūra atlikta.
+
+Kas šioje fazėje nepatikrinta:
+
+- visas funkcinis rinkinys (2 h 25 min) po peržiūros pataisų: kaip root nekartotas iš viso, kaip ne root — tik 28 testai;
+  paskutiniai pilni paleidimai — root ant `8bd366d`, ne root ant `b8168d6`;
+- natyvus Linux (viskas matuota WSL2) ir konteineriai;
+- `clang++-18` sanitizerių build'as visam projektui (kol kas tik fuzz taikiniams) — paketas 2.1;
+- grupei bendro domeno scenarijus tikrais vartotojais ir tikra grupe (testuose — išgalvoti uid / gid per `setuid`).

@@ -534,7 +534,9 @@ local MPEG-TS file.
 | `--max-audio-ring-mb N` | Audio ring limit per source (default 256 MB; the ring grows with the latency, i.e. with the HLS segment) |
 | `--on-loss`, `--hold-ms` | Video index without a frame — as for the other writers |
 
-**Security rules (URLs and playlists).** The HLS guard below is defence in depth around libavformat's HTTP/HLS client, not
+**Security rules (URLs and playlists).** The trust model of the whole project is in [`SECURITY.md`](SECURITY.md), the threat
+model in [`docs/architektura/2026-11-17-gresmiu-modelis.md`](docs/architektura/2026-11-17-gresmiu-modelis.md). The HLS guard
+below is defence in depth around libavformat's HTTP/HLS client, not
 a sandbox: libavformat still parses the responses and follows redirects itself, so configure HLS sources only for known
 servers that you operate or trust. The `--input` URL is trusted, but its scheme must be `udp`, `rtp`, `srt`, `http`,
 `https` or a local file path; anything else (`file:`, `tcp:`, `concat:`, `data:`, `crypto+…` …) is a usage error (exit `1`).
@@ -767,9 +769,13 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
   links and refuses it (exit code `2`) when it is not a folder, when its owner is neither this process nor the owner of the
   domain folder, or when a foreign folder grants more than the domain folder does. Files in it are created with
   `O_EXCL | O_NOFOLLOW`, and other processes' files are opened without following links and only if they are regular files.
-  The folder gets the permissions of the domain folder (files: the same without the execute bits), independent of `umask`:
-  a domain shared with a group (`0770`) gives a shared lease folder, a private domain (`0700`) a private one. A domain that
-  is writable by everyone gets no protection from this — do not use one on a shared machine.
+  Access to the folder follows **write** access to the domain, independent of `umask`: the owner always, the group and
+  others only if the domain folder is writable for them (`0755` domain → `0700` folder and `0600` files; `0770` → `0770`
+  and `0660`, with the group of the domain). The reason: an `flock` needs only a readable file, so a lock file that others
+  can read would let them stall every process of the domain. Leases are published and dead ones removed only under a
+  folder lock (`lease.lock`), and no lock is waited for longer than 5 s. A domain that is writable by everyone gets no
+  protection from this — do not use one on a shared machine; and keep the domain in a parent folder that only its users
+  can write to (see [`SECURITY.md`](SECURITY.md)).
 - **One domain, one lease folder.** The folder name is built from the canonical domain path (links resolved, `/./` and a
   trailing `/` removed), so two processes that reach the same domain by different paths share one lease folder and one
   admission ledger.
@@ -780,6 +786,22 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
   `make_domain` shortens a long tag. Flows in RAM (`--storage host`) have no such limit.
 - While a reader waits, its `laukiu flow …` line also says why a flow that exists was not accepted (another format, the
   reader could not open it), so a wait never looks like a missing flow when it is something else.
+
+### Running as a service user
+
+Nothing in VRAMFlow needs root. Run the functions as a dedicated user that can reach the GPU devices (`/dev/nvidia*`; on
+WSL2 `/dev/dxg`), `/dev/shm` and the domain folder. `--rt-priority` is the only option that needs a privilege
+(`CAP_SYS_NICE` or an `rtprio` limit); without it the run continues with a warning. To check a machine, run the same
+build, `ctest` and functional suite as another user:
+
+```bash
+sudo bash scripts/linux/45-nonroot.sh <user>                               # build + ctest + functional suite
+sudo bash scripts/linux/45-nonroot.sh <user> functional --only fcomp1      # one stage, one test
+```
+
+The script switches to that user with `setpriv`; the build and the test output go to `~<user>/vramflow-nonroot/`, the logs
+to a folder of the calling user (`NONROOT_LOG_DIR`). MXL and the test media are read from the calling user's folders
+(`MXL_SRC`, `MEDIA_DIR`). Trust model and hardening advice: [`SECURITY.md`](SECURITY.md).
 
 ### Exit code and summary
 

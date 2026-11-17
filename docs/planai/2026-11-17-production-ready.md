@@ -186,8 +186,10 @@ int open_regular_at(int dirfd, const std::string& name, int flags);
 }
 ```
 
-- **Teisių taisyklė (dokumentuoti README „Domain ownership“):** nuomos katalogo teisės = domeno katalogo teisės (ne
-  platesnės); failų — tos pačios be vykdymo bitų. `lease_dir()` domeno kelią kanonizuoja (`std::filesystem::canonical`).
+- **Teisių taisyklė (README „Domain ownership“; po peržiūros — rezultatų §1.7):** prieiga prie nuomos katalogo = RAŠYMO
+  teisė į domeną (`0755` domenas → `0700` katalogas ir `0600` failai; `0770` → `0770` ir `0660` su domeno grupe), nes `flock`
+  užtenka skaitomo failo. Užraktų laukiama ribotai (5 s); nuomos skelbiamos ir negyvos šalinamos tik po `lease.lock`.
+  `lease_dir()` domeno kelią kanonizuoja.
 - **Testai** (`mxlv-admission-unit`):
   - `safe_files: simbolinė nuoroda vietoje nuomos katalogo atmetama` — `acquire` → `false`, tekste „ne katalogas“; nuorodos
     taikinys lieka tuščias;
@@ -458,8 +460,10 @@ tikėtina 25; `enc` — `initial_pool_size = 16` ir `surfaces=8` (`enc.cpp:204,4
 
 - **Pirma klausti:** Docker Desktop WSL integracija šiam distro išjungta — ją įjungti turi autorius; bazinio atvaizdo
   siuntimas (keli GiB) — taip pat tik jam leidus.
-- **Eksperimentas:** atvaizdas su 5.3 diegimo medžiu; du konteineriai su ta pačia GPU ir bendru domenu (`/dev/shm/<d>`
-  kaip bind mount): A — `gen --storage cuda-linear`, B — `verify`. Matrica: numatytosios vardų erdvės, `--ipc=host`,
+- **Žinoma iš anksto (1 fazės peržiūra):** nuomos katalogas `<domenas>.vramflow` yra šalia domeno, todėl montuoti reikia
+  tėvinį katalogą — sumontavus tik domeną kiekvienas konteineris turėtų savo nuomas ir savo priėmimo knygą.
+- **Eksperimentas:** atvaizdas su 5.3 diegimo medžiu; du konteineriai su ta pačia GPU ir bendru domenu (tėvinis katalogas
+  su `<d>` ir `<d>.vramflow` kaip bind mount): A — `gen --storage cuda-linear`, B — `verify`. Matrica: numatytosios vardų erdvės, `--ipc=host`,
   `--pid=host`. `cuda-linear` skaitytojas fd gauna per Unix lizdą flow kataloge (`payload.sock`).
 - **Rezultatas:** `docs/rezultatai/…-konteineriai.md` — veikia arba ne ir kodėl; jei veikia — minimalus pavyzdys.
 
@@ -527,14 +531,14 @@ failas arba commit.
 | K5 | nepradėta | | |
 | K6 | nepradėta | esami etalono testai žali | `ctest` |
 | K7 | nepradėta | | |
-| K8 | nepradėta | | |
-| S1 | nepradėta | | |
+| K8 | vyksta | 1 fazė: nepriklausoma peržiūra — 9 radinių grupės, pataisyta arba dokumentuota | `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.7 |
+| S1 | PASS | grėsmių modelis: 17 grėsmių, kiekviena su testu arba „nepriimta, nes …“; `SECURITY.md` | `docs/architektura/2026-11-17-gresmiu-modelis.md`; `SECURITY.md` |
 | S2 | PASS | 4 taikiniai po 600 s be radinių (203,6 mln. / 23,7 mln. / 2,5 mln. / 7,0 mln. vykdymų); vienas radinys trumpame paleidime pataisytas ir įdėtas į korpusą | `scripts/linux/56-fuzz.sh`; `ctest fuzz_replay_*`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.5 |
 | S3 | vyksta | skaitymo kelias (host ir `cuda-linear`) — PASS: 4 atvejai, prieš pataisą krito 3; GPU branduolių `compute-sanitizer` — paketas 2.3 | `tests/gpu/test_hostile_writer.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.4 |
-| S4 | PASS | 9 nauji testai: prieš seną kodą krenta visi, prieš naują — visi praeina; `fstart_*`, `overload_*` 26 iš 26 | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
-| S5 | nepradėta | vartotojas `mxltest` yra | §3 |
+| S4 | PASS | `[safe_files]` 16 atvejų, 305 tvirtinimai (po peržiūros: prieiga pagal rašymo teisę į domeną, riboti užraktai, šalinimas po užraktu); `fstart_*`, `overload_*` 28 iš 28 kaip root ir ne root | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
+| S5 | PASS | `mxltest`: build 0 įspėjimų, `ctest` 503 / 503, funkciniai 353 — 351 PASS / INFO; 2 FAIL (`fgold_dec`) buvo skripto klaida, po pataisos praeina (28 iš 28 pakartotų). Po peržiūros pataisų visas rinkinys ne root nekartotas | `scripts/linux/45-nonroot.sh`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.3 |
 | S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |
-| S7 | nepradėta | | |
+| S7 | PASS | eilių ribų ir sargo testai jau buvo (4 + 2 vieneto atvejai, funkciniai `--max-queue-mb` ir `ingest_libav_watchdog`); saugus paleidimas — `SECURITY.md` | `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.6 |
 | S8 | nepradėta | | |
 | S9 | nepradėta | | |
 | U1 | nepradėta | | |

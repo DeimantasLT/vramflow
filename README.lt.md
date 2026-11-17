@@ -107,8 +107,11 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   klaidoje — savininko run ID). Funkcijos domenų netrina. Nuomos katalogas atidaromas nesekant nuorodų ir atmetamas (exit
   `2`), jei tai ne katalogas, jei jo savininkas nėra nei šis procesas, nei domeno katalogo savininkas, arba jei svetimo
   katalogo teisės platesnės nei domeno; failai jame kuriami `O_EXCL | O_NOFOLLOW`, svetimi atidaromi tik paprasti (FIFO
-  nepakabina). Teisės — kaip domeno katalogo (failų — be vykdymo bitų), nuo `umask` nepriklauso. Katalogo vardas — iš
-  kanoninio domeno kelio, todėl tas pats domenas kitu keliu (simbolinė nuoroda) turi tą pačią nuomą ir tą pačią knygą.
+  nepakabina). Prieiga prie katalogo — pagal RAŠYMO teisę į domeną (`0755` domenas → `0700` katalogas ir `0600` failai;
+  `0770` → `0770` ir `0660` su domeno grupe), nuo `umask` nepriklauso: `flock` užtenka skaitomo failo, todėl visiems
+  skaitomas užrakto failas leistų pašaliečiui pakabinti domeno procesus. Nuomos skelbiamos ir negyvos šalinamos tik po
+  katalogo užraktu (`lease.lock`), užrakto laukiama ne ilgiau kaip 5 s. Katalogo vardas — iš kanoninio domeno kelio, todėl
+  tas pats domenas kitu keliu (simbolinė nuoroda) turi tą pačią nuomą ir tą pačią knygą. Daugiau — `SECURITY.md`.
 - **Domeno kelias GPU (`cuda-linear`) flow'ams — ne ilgesnis kaip 48 simboliai** (skaitytojo lizdo
   `<domenas>/<flow>.mxl-flow/payload.sock` kelias turi tilpti į 107 simbolius); ilgesnį `vramflow-func` atmeta iškart.
 - **`ingest` (tikri šaltiniai su garsu).** `--input URL` (kartoti; `udp://`, `rtp://`, `srt://`, `http://…m3u8`, failas) → kiekvienam
