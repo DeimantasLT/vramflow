@@ -24,7 +24,8 @@ set_target_properties(vramflow-func PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
 
 if(MXLV_BUILD_TESTS)
   # flows.cpp testai ant tikro MXL (host ir cuda-linear): layout, grainRate. Host dalis nereikalauja GPU.
-  add_executable(vramflow-flows-tests tests/gpu/test_flows.cpp)
+  # tests/gpu/test_hostile_writer.cpp — piktybiškas rašytojas (planas 2026-11-17 §1.4, S3)
+  add_executable(vramflow-flows-tests tests/gpu/test_flows.cpp tests/gpu/test_hostile_writer.cpp)
   vramflow_warnings(vramflow-flows-tests)
   target_link_libraries(vramflow-flows-tests PRIVATE mxlv_flows CUDA::cudart_static Catch2::Catch2WithMain)
   set_target_properties(vramflow-flows-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")

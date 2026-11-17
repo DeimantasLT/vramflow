@@ -81,3 +81,34 @@ naudoja tą patį kanoninį kelią ir taip pat neseka nuorodų.
 Švarus build — 0 įspėjimų; `ctest` 492 / 493 (krito tik žinomas laiko testas `gap_policy … < 1 ms`).
 Funkciniai testai per nuomą ir knygą tikrais binarais (`fstart_*`, `overload_*`, `fcomp1`): 26 iš 26 PASS; po jų `/dev/shm`
 nelieka nė vieno nuomos katalogo.
+
+## 1.4 Piktybiškas rašytojas (kriterijus S3, host ir `cuda-linear` skaitymo kelias)
+
+**Problema.** MXL priima bet kokią grain'o antraštę: rašytojas gali commit'inti `grainSize` 0, 4 294 967 295 ar
+`validSlices` > `totalSlices` — commit grąžina OK. `VideoIn::get` tikrino tik slot ribą ir indeksą, todėl už tokią antraštę
+grąžindavo rodyklę kaip už sveiką grain'ą. Flow aprašo sveikieji buvo skaitomi atlaidžiai: `"frame_width":1e9` virsdavo 1.
+
+**Kas padaryta.**
+
+- `VideoIn::get` (`src/func/flows.cpp`) — vienintelė vieta, per kurią funkcijos skaito grain'us: galiojančio grain'o
+  `grainSize` turi būti šio rastro, `totalSlices` ≠ 0 ir `validSlices == totalSlices`; kitaip `MXL_ERR_INTERNAL` ir jokios
+  rodyklės. INVALID grain'o (spragos) antraštė nevertinama — jo turinio niekas neskaito.
+- `json_int` (`src/gfx/raster.hpp`): tik skaitmenys, po jų — JSON skyriklis; `1e9`, `1920.5`, `"1920"`, `-1`, 65537 atmetami.
+  Klaidos tekstas dabar sako „nėra tinkamo frame_width (sveikasis 1…65536)“.
+
+**Testai** `tests/gpu/test_hostile_writer.cpp` (4 atvejai, `vramflow-flows-tests`; rašytojas — tiesiai per MXL API):
+
+| Atvejis | Prieš pataisą | Po |
+|---|---|---|
+| Netikra antraštė, host: `grainSize` ∈ {0, tikras ± 1, 2³²−1}; pjūviai {0/0, 0/7, 540/541, 540/65535} | FAIL: `get` grąžina OK ir rodyklę | PASS |
+| Tas pats, `cuda-linear` | FAIL | PASS |
+| Flow aprašas (1920×1080) didesnis už tikrą saugyklą (1280×720) | PASS — `check_layout` jau saugojo | PASS |
+| Neįmanomi matmenys apraše (0, −1, 65537, 2³¹−1, 10²⁰, `1e9`, eilutė, tuščia) | FAIL (`1e9` priimta kaip 1) | PASS |
+
+Iš viso prieš pataisą krito 3 atvejai iš 4 (33 tvirtinimai iš 107); po — visi 107 tvirtinimai praeina. Po sveikos antraštės
+skaitytojas tebeskaito (testas tai tikrina po kiekvienos netikrų antraščių serijos).
+
+Švarus build — 0 įspėjimų; funkciniai testai, einantys per skaitymo kelią (`f7_teeth`, `fgfx1`, `fcomp1–3`, `ffmt_logo`,
+`ffmt_logo720`, `ffmt_comp`, `ffmt_enc`, `ffmt_dec`, `fstart_restart`, `fstart_attach`): 49 iš 49 PASS.
+
+Kas lieka: GPU branduolių ribų patikra `compute-sanitizer` (planas 2.3) — S3 GPU pusė iki tol remiasi šiais testais.

@@ -530,7 +530,7 @@ failas arba commit.
 | K8 | nepradėta | | |
 | S1 | nepradėta | | |
 | S2 | nepradėta | | |
-| S3 | nepradėta | | |
+| S3 | vyksta | skaitymo kelias (host ir `cuda-linear`) — PASS: 4 atvejai, prieš pataisą krito 3; GPU branduolių `compute-sanitizer` — paketas 2.3 | `tests/gpu/test_hostile_writer.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.4 |
 | S4 | PASS | 9 nauji testai: prieš seną kodą krenta visi, prieš naują — visi praeina; `fstart_*`, `overload_*` 26 iš 26 | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
 | S5 | nepradėta | vartotojas `mxltest` yra | §3 |
 | S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |

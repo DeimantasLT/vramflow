@@ -377,6 +377,11 @@ mxlStatus VideoIn::get(std::uint64_t index, std::uint64_t timeout_ns, mxlGrainIn
     ptr = nullptr;
     if (st == MXL_STATUS_OK) {
         if (slot >= layout.slotCount || info.index != index) return MXL_ERR_INTERNAL;
+        // Antraštę rašo kitas procesas ir MXL jos netikrina (tests/gpu/test_hostile_writer.cpp): galiojančio grain'o dydis turi
+        // būti šio rastro, o visi pjūviai — užbaigti. INVALID grain'o (spragos) turinio niekas neskaito — jo antraštė nevertinama.
+        if ((info.flags & MXL_GRAIN_FLAG_INVALID) == 0 &&
+            (info.grainSize != vramflow::gfx::grain_bytes(raster) || info.totalSlices == 0 || info.validSlices != info.totalSlices))
+            return MXL_ERR_INTERNAL;
         ptr = static_cast<const std::uint32_t*>(slot_ptr(layout, slots[slot]));
     }
     return st;

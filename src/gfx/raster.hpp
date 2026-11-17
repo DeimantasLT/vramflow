@@ -136,10 +136,13 @@ inline const char* json_value(const std::string& j, const char* key) {
 }
 inline bool json_int(const std::string& j, const char* key, int& out) {
     const char* v = json_value(j, key);
-    if (!v) return false;
+    if (!v || *v < '0' || *v > '9') return false;  // JSON sveikasis: be ženklo ir be tarpų priekyje, ne eilutė
     char* end = nullptr;
     const long n = std::strtol(v, &end, 10);
-    if (end == v || n <= 0 || n > 65536) return false;
+    // Po skaitmenų — tik JSON skyriklis: „1e9“, „1920.5“, „1920px“ atmetami (anksčiau būtų perskaityta 1 arba 1920)
+    const char c = *end;
+    if (c != ',' && c != '}' && c != ']' && c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
+    if (n <= 0 || n > 65536) return false;
     out = static_cast<int>(n);
     return true;
 }
@@ -202,8 +205,8 @@ inline bool raster_from_flow_def(const std::string& json, Raster& out, std::stri
     if (mt != "video/v210" && mt != "video/v210a") { err = "nepalaikomas media_type " + mt; return false; }
     Raster r{};
     r.alpha = mt == "video/v210a";
-    if (!detail::json_int(json, "frame_width", r.w)) { err = "flow apraše nėra frame_width"; return false; }
-    if (!detail::json_int(json, "frame_height", r.h)) { err = "flow apraše nėra frame_height"; return false; }
+    if (!detail::json_int(json, "frame_width", r.w)) { err = "flow apraše nėra tinkamo frame_width (sveikasis 1…65536)"; return false; }
+    if (!detail::json_int(json, "frame_height", r.h)) { err = "flow apraše nėra tinkamo frame_height (sveikasis 1…65536)"; return false; }
     std::string im;
     // Palaikoma TIK progressive (arba nenurodyta) ir interlaced_tff (lyginis indeksas = viršutinis laukas). BFF ir kitos
     // reikšmės atmetamos aiškiai: tylus TFF laukų tvarkos priskyrimas BFF turiniui sukeistų laukus.
