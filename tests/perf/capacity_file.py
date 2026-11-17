@@ -108,8 +108,12 @@ def main() -> int:
     # Matavimo laikas — naujausio kelio failo keitimo laikas (UTC)
     newest = max((camp / f"knee-{t}-G.json").stat().st_mtime for t in knees) if knees else 0
     stamp = datetime.datetime.fromtimestamp(newest, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    d = build(knees, gpu_identity(), a.format, stamp)
-    p = write(d, pathlib.Path(a.out) if a.out else camp)
+    try:
+        d = build(knees, gpu_identity(), a.format, stamp)
+        p = write(d, pathlib.Path(a.out) if a.out else camp)
+    except ValueError as e:  # trūksta kelio varikliui, nežinomas formatas, netinkama schema — viena eilutė, ne traceback
+        print(f"capacity_file: {e}", file=sys.stderr)
+        return 2
     print(p)
     return 0
 
