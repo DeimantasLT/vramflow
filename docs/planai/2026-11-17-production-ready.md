@@ -524,7 +524,7 @@ failas arba commit.
 | G3 | nepradėta | bazė: `gap_policy < 1 ms` — 6 iš 20 krenta | §3 |
 | G4 | nepradėta | | |
 | G5 | nepradėta | | |
-| K1 | nepradėta | bazė: `ctest` 482 / 483; funkcinis 351 / 352 | §3 |
+| K1 | nepradėta | bazė: `ctest` 482 / 483; funkcinis 351 / 352. Po 1 fazės (`dad306b`): `ctest` 510 / 510 ir 509 / 510 (krito tik `gap_policy … < 1 ms`); visas funkcinis rinkinys kaip root — 353 iš 353, vienas paleidimas (kriterijui reikia trijų iš eilės, 6.3) | §3; `docs/rezultatai/2026-11-17-production-ready-faze1.md` |
 | K2 | nepradėta | | |
 | K3 | nepradėta | | |
 | K4 | nepradėta | | |
@@ -560,4 +560,5 @@ Patikrinta 1 fazėje ir iš sąrašo išbraukta (`docs/rezultatai/2026-11-17-pro
 - grūdinimo vėliavos su `-Werror`: švarus build — 0 įspėjimų C, C++ (`clang++-19`) ir CUDA host daliai
   (`nvcc -Xcompiler`); `ctest build_hardening` — 104 vertimo vienetai ir 22 ELF failai (1.1);
 - visas funkcinis rinkinys vartotojo `mxltest` vardu: 353 rezultatai, root neprireikė nė vienam testui (1.3, ant
-  `b8168d6`). Po peržiūros pataisų ne root pakartoti tik 28 testai, einantys per pakeistą kodą.
+  `b8168d6`). Po peržiūros pataisų ne root pakartoti tik 28 testai, einantys per pakeistą kodą; kaip root visas
+  rinkinys pakartotas ant `dad306b`: 353 rezultatai, 0 FAIL.

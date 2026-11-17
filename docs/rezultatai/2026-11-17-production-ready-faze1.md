@@ -239,11 +239,21 @@ Po dokumentų commit'o `646dbd5` (kodas tas pats: `ninja: no work to do`) `ctest
 kiek bazėje (6 iš 20, plano §3). Kritusių reikšmės: 1,251; 1,252; 1,252; 1,253; 1,258; 1,296 ms prieš 1 ms ribą. Penkios iš
 šešių telpa į 7 µs — tai stebėjimas, ne paaiškinimas; priežasties paieška — 3 fazės darbas (kriterijus G3).
 
+Visas funkcinis rinkinys kaip root ant `dad306b` (kodas tas pats kaip `31997b4`: `ninja: no work to do`), 16:50–19:15,
+2 h 25 min: 353 rezultatai — 321 PASS, 32 INFO, 0 FAIL, 0 SKIP (`functional.py <out>`, exit 0). Po jo neliko nė vieno
+`vramflow` proceso ir nė vieno nuomos katalogo. Į jį įeina 25 `interop_*` rezultatai (visi PASS, tarp jų
+`interop_foreign_writer`), kurių 28 testų pakartojime po peržiūros pataisų nebuvo: griežtesnis `grain_rate` skaitymas
+svetimų rašytojų flow aprašų neatmeta. Bazėje (plano §3) tas pats rinkinys turėjo vieną kritimą — `fiso_stall[G:first]`;
+šįkart jis praėjo, bet tai vienas paleidimas, ne įrodymas, kad nestabilumas dingo (3 fazė, G3).
+
+Žurnale liko 4 `ConnectionResetError` pėdsakai iš testų HTTP serverio (`tests/functional/ingest.py:552`): klientas nutraukė
+jungtį, kol serveris rašė atsakymą. Rezultatų tai nekeičia, bet testų išvestis nėra švari — neištaisyta, įrašyta kaip
+smulkmena.
+
 Kas šioje fazėje nepatikrinta:
 
-- visas funkcinis rinkinys (2 h 25 min) po peržiūros pataisų: pilnas nekartotas nei kaip root, nei kaip ne root — abiem
-  vartotojais paleisti tik 28 testai, einantys per pakeistą kodą; paskutiniai pilni paleidimai — root ant `8bd366d`, ne root
-  ant `b8168d6`;
+- visas funkcinis rinkinys ne root vartotoju po peržiūros pataisų: jo vardu pakartoti tik 28 testai, einantys per pakeistą
+  kodą; paskutinis pilnas ne root paleidimas — ant `b8168d6`;
 - natyvus Linux (viskas matuota WSL2) ir konteineriai;
 - `clang++-18` sanitizerių build'as visam projektui (kol kas tik fuzz taikiniams) — paketas 2.1;
 - grupei bendro domeno scenarijus tikrais vartotojais ir tikra grupe (testuose — išgalvoti uid / gid per `setuid`).
