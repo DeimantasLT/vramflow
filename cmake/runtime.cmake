@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Tvirtas paleidimas ir sustabdymas (planas §P6): InputSlot (įėjimas atsiranda / dingsta / grįžta), OpenPolicy (laukimas),
 # DomainLease (paleidimo nuoma `<domenas>.vramflow/`). Naudoja mxlv_flows (VideoIn).
-add_library(mxlv_runtime STATIC src/runtime/input_slot.cpp src/runtime/domain_lease.cpp)
+# Priėmimo kontrolė (planas §P4): talpos failas, sprendimas, rezervacijų knyga nuomos kataloge.
+add_library(mxlv_runtime STATIC src/runtime/input_slot.cpp src/runtime/domain_lease.cpp src/runtime/admission.cpp)
 vramflow_warnings(mxlv_runtime)
 target_include_directories(mxlv_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(mxlv_runtime PUBLIC mxlv_flows mxl::mxl)
@@ -15,4 +16,11 @@ if(MXLV_BUILD_TESTS)
   target_link_libraries(vramflow-runtime-tests PRIVATE mxlv_runtime Catch2::Catch2WithMain)
   set_target_properties(vramflow-runtime-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
   catch_discover_tests(vramflow-runtime-tests PROPERTIES TIMEOUT 120)
+  # Priėmimo kontrolė (planas §P4) — gryna logika ir rezervacijų knyga (flock, fork / kill -9), be MXL ir GPU.
+  add_executable(mxlv-admission-unit tests/unit/test_admission.cpp src/runtime/admission.cpp src/runtime/domain_lease.cpp)
+  vramflow_warnings(mxlv-admission-unit)
+  target_include_directories(mxlv-admission-unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_compile_definitions(mxlv-admission-unit PRIVATE MXLV_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/unit/data")
+  target_link_libraries(mxlv-admission-unit PRIVATE Catch2::Catch2WithMain)
+  catch_discover_tests(mxlv-admission-unit)
 endif()
