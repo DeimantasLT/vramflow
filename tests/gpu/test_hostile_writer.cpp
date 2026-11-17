@@ -99,7 +99,7 @@ void check_rejected(VideoIn& in, std::uint64_t index) {
     mxlGrainInfo gi{};
     const std::uint32_t* p = reinterpret_cast<const std::uint32_t*>(std::uintptr_t{1});
     const mxlStatus rst = in.get(index, 50'000'000, gi, p);
-    CHECK(rst != MXL_STATUS_OK);
+    CHECK(rst == MXL_ERR_INTERNAL);  // mūsų antraštės patikra (ne MXL laukimo riba ar kita klaida)
     CHECK(p == nullptr);
 }
 
@@ -114,6 +114,7 @@ void hostile_headers(const std::string& options, int dom, const char* id) {
     const mxlRational rate = kFieldRate;
     std::uint64_t idx = mxlGetCurrentIndex(&rate);
     const std::uint32_t real = static_cast<std::uint32_t>(gfx::grain_bytes(gfx::kHd1080i));
+    int committed = 0;  // kiek netikrų antraščių MXL iš tikrųjų priėmė
 
     SECTION("grainSize ne rastro dydžio") {
         for (const std::uint32_t bad : {std::uint32_t{0}, real + 1, real - 1, std::uint32_t{0xFFFFFFFF}}) {
@@ -121,8 +122,10 @@ void hostile_headers(const std::string& options, int dom, const char* id) {
             const mxlStatus cst = hostile_commit(o, idx, [&](mxlGrainInfo& g) { g.grainSize = bad; });
             INFO("grainSize " << bad << " (tikras " << real << "), commit statusas " << cst);
             if (cst != MXL_STATUS_OK) continue;  // MXL pats atmetė — tokios antraštės skaitytojas nepamatys
+            ++committed;
             check_rejected(in, idx);
         }
+        CHECK(committed > 0);  // kitaip šis atvejis nieko netikrintų
     }
     SECTION("validSlices ir totalSlices") {
         struct S {
@@ -136,8 +139,10 @@ void hostile_headers(const std::string& options, int dom, const char* id) {
             });
             INFO("totalSlices " << s.total << ", validSlices " << s.valid << ", commit statusas " << cst);
             if (cst != MXL_STATUS_OK) continue;
+            ++committed;
             check_rejected(in, idx);
         }
+        CHECK(committed > 0);
     }
     // Po netinkamų antraščių sveikas grain'as tebeskaitomas (skaitytojas nesugadintas)
     ++idx;

@@ -220,6 +220,7 @@ TEST_CASE("capacity: skaičius už lauko ribų atmetamas, ne apkarpomas", "[admi
     CHECK(err.find(".knee") != std::string::npos);
     CHECK_FALSE(parse_capacity(replace(f, "\"vram_per_flow_bytes\": 191029576", "\"vram_per_flow_bytes\": 1e30"), c, err));
     CHECK(err.find("vram_per_flow_bytes") != std::string::npos);
+    err.clear();
     CHECK_FALSE(parse_capacity(replace(f, "\"mpix_s\": 1140.48", "\"mpix_s\": 1e999"), c, err));  // begalybė — talpa be ribos
     CHECK_FALSE(err.empty());
     CHECK_FALSE(parse_capacity(replace(f, "\"driver\": \"596.49\"", "\"driver\": \"596.49\", \"vram_bytes\": 1e40"), c, err));

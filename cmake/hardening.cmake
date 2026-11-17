@@ -4,7 +4,8 @@
 # Kviečiama iš vramflow_warnings(), todėl naujas tikslas vėliavas gauna pats; tests/arch/check_hardening.py (ctest
 # build_hardening) tikrina kiekvieną savą vertimo vienetą ir kiekvieną savą ELF failą.
 #   Kompiliavimas: stack protector, stack clash protection, CET (-fcf-protection), libstdc++ tvirtinimai ir
-#                  _FORTIFY_SOURCE=3 — tik optimizuotam build'ui be sanitizerių (su ASan / TSan / libFuzzer nesuderinamas).
+#                  _FORTIFY_SOURCE=3 — tik Release / RelWithDebInfo / MinSizeRel be sanitizerių (be -O glibc įspėja, o su
+#                  ASan / TSan / libFuzzer jis nesuderinamas).
 #   Susiejimas:    pilnas RELRO (-z relro -z now), nevykdomas stekas. PIE — CMAKE_POSITION_INDEPENDENT_CODE (CMakeLists.txt).
 # CUDA failų host daliai tos pačios vėliavos perduodamos per -Xcompiler (nvcc host kompiliatorius — g++).
 option(VRAMFLOW_HARDENING "Grūdinimo vėliavos saviems tikslams (stack protector, FORTIFY, RELRO, CET)" ON)
@@ -28,8 +29,8 @@ function(vramflow_hardening target)
     # -U pirma: Ubuntu g++ ir kai kurie clang paketai _FORTIFY_SOURCE apibrėžia patys (kitaip — „redefined“ su -Werror)
     set(fortify -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3)
     target_compile_options(${target} PRIVATE
-      "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<NOT:$<CONFIG:Debug>>>:${fortify}>"
-      "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<CONFIG:Debug>>>:SHELL:-Xcompiler -U_FORTIFY_SOURCE,-D_FORTIFY_SOURCE=3>")
+      "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:${fortify}>"
+      "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:SHELL:-Xcompiler -U_FORTIFY_SOURCE,-D_FORTIFY_SOURCE=3>")
   endif()
   if(_type STREQUAL "EXECUTABLE" OR _type STREQUAL "SHARED_LIBRARY" OR _type STREQUAL "MODULE_LIBRARY")
     target_link_options(${target} PRIVATE -Wl,-z,relro,-z,now -Wl,-z,noexecstack)

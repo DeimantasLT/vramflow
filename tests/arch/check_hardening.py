@@ -25,6 +25,7 @@ import sys
 TU_FLAGS = ["-fstack-protector-strong", "-fstack-clash-protection", "-fcf-protection=full"]
 CXX_FLAG = "-D_GLIBCXX_ASSERTIONS"
 FORTIFY_FLAG = "-D_FORTIFY_SOURCE=3"
+NEGATING = ["-fno-stack-protector", "-fno-stack-clash-protection", "-fcf-protection=none", "-U_GLIBCXX_ASSERTIONS"]
 ELF_PATTERNS = ["vramflow-*", "mxlv-*", "libvramflow*.so*"]
 DELIVERABLES = ("vramflow-func", "vramflow-verify", "libvramflow-gfx.so")
 NO_FORTIFY_OPTIONS = ("MXLV_ENABLE_SANITIZERS", "MXLV_ENABLE_TSAN", "MXLV_BUILD_FUZZ")
@@ -70,6 +71,16 @@ def check_units(build, src, want_fortify):
         missing = [x for x in need if x not in cmd]
         if missing:
             bad.append(f"{rel}: trūksta {' '.join(missing)}")
+        # Vėliava yra, bet vėlesnė ją panaikina (lemia paskutinė): to substring patikra nepagautų
+        undone = [x for x in NEGATING if x in cmd]
+        if want_fortify:
+            if cmd.rfind("-U_FORTIFY_SOURCE") > cmd.rfind(FORTIFY_FLAG):
+                undone.append("-U_FORTIFY_SOURCE po -D_FORTIFY_SOURCE")
+            opt = re.findall(r"(?<![\w=-])-O(\w*)", cmd)
+            if not opt or opt[-1] == "0":
+                undone.append("be optimizavimo (-O0 arba nėra -O): _FORTIFY_SOURCE neveikia")
+        if undone:
+            bad.append(f"{rel}: apsaugą panaikina {'; '.join(undone)}")
     if n == 0:
         bad.append("compile_commands.json neturi nė vieno įrašo iš src/ ar tests/")
     return n, bad

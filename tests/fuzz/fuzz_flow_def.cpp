@@ -25,6 +25,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     // Didžiausias galimas grain'as: v210a 65536 × 65536 (fill 1366 · 128 B ir key 21846 · 4 B eilutei)
     const std::size_t gb = vramflow::gfx::grain_bytes(r);
     if (gb == 0 || gb > (std::size_t{1366} * 128 + std::size_t{21846} * 4) * 65536) std::abort();
-    if (f.frame_rate.den == 0) std::abort();
+    // Dažnis 1…1 000 000 / 1…1 000 000: grain_rate() ir same_rate() sandaugos nepersipildo (UBSan tai tikrina vykdydamas)
+    if (f.frame_rate.num < 1 || f.frame_rate.num > 1'000'000 || f.frame_rate.den < 1 || f.frame_rate.den > 1'000'000) std::abort();
+    const vramflow::Rational g = f.grain_rate();
+    if (g.num < f.frame_rate.num || !vramflow::same_rate(g, g) || !(f == f)) std::abort();
     return 0;
 }

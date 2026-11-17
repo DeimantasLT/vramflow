@@ -160,16 +160,22 @@ inline bool grain_rate_of(const std::string& j, Rational& r) {
     const std::size_t open = j.find('{', g), close = j.find('}', g);
     if (open == std::string::npos || close == std::string::npos || open > close) return false;
     const std::string obj = j.substr(open, close - open + 1);
-    const char* n = gfx::detail::json_value(obj, "numerator");
-    if (!n) return false;
-    char* e = nullptr;
-    const long long num = std::strtoll(n, &e, 10);
-    if (e == n || num <= 0) return false;
-    long long den = 1;
-    if (const char* d = gfx::detail::json_value(obj, "denominator")) {
-        den = std::strtoll(d, &e, 10);
-        if (e == d || den <= 0) return false;
-    }
+    // Griežtas teigiamas JSON sveikasis 1…1 000 000 (kaip gfx::detail::json_int): tik skaitmenys, po jų — skyriklis. „25e3“
+    // anksčiau būtų perskaityta kaip 25, o milžiniška reikšmė perpildytų grain_rate() ir same_rate() sandaugas.
+    auto rate_int = [](const char* v, long long& out) {
+        if (!v || *v < '0' || *v > '9') return false;
+        char* e = nullptr;
+        const long long n = std::strtoll(v, &e, 10);
+        const char c = *e;
+        if (c != ',' && c != '}' && c != ']' && c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
+        if (n <= 0 || n > 1'000'000) return false;  // strtoll perpildymas grąžina LLONG_MAX — taip pat atmetama
+        out = n;
+        return true;
+    };
+    long long num = 0, den = 1;
+    if (!rate_int(gfx::detail::json_value(obj, "numerator"), num)) return false;
+    if (const char* d = gfx::detail::json_value(obj, "denominator"))
+        if (!rate_int(d, den)) return false;
     r = Rational{num, den};
     return true;
 }

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include "common/format.hpp"
 
@@ -142,4 +143,33 @@ TEST_CASE("format: flow aprašas pirmyn-atgal", "[format]") {
     std::string err;
     CHECK_FALSE(format_from_flow_def(R"({"media_type":"video/v210","frame_width":1920,"frame_height":1080})", back, err));
     CHECK(err.find("grain_rate") != std::string::npos);
+}
+
+// Flow aprašą rašo kitas procesas: dažnis turi būti griežtas teigiamas sveikasis 1…1 000 000. Anksčiau „25e3“ būdavo
+// perskaityta kaip 25, o milžiniška reikšmė perpildydavo grain_rate() ir same_rate() sandaugas (peržiūros radinys).
+TEST_CASE("format: flow aprašo grain_rate — tik griežtas sveikasis leistinose ribose", "[format]") {
+    const std::string good = video_flow_def("4d584c47-0001-4000-8000-000000000000", "t", kFmt1080i50, "g");
+    const std::string rate = R"("grain_rate":{"numerator":25,"denominator":1})";
+    REQUIRE(good.find(rate) != std::string::npos);
+    auto with = [&](const char* num, const char* den) {
+        std::string j = good;
+        j.replace(j.find(rate), rate.size(), std::string(R"("grain_rate":{"numerator":)") + num + R"(,"denominator":)" + den + "}");
+        return j;
+    };
+    VideoFormat f{};
+    std::string err;
+    for (const auto& [num, den] : {std::pair{"25e3", "1"}, {"25.5", "1"}, {"-25", "1"}, {"+25", "1"}, {"0", "1"}, {"\"25\"", "1"},
+                                  {"1000001", "1"}, {"9223372036854775807", "1"}, {"99999999999999999999", "1"}, {"25", "0"},
+                                  {"25", "1e3"}, {"25", "1000001"}, {"25", "-1"}}) {
+        INFO("numerator " << num << ", denominator " << den);
+        err.clear();
+        CHECK_FALSE(format_from_flow_def(with(num, den), f, err));
+        CHECK(err.find("grain_rate") != std::string::npos);
+    }
+    // Ribinės ir įprastos reikšmės priimamos; aritmetika su jomis nepersipildo
+    for (const auto& [num, den] : {std::pair{"60000", "1001"}, {"1000000", "1000000"}, {"1", "1"}, {"50", "1"}}) {
+        INFO("numerator " << num << ", denominator " << den);
+        REQUIRE(format_from_flow_def(with(num, den), f, err));
+        CHECK(same_rate(f.grain_rate(), Rational{2 * f.frame_rate.num, f.frame_rate.den}));
+    }
 }
