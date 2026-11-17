@@ -103,11 +103,13 @@ if(TARGET mxlv_flows AND TARGET mxlv_gfx_cuda)
   if(MXLV_BUILD_TESTS)
     # Antraštė turi kompiliuotis kaip C (-std=c11 -pedantic -Werror) ir ją naudojanti programa — susilinkuoti su .so.
     enable_language(C)
+    check_pie_supported(LANGUAGES C)
     add_executable(vramflow-gfx-c-check tests/gpu/gfx_c_check.c)
     target_link_libraries(vramflow-gfx-c-check PRIVATE vramflow-gfx mxl::mxl)
     set_target_properties(vramflow-gfx-c-check PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF
                           BUILD_RPATH "${MXL_ROOT}/lib")
     target_compile_options(vramflow-gfx-c-check PRIVATE -Wall -Wextra -pedantic -Werror)
+    vramflow_hardening(vramflow-gfx-c-check)  # C tikslas nekviečia vramflow_warnings()
     add_test(NAME gfx_writer_c_header COMMAND vramflow-gfx-c-check)
 
     # R20 / auditas 9 prieš PRISTATOMĄ .so su atskira dinamine cudart (kaip tikras naudotojas); --bench — kainos matavimas.

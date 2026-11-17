@@ -142,7 +142,7 @@ applies to the default auto mode`.
 
 #### 1.1 Build grūdinimas (S6, RF-1)
 
-- **Kurti:** `cmake/hardening.cmake`, `tests/arch/check_hardening.sh`.
+- **Kurti:** `cmake/hardening.cmake`, `tests/arch/check_hardening.py`.
 - **Keisti:** `CMakeLists.txt` (`include`, `CMAKE_EXPORT_COMPILE_COMMANDS ON`, `CMAKE_POSITION_INDEPENDENT_CODE ON`,
   `check_pie_supported()`), `cmake/warnings.cmake` (`vramflow_warnings()` pabaigoje kviečia `vramflow_hardening()` — taip
   dengiami visi savi tikslai).
@@ -533,7 +533,7 @@ failas arba commit.
 | S3 | nepradėta | | |
 | S4 | nepradėta | | |
 | S5 | nepradėta | vartotojas `mxltest` yra | §3 |
-| S6 | nepradėta | bazė: RELRO dalinis, `BIND_NOW` nėra | §3 |
+| S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |
 | S7 | nepradėta | | |
 | S8 | nepradėta | | |
 | S9 | nepradėta | | |

@@ -13,6 +13,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)    # tests/arch/check_hardening.py (ir clang-tidy) skaito compile_commands.json
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)  # PIE vykdomieji; statinės bibliotekos, iš kurių jie surenkami, — su -fPIC
+include(CheckPIESupported)
+check_pie_supported()
 
 set(MXL_ROOT "$ENV{HOME}/src/mxl-pr653/install/Linux-Clang-Release" CACHE PATH "MXL PR #653 instaliacija")
 set(MXL_SOURCE_DIR "$ENV{HOME}/src/mxl-pr653" CACHE PATH "MXL šaltinis (CudaLinearStorage.h)")
@@ -21,7 +25,8 @@ set(MXL_VCPKG_PREFIX "${MXL_SOURCE_DIR}/build/Linux-Clang-Release/vcpkg_installe
 option(MXLV_ENABLE_SANITIZERS "ASan + UBSan host kodui" OFF)
 option(MXLV_BUILD_TESTS "Unit ir GPU testai" ON)
 
-include(${CMAKE_SOURCE_DIR}/cmake/warnings.cmake)  # vramflow_warnings(<tikslas>)
+include(${CMAKE_SOURCE_DIR}/cmake/hardening.cmake)  # vramflow_hardening(<tikslas>) — kviečiama iš vramflow_warnings()
+include(${CMAKE_SOURCE_DIR}/cmake/warnings.cmake)   # vramflow_warnings(<tikslas>)
 
 list(PREPEND CMAKE_PREFIX_PATH "${MXL_ROOT}" "${MXL_VCPKG_PREFIX}")
 find_package(CUDAToolkit REQUIRED)
@@ -83,6 +88,10 @@ if(MXLV_BUILD_TESTS)
   if(Python3_Interpreter_FOUND)
     add_test(NAME perf_knee COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_knee.py)
     add_test(NAME perf_capacity_file COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_capacity_file.py)
+    # Build grūdinimas (planas 2026-11-17 §1.1, S6): kiekvienas savas vertimo vienetas ir kiekvienas savas ELF failas
+    add_test(NAME build_hardening COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/arch/check_hardening.py
+             ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
+    set_tests_properties(build_hardening PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)

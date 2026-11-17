@@ -26,4 +26,5 @@ function(vramflow_warnings target)
   if(VRAMFLOW_WERROR)
     target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:--Werror all-warnings>")
   endif()
+  vramflow_hardening(${target})  # cmake/hardening.cmake: kiekvienas savas tikslas — ir su grūdinimo vėliavomis
 endfunction()
