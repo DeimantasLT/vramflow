@@ -33,7 +33,7 @@ import time
 import functional as F  # noqa: E402
 
 TESTS = {}
-MXL_BIN = pathlib.Path(os.environ.get("MXL_BIN", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin"))
+MXL_BIN = pathlib.Path(os.environ.get("MXL_BIN", str(pathlib.Path(F.LIB).parent / "bin")))  # šalia MXL bibliotekos
 FORMATS = ["1080i50", "1080p25", "1080p50", "720p50", "1080i59.94"]
 DL = ["--deadline-ms", 0]
 

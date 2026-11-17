@@ -27,8 +27,9 @@ import keepwarm  # noqa: E402  tests/perf/keepwarm.py — GPU virš P8 GPU varia
 
 BIN = os.environ.get("VERIFY_BIN", str(pathlib.Path.home() / "build/vramflow/release/vramflow-verify"))
 FUNC_BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
-MXL_INFO = os.environ.get("MXL_INFO", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin/mxl-info")
 LIB = os.environ.get("MXL_LIB", str(pathlib.Path.home() / "src/mxl-pr653/install/Linux-Clang-Release/lib"))
+# mxl-info — šalia MXL bibliotekos (anksčiau — įrašytas /root/… kelias: ne root vartotojui netiko, planas 2026-11-17 §1.3)
+MXL_INFO = os.environ.get("MXL_INFO", str(pathlib.Path(LIB).parent / "bin/mxl-info"))
 ENV = dict(os.environ, LD_LIBRARY_PATH=LIB)
 # GPU „šildymas“ (tests/perf/keepwarm.py): įjungiamas GPU variantams, išjungiamas CPU (C) variantams — per gpu_mode()
 # (vcommon jį kviečia kiekvieno varianto pradžioje); kiekvienas rezultatas įrašo, ar jis veikė (laukas keepwarm).

@@ -32,7 +32,7 @@ CHAIN_LOSS = ("late_fields", "late_skips", "lapped", "too_late", "in_invalid", "
 ENC_LOSS = ("late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
             "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors")
 DL = ["--deadline-ms", 0]  # numatytoji riba 3·P/4 nuo T + E (V20 + V24)
-GST_BIN = pathlib.Path(os.environ.get("MXL_BIN", "/root/src/mxl-pr653/install/Linux-Clang-Release/bin"))
+GST_BIN = pathlib.Path(os.environ.get("MXL_BIN", str(pathlib.Path(F.LIB).parent / "bin")))  # šalia MXL bibliotekos
 
 
 def hist(s, name):
