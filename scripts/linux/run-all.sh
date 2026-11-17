@@ -60,6 +60,7 @@ if [[ $c1 != 0 || $c2 != 0 ]]; then
 fi
 stage 45-functional   python3 "$REPO/tests/functional/functional.py" "$EVIDENCE/45-functional"
 stage 50-sanitizers   bash "$REPO/scripts/linux/50-sanitizers.sh"
+stage 55-clang-tidy   bash "$REPO/scripts/linux/55-clang-tidy.sh" "$EVIDENCE/55-clang-tidy"
 stage 60-scale-cuda   python3 "$REPO/tests/perf/scale.py" "$EVIDENCE/60-scale" --storage cuda-linear --n "$SCALE_N" --seconds "$SCALE_S"
 stage 61-scale-host   python3 "$REPO/tests/perf/scale.py" "$EVIDENCE/60-scale" --storage host --n "$SCALE_N" --seconds "$SCALE_S"
 stage 62-repeat       python3 "$REPO/tests/perf/scale.py" "$EVIDENCE/62-repeat" --storage cuda-linear --n "$SOAK_N,$SOAK_N,$SOAK_N" --seconds "$SCALE_S" --label repeat
