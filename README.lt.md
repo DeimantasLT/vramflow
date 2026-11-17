@@ -206,8 +206,24 @@ talpa — `tests/perf/capacity.py` (ingest — `tests/perf/ingest_capacity.py`),
 | Pilna grandinė: TS → dekodavimas → logotipas → H.264 + AAC → TS | 4 | ≥ 12 (riba nepasiekta) | ~2,0 → ~0,33 |
 
 N\* — didžiausias flow'ų skaičius, kai ši ir visos mažesnės pakopos praėjo (0 teisingumo klaidų, praradimai ≤ 0,2 %).
-Pilnoje grandinėje ties N=12 riba — vienintelis NVENC variklis, CUDA branduoliai užimti ~10 %. Visos lentelės:
+Pilnoje grandinėje ties N=12 nė vienas variklis neprisotintas (NVENC 63 %, NVDEC 51 %); 2026-11-17 kartojimas N=12
+krenta dėl vėlavimų, priežastis nenustatyta (ankstesnė šio README versija klaidingai nurodė NVENC). Visos lentelės:
 [`docs/rezultatai/2026-11-11-gpu-vs-cpu.md`](docs/rezultatai/2026-11-11-gpu-vs-cpu.md).
+
+**Talpos kelias su pakartojimais (2026-11-17, P8):** tik G, 30 s pakopa, pakopa skaitoma tik jei praeina **visi 3**
+pakartojimai (`capacity.py --n auto`).
+
+| Funkcija | Kelias N | Ką nulėmė riba | VRAM srautui (R²) |
+|---|---|---|---|
+| Logotipo įkepimas | ≥ 64 | paieškos riba | 56,0 MB (1,000) |
+| NVENC `ll` kodavimas | 12 | **tvarkyklės NVENC sesijų riba** | 126,2 MB (1,000) |
+| H.264 dekodavimas (NVDEC) | 22 | NVDEC pralaidumas | 182,2 MB (0,997) |
+| Pilna grandinė | 11 | vėlavimai ties 12, priežastis nenustatyta | 284,3 MB (0,999) |
+| Kompozitorius, K = 2 | ≥ 32 | paieškos riba | 119,1 MB (1,000) |
+
+GeForce tvarkyklė leidžia 12 vienalaikių NVENC sesijų; 13-a krenta (`incompatible client key`) ir nuverčia visą `enc`
+procesą. Kompozitorius K = 2: nuo N\* 2 (lentelė žemiau, GPU 210–690 MHz) iki ≥ 32 su `keepwarm` (550–1112 MHz).
+Išsamiai: [`docs/rezultatai/2026-11-17-p8-talpa.md`](docs/rezultatai/2026-11-17-p8-talpa.md).
 
 Grafikos kompozitorius (`composite`), bazė + K sluoksnių → `v210`, 60 s pakopa, terminas 30 ms, N\* (tolerantiškai / griežtai):
 

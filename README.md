@@ -806,8 +806,28 @@ native Linux rerun will give the authoritative numbers.
 | H.264 decode, TS/UDP → MXL | 8 | 24 (16 strict) | ~0.55 → ~0.04 |
 | Full chain: TS → decode → logo → H.264 + AAC → TS | 4 | ≥ 12 (limit not reached) | ~2.0 → ~0.33 |
 
-- Full chain at N=12: CUDA cores ~10 % busy, NVENC 64 %, NVDEC 50 %, ~34 W. The single NVENC engine of this laptop
-  GPU is the limit, not compute.
+- Full chain at N=12: CUDA cores ~10 % busy, NVENC 63 %, NVDEC 51 %, ~40 W. Neither engine is saturated; the 2026-11-17
+  rerun below fails N=12 on late frames, cause not yet found (an earlier version of this README wrongly named NVENC).
+
+**Capacity knee with repeats (2026-11-17, plan P8).** Same machine, driver 596.49, G only, 30 s per level, a level
+counts only if **all 3 repeats** pass; found by `capacity.py --n auto` (doubling, then bisection). VRAM per flow is the
+least-squares slope of ΔVRAM(N) over passing levels.
+
+| Function | Knee N | What set it | VRAM per flow (R²) | Engines at the knee |
+|---|---|---|---|---|
+| Logo burn-in | ≥ 64 | search limit | 56.0 MB (1.000) | SM ~39 % |
+| NVENC low-latency encode | 12 | **driver NVENC session limit** | 126.2 MB (1.000) | NVENC 64 % |
+| H.264 decode (NVDEC) | 22 | NVDEC throughput | 182.2 MB (0.997) | NVDEC ~91 % |
+| Full chain | 11 | late frames at 12, cause not found | 284.3 MB (0.999) | NVENC 59 %, NVDEC 46 % |
+| Compositor, K = 2 | ≥ 32 | search limit | 119.1 MB (1.000) | SM ~37 %, 1.1 GHz |
+
+- The GeForce driver allows 12 concurrent NVENC sessions; the 13th fails with `OpenEncodeSessionEx failed: incompatible
+  client key` and takes the whole `enc` process down. `capacity.py` tags such levels `driver_limit = nvenc_sessions`.
+  Admission control has to treat encoder sessions as a resource of their own.
+- The compositor at K = 2 went from N\* 2 (table below, GPU clock 210–690 MHz, no repeats) to ≥ 32 with `keepwarm`
+  (550–1112 MHz): the earlier G failures were the GPU clock, not the code.
+
+Details: [`docs/rezultatai/2026-11-17-p8-talpa.md`](docs/rezultatai/2026-11-17-p8-talpa.md).
 - Grain latency p50 1.2 ms on GPU flows vs 2.9 ms on RAM flows. GPU processing with RAM flows (H) collapses at 32 logo
   flows; with GPU flows (G) it does not.
 - **GPU clocks.** When a laptop GPU (WSL2 / WDDM) idles in power state P8 and any process starts a burst of wide GPU work
