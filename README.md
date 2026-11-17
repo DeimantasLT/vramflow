@@ -762,6 +762,17 @@ releases it even after `kill -9`. The lease lists the output flows of that run.
   `make_domain(tag)` → `/dev/shm/vf-<tag>-<8 hex>`) and delete it only when no live owner is left (`remove_domain`
   returns `False` and deletes nothing otherwise). Two runs with the same tag therefore never delete each other's flows.
 - `flock` works on `tmpfs` (`/dev/shm`) and local file systems, not on network file systems.
+- **The lease folder is only as open as the domain.** `/dev/shm` is world-writable, so another local user could create
+  `<domain>.vramflow` first or plant a link or a FIFO in it. `vramflow-func` therefore opens the folder without following
+  links and refuses it (exit code `2`) when it is not a folder, when its owner is neither this process nor the owner of the
+  domain folder, or when a foreign folder grants more than the domain folder does. Files in it are created with
+  `O_EXCL | O_NOFOLLOW`, and other processes' files are opened without following links and only if they are regular files.
+  The folder gets the permissions of the domain folder (files: the same without the execute bits), independent of `umask`:
+  a domain shared with a group (`0770`) gives a shared lease folder, a private domain (`0700`) a private one. A domain that
+  is writable by everyone gets no protection from this — do not use one on a shared machine.
+- **One domain, one lease folder.** The folder name is built from the canonical domain path (links resolved, `/./` and a
+  trailing `/` removed), so two processes that reach the same domain by different paths share one lease folder and one
+  admission ledger.
 - **Keep the domain path short: at most 48 characters for GPU (`cuda-linear`) flows.** A reader of a GPU flow connects
   to the Unix socket `<domain>/<flow-id>.mxl-flow/payload.sock`, and a socket path cannot be longer than 107 characters.
   With a longer domain path the writer still creates the flow, but no reader in another process can attach to it.

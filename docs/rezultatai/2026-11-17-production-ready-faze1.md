@@ -48,3 +48,36 @@ skirtumų vėlinime šis matavimas neskiria.
 
 **Šalutinis radinys (planui 3.2, G2).** Grandinė ties keliu N = 11 šiandien praėjo 10 iš 13 paleidimų (P8 kampanijoje — 3 iš
 3); krenta tuo pačiu simptomu kaip prie N = 12 (`dec.late_skips`, `enc.late_frames`), vienodai su grūdinimu ir be jo.
+
+## 1.2 Nuomos ir priėmimo knygos failai (kriterijus S4, peržiūros fokusas RF-2)
+
+**Problema.** Nuomos katalogas `<domenas>.vramflow/` yra šalia domeno, dažniausiai `/dev/shm` (teisės 1777). Senas kodas jį
+kūrė `mkdir 0775` ir, jei jau buvo, naudojo netikrindamas; laikiną nuomos failą atidarydavo `O_CREAT | O_TRUNC` nuspėjamu
+vardu; svetimus `.lease` ir `.adm` failus — paprastu `O_RDONLY`; katalogo vardą darė iš kelio teksto.
+
+**Kas padaryta.** `src/runtime/safe_files.{hpp,cpp}`; `DomainLease` ir `Ledger` dirba tik per patikrinto katalogo aprašą
+(`openat`, `unlinkat`, `renameat2`):
+
+| Grėsmė | Dabar |
+|---|---|
+| Vietoje katalogo — simbolinė nuoroda | atidaroma `O_DIRECTORY \| O_NOFOLLOW` → klaida „nuomos katalogas … (atmetama)“, exit 2 |
+| Katalogą pirmas sukūrė kitas vartotojas | atmetama, jei savininkas nėra nei šis procesas, nei domeno katalogo savininkas (išimtys: domenas, rašomas visiems; grupei rašomas domenas su ta pačia grupe) |
+| Svetimo katalogo teisės platesnės nei domeno | atmetama; savas katalogas susiaurinamas iki domeno teisių |
+| Nuoroda vietoje laikino nuomos failo arba `admission.lock` | failai kuriami `O_EXCL \| O_NOFOLLOW`; taikinys neliečiamas |
+| FIFO vietoje `.lease` ar `.adm` | atidaroma `O_NOFOLLOW \| O_NONBLOCK`, priimami tik paprasti failai — nepakimba |
+| Tas pats domenas kitu keliu (nuoroda, `/./`) [RF-2] | katalogo vardas — iš kanoninio kelio: viena nuoma ir viena knyga |
+
+Teisės: katalogo — kaip domeno katalogo, failų — tos pačios be vykdymo bitų; nuo `umask` nepriklauso (`fchmod`). Atmesta:
+fiksuotos `0775` / `0664` (uždaram domenui per plačios, grupei bendram — per siauros). Harness'as (`tests/perf/domain.py`)
+naudoja tą patį kanoninį kelią ir taip pat neseka nuorodų.
+
+**Testai** `tests/unit/test_safe_files.cpp` (9 atvejai, `mxlv-admission-unit`), per viešą sąsają:
+
+| Paleidimas | Rezultatas |
+|---|---|
+| Senas kodas (`dc59355`) + nauji testai | krenta visi 9 atvejai (32 iš 124 tvirtinimų): FIFO pakabina `live_owners` ir `Ledger::total` (vaikas nužudomas po 1 s), nuorodos sekamos, teisės nepaveldimos, per nuorodą — atskira knyga, svetimas savininkas priimamas |
+| Naujas kodas | 9 iš 9 (124 tvirtinimai); visas `mxlv-admission-unit` — 32 atvejai, 405 tvirtinimai; nuomos testai `vramflow-runtime-tests "[lease]"` — 4 atvejai, 33 tvirtinimai |
+
+Švarus build — 0 įspėjimų; `ctest` 492 / 493 (krito tik žinomas laiko testas `gap_policy … < 1 ms`).
+Funkciniai testai per nuomą ir knygą tikrais binarais (`fstart_*`, `overload_*`, `fcomp1`): 26 iš 26 PASS; po jų `/dev/shm`
+nelieka nė vieno nuomos katalogo.

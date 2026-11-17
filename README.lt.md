@@ -104,7 +104,11 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   `--input-expect-ms`; skaityti anksčiau — `--input-offset K`; sukaupta delsa turi tilpti į domeno ring'ą (200 ms numatyta).
 - **Domeno nuoma.** Kiekvienas procesas laiko `<domenas>.vramflow/<run-id>.lease` šalia domeno (`flock`, atsilaisvina ir po
   `kill -9`); `--run-id` — paleidimo vardas. Flow'o, kurį jau rašo kitas gyvas paleidimas, sukurti negalima (exit `2`,
-  klaidoje — savininko run ID). Funkcijos domenų netrina.
+  klaidoje — savininko run ID). Funkcijos domenų netrina. Nuomos katalogas atidaromas nesekant nuorodų ir atmetamas (exit
+  `2`), jei tai ne katalogas, jei jo savininkas nėra nei šis procesas, nei domeno katalogo savininkas, arba jei svetimo
+  katalogo teisės platesnės nei domeno; failai jame kuriami `O_EXCL | O_NOFOLLOW`, svetimi atidaromi tik paprasti (FIFO
+  nepakabina). Teisės — kaip domeno katalogo (failų — be vykdymo bitų), nuo `umask` nepriklauso. Katalogo vardas — iš
+  kanoninio domeno kelio, todėl tas pats domenas kitu keliu (simbolinė nuoroda) turi tą pačią nuomą ir tą pačią knygą.
 - **Domeno kelias GPU (`cuda-linear`) flow'ams — ne ilgesnis kaip 48 simboliai** (skaitytojo lizdo
   `<domenas>/<flow>.mxl-flow/payload.sock` kelias turi tilpti į 107 simbolius); ilgesnį `vramflow-func` atmeta iškart.
 - **`ingest` (tikri šaltiniai su garsu).** `--input URL` (kartoti; `udp://`, `rtp://`, `srt://`, `http://…m3u8`, failas) → kiekvienam

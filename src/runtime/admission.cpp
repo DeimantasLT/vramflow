@@ -20,6 +20,7 @@
 #include <string>
 
 #include "runtime/domain_lease.hpp"
+#include "runtime/safe_files.hpp"
 
 namespace mxlv::runtime {
 
@@ -400,8 +401,8 @@ std::string read_fd(int fd) {
 // Laikomas tik kelias ms (failų skaitymas), todėl blokuojantis laukimas priimtinas (paleidimo metu, ne tick gijoje).
 class DirLock {
 public:
-    explicit DirLock(const std::string& dir) {
-        fd_ = ::open((dir + "/admission.lock").c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0664);
+    explicit DirLock(int dirfd) {
+        fd_ = open_lock_file_at(dirfd, "admission.lock");  // nuoroda ar ne paprastas failas — atmetama
         if (fd_ >= 0)
             while (::flock(fd_, LOCK_EX) != 0 && errno == EINTR) {
             }
@@ -443,19 +444,22 @@ Demand parse_ledger(const std::string& text, const std::string& device) {
 }  // namespace
 
 Ledger::Ledger(Ledger&& o) noexcept
-    : fd_(o.fd_), dir_(std::move(o.dir_)), path_(std::move(o.path_)), device_(std::move(o.device_)), res_(std::move(o.res_)) {
-    o.fd_ = -1;
+    : fd_(o.fd_), dirfd_(o.dirfd_), dir_(std::move(o.dir_)), path_(std::move(o.path_)), name_(std::move(o.name_)),
+      device_(std::move(o.device_)), res_(std::move(o.res_)) {
+    o.fd_ = o.dirfd_ = -1;
 }
 
 Ledger& Ledger::operator=(Ledger&& o) noexcept {
     if (this != &o) {
         close();
         fd_ = o.fd_;
+        dirfd_ = o.dirfd_;
         dir_ = std::move(o.dir_);
         path_ = std::move(o.path_);
+        name_ = std::move(o.name_);
         device_ = std::move(o.device_);
         res_ = std::move(o.res_);
-        o.fd_ = -1;
+        o.fd_ = o.dirfd_ = -1;
     }
     return *this;
 }
@@ -465,47 +469,51 @@ Ledger::~Ledger() { close(); }
 void Ledger::close() {
     res_.clear();
     if (fd_ < 0) return;
-    ::unlink(path_.c_str());  // pirma pašalinam, tada atlaisvinam: niekas nemato atrakinto mūsų failo
+    ::unlinkat(dirfd_, name_.c_str(), 0);  // pirma pašalinam, tada atlaisvinam: niekas nemato atrakinto mūsų failo
     ::close(fd_);
-    fd_ = -1;
+    ::close(dirfd_);
+    fd_ = dirfd_ = -1;
 }
 
 bool Ledger::open(const std::string& domain, const std::string& device_uuid, Ledger& out, std::string& err) {
     out.close();
+    // Katalogas — patikrintas (ne nuoroda, savininkas, teisės ne platesnės nei domeno); toliau viskas per jo fd
+    const int dirfd = open_lease_dir(domain, true, err);
+    if (dirfd < 0) {
+        err = "priėmimo knyga: " + err;
+        return false;
+    }
     const std::string dir = lease_dir(domain);
-    if (::mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) {
-        err = "priėmimo knyga: katalogas " + dir + ": " + std::strerror(errno);
+    auto fail = [&](const std::string& e) {
+        err = e;
+        ::close(dirfd);
         return false;
-    }
-    DirLock lock(dir);
-    if (!lock.ok()) {
-        err = "priėmimo knyga: " + dir + "/admission.lock: " + std::strerror(errno);
-        return false;
-    }
+    };
+    DirLock lock(dirfd);
+    if (!lock.ok()) return fail("priėmimo knyga: " + dir + "/admission.lock: " + std::strerror(errno));
     // Failas sukuriamas ir užrakinamas po bendru užraktu: kitas skaitytojas (irgi po juo) niekada nemato neužrakinto failo
-    std::string path;
+    std::string name;
     int fd = -1;
     for (int attempt = 0; attempt < 8 && fd < 0; ++attempt) {
-        path = dir + "/" + make_run_id("adm") + kAdmExt;
-        fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0664);
+        name = make_run_id("adm") + kAdmExt;
+        fd = create_file_at(dirfd, name);  // O_EXCL | O_NOFOLLOW: esamo vardo (ir nuorodos) neperrašo
         if (fd < 0 && errno != EEXIST) break;
     }
-    if (fd < 0) {
-        err = "priėmimo knyga: " + path + ": " + std::strerror(errno);
-        return false;
-    }
+    if (fd < 0) return fail("priėmimo knyga: " + dir + "/" + name + ": " + std::strerror(errno));
     if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        err = "priėmimo knyga: flock " + path + ": " + std::strerror(errno);
+        const std::string e = "priėmimo knyga: flock " + dir + "/" + name + ": " + std::strerror(errno);
         ::close(fd);
-        ::unlink(path.c_str());
-        return false;
+        ::unlinkat(dirfd, name.c_str(), 0);
+        return fail(e);
     }
     out.fd_ = fd;
+    out.dirfd_ = dirfd;
     out.dir_ = dir;
-    out.path_ = path;
+    out.name_ = name;
+    out.path_ = dir + "/" + name;
     out.device_ = device_uuid;
     if (!out.write_own()) {
-        err = "priėmimo knyga: rašymas " + path + ": " + std::strerror(errno);
+        err = "priėmimo knyga: rašymas " + out.path_ + ": " + std::strerror(errno);
         out.close();
         return false;
     }
@@ -526,8 +534,12 @@ bool Ledger::write_own() {
 
 Demand Ledger::others() const {
     Demand sum;
-    DIR* d = ::opendir(dir_.c_str());
-    if (!d) return sum;
+    const int lfd = ::openat(dirfd_, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);  // atskiras aprašas: savas skaitymo poslinkis
+    DIR* d = lfd >= 0 ? ::fdopendir(lfd) : nullptr;
+    if (!d) {
+        if (lfd >= 0) ::close(lfd);
+        return sum;
+    }
     const std::size_t el = std::strlen(kAdmExt);
     std::vector<std::string> names;
     while (const dirent* e = ::readdir(d)) {
@@ -536,12 +548,11 @@ Demand Ledger::others() const {
     }
     ::closedir(d);
     for (const std::string& n : names) {
-        const std::string p = dir_ + "/" + n;
-        if (p == path_) continue;
-        const int fd = ::open(p.c_str(), O_RDONLY | O_CLOEXEC);
+        if (n == name_) continue;
+        const int fd = open_regular_at(dirfd_, n, O_RDONLY);  // nuoroda ar FIFO — ne rezervacija; atidarymas nepakimba
         if (fd < 0) continue;
         if (::flock(fd, LOCK_SH | LOCK_NB) == 0)
-            ::unlink(p.c_str());  // užraktą gavom — savininkas negyvas (kill -9): jo rezervacija nebeskaičiuojama
+            ::unlinkat(dirfd_, n.c_str(), 0);  // užraktą gavom — savininkas negyvas (kill -9): jo rezervacija nebeskaičiuojama
         else if (errno == EWOULDBLOCK)
             sum = sum + parse_ledger(read_fd(fd), device_);
         ::close(fd);
@@ -557,14 +568,14 @@ Demand Ledger::own() const {
 
 Demand Ledger::total() const {
     if (fd_ < 0) return {};
-    DirLock lock(dir_);
+    DirLock lock(dirfd_);
     return others() + own();
 }
 
 Decision Ledger::reserve(const std::string& id_in, const Demand& d, const Capacity& c, bool force) {
     if (fd_ < 0) return Decision{false, "ledger", 0, 0, 0};
     const std::string id = clean_id(id_in);
-    DirLock lock(dir_);
+    DirLock lock(dirfd_);
     res_.erase(std::remove_if(res_.begin(), res_.end(), [&](const auto& r) { return r.first == id; }), res_.end());
     const Decision dec = decide(others() + own(), d, c);
     if (dec.admit || force) {
@@ -577,7 +588,7 @@ Decision Ledger::reserve(const std::string& id_in, const Demand& d, const Capaci
 void Ledger::release(const std::string& id_in) {
     if (fd_ < 0) return;
     const std::string id = clean_id(id_in);
-    DirLock lock(dir_);
+    DirLock lock(dirfd_);
     res_.erase(std::remove_if(res_.begin(), res_.end(), [&](const auto& r) { return r.first == id; }), res_.end());
     write_own();
 }

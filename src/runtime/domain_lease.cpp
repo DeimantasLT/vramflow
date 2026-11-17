@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "runtime/domain_lease.hpp"
 
+#include "runtime/safe_files.hpp"
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -49,15 +51,16 @@ bool write_all(int fd, const std::string& s) {
     return true;
 }
 
-// Nuomos failo būsena: 1 — gyvas savininkas (užraktas laikomas), 0 — negyvas (failas pašalintas), -1 — nėra / klaida.
+// Nuomos failo būsena: 1 — gyvas savininkas (užraktas laikomas), 0 — negyvas (failas pašalintas), -1 — nėra / klaida / ne
+// paprastas failas (simbolinė nuoroda ar FIFO nuomos kataloge — ne nuoma; atidarymas jų neseka ir nepakimba).
 // text != nullptr — gyvo savininko failo turinys.
-int probe(const std::string& path, std::string* text) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+int probe(int dirfd, const std::string& name, std::string* text) {
+    const int fd = open_regular_at(dirfd, name, O_RDONLY);
     if (fd < 0) return -1;
     int r;
     if (::flock(fd, LOCK_SH | LOCK_NB) == 0) {
         // užraktą gavom — savininkas negyvas (kill -9 / išėjo be release); jo failas nebereikalingas
-        ::unlink(path.c_str());
+        ::unlinkat(dirfd, name.c_str(), 0);
         r = 0;
     } else {
         r = errno == EWOULDBLOCK ? 1 : -1;
@@ -67,11 +70,15 @@ int probe(const std::string& path, std::string* text) {
     return r;
 }
 
-// Visi `<dir>/*.lease` vardai be plėtinio (surūšiuoti); laikini `.<run_id>.*.tmp` praleidžiami.
-std::vector<std::string> lease_names(const std::string& dir) {
+// Visi katalogo `*.lease` vardai be plėtinio (surūšiuoti); laikini `.<run_id>.*.tmp` praleidžiami.
+std::vector<std::string> lease_names(int dirfd) {
     std::vector<std::string> v;
-    DIR* d = ::opendir(dir.c_str());
-    if (!d) return v;
+    const int fd = ::openat(dirfd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);  // atskiras aprašas: savas skaitymo poslinkis
+    DIR* d = fd >= 0 ? ::fdopendir(fd) : nullptr;
+    if (!d) {
+        if (fd >= 0) ::close(fd);
+        return v;
+    }
     const std::size_t el = std::strlen(kExt);
     while (const dirent* e = ::readdir(d)) {
         const std::string n = e->d_name;
@@ -83,11 +90,7 @@ std::vector<std::string> lease_names(const std::string& dir) {
 }
 }  // namespace
 
-std::string lease_dir(const std::string& domain) {
-    std::string d = domain;
-    while (d.size() > 1 && d.back() == '/') d.pop_back();
-    return d + ".vramflow";
-}
+std::string lease_dir(const std::string& domain) { return canonical_domain(domain) + ".vramflow"; }
 
 std::string make_run_id(const std::string& role) {
     std::random_device rd;
@@ -103,15 +106,20 @@ bool valid_run_id(const std::string& id) {
     });
 }
 
-DomainLease::DomainLease(DomainLease&& o) noexcept : fd_(o.fd_), path_(std::move(o.path_)), run_id_(std::move(o.run_id_)) { o.fd_ = -1; }
+DomainLease::DomainLease(DomainLease&& o) noexcept
+    : fd_(o.fd_), dirfd_(o.dirfd_), path_(std::move(o.path_)), name_(std::move(o.name_)), run_id_(std::move(o.run_id_)) {
+    o.fd_ = o.dirfd_ = -1;
+}
 
 DomainLease& DomainLease::operator=(DomainLease&& o) noexcept {
     if (this != &o) {
         release();
         fd_ = o.fd_;
+        dirfd_ = o.dirfd_;
         path_ = std::move(o.path_);
+        name_ = std::move(o.name_);
         run_id_ = std::move(o.run_id_);
-        o.fd_ = -1;
+        o.fd_ = o.dirfd_ = -1;
     }
     return *this;
 }
@@ -120,56 +128,83 @@ DomainLease::~DomainLease() { release(); }
 
 void DomainLease::release() {
     if (fd_ < 0) return;
-    ::unlink(path_.c_str());  // pirma pašalinam, tada atlaisvinam: niekas nemato atrakinto mūsų failo
-    ::close(fd_);              // close atlaisvina flock
-    fd_ = -1;
+    ::unlinkat(dirfd_, name_.c_str(), 0);  // pirma pašalinam, tada atlaisvinam: niekas nemato atrakinto mūsų failo
+    ::close(fd_);                          // close atlaisvina flock
+    ::close(dirfd_);
+    fd_ = dirfd_ = -1;
 }
 
 bool DomainLease::acquire(const std::string& domain, const std::string& run_id, DomainLease& out, std::string& err) {
     out.release();
     if (!valid_run_id(run_id)) { err = "run_id '" + run_id + "' netinkamas (1…64 simboliai A-Z a-z 0-9 . _ -)"; return false; }
-    const std::string dir = lease_dir(domain);
-    if (::mkdir(dir.c_str(), 0775) != 0 && errno != EEXIST) { err = "nuomos katalogas " + dir + ": " + std::strerror(errno); return false; }
-    const std::string path = dir + "/" + run_id + kExt;
-    if (probe(path, nullptr) == 1) { err = "run_id " + run_id + " jau naudoja gyvas procesas (" + path + ")"; return false; }
+    // Katalogas — patikrintas (ne nuoroda, savininkas, teisės ne platesnės nei domeno); toliau viskas per jo fd (openat)
+    const int dirfd = open_lease_dir(domain, true, err);
+    if (dirfd < 0) return false;
+    const std::string dir = lease_dir(domain), name = run_id + kExt, path = dir + "/" + name;
+    if (probe(dirfd, name, nullptr) == 1) {
+        err = "run_id " + run_id + " jau naudoja gyvas procesas (" + path + ")";
+        ::close(dirfd);
+        return false;
+    }
     // Laikinas failas užrakinamas PRIEŠ paskelbiant: live_owners niekada nemato paskelbto, bet neužrakinto failo.
-    const std::string tmp = dir + "/." + run_id + "." + std::to_string(::getpid()) + ".tmp";
-    const int fd = ::open(tmp.c_str(), O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
-    if (fd < 0) { err = "nuomos failas " + tmp + ": " + std::strerror(errno); return false; }
+    // Kuriamas O_EXCL | O_NOFOLLOW; pasenęs to paties vardo įrašas (ir simbolinė nuoroda) pašalinamas, taikinys neliečiamas.
+    const std::string tmp = "." + run_id + "." + std::to_string(::getpid()) + ".tmp";
+    int fd = create_file_at(dirfd, tmp);
+    if (fd < 0 && errno == EEXIST) {
+        ::unlinkat(dirfd, tmp.c_str(), 0);
+        fd = create_file_at(dirfd, tmp);
+    }
+    if (fd < 0) {
+        err = "nuomos failas " + dir + "/" + tmp + ": " + std::strerror(errno);
+        ::close(dirfd);
+        return false;
+    }
     auto fail = [&](const std::string& e) {
         err = e;
         ::close(fd);
-        ::unlink(tmp.c_str());
+        ::unlinkat(dirfd, tmp.c_str(), 0);
+        ::close(dirfd);
         return false;
     };
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) return fail("flock " + tmp + ": " + std::strerror(errno));
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) return fail("flock " + dir + "/" + tmp + ": " + std::strerror(errno));
     if (!write_all(fd, "run_id=" + run_id + "\npid=" + std::to_string(::getpid()) + "\n"))
         return fail("nuomos failo rašymas: " + std::string(std::strerror(errno)));
-    if (::renameat2(AT_FDCWD, tmp.c_str(), AT_FDCWD, path.c_str(), RENAME_NOREPLACE) != 0)
+    if (::renameat2(dirfd, tmp.c_str(), dirfd, name.c_str(), RENAME_NOREPLACE) != 0)
         return fail(errno == EEXIST ? "run_id " + run_id + " jau naudojamas (" + path + ")"
                                     : "nuomos paskelbimas: " + std::string(std::strerror(errno)));
     out.fd_ = fd;
+    out.dirfd_ = dirfd;
     out.path_ = path;
+    out.name_ = name;
     out.run_id_ = run_id;
     return true;
 }
 
 std::vector<std::string> DomainLease::live_owners(const std::string& domain) {
-    const std::string dir = lease_dir(domain);
     std::vector<std::string> v;
-    for (const std::string& n : lease_names(dir))
-        if (probe(dir + "/" + n + kExt, nullptr) == 1) v.push_back(n);
+    std::string err;
+    const int dirfd = open_lease_dir(domain, false, err);  // nėra arba nepatikimas katalogas — savininkų nėra
+    if (dirfd < 0) return v;
+    for (const std::string& n : lease_names(dirfd))
+        if (probe(dirfd, n + kExt, nullptr) == 1) v.push_back(n);
+    ::close(dirfd);
     return v;
 }
 
 std::string DomainLease::flow_owner(const std::string& domain, const std::string& flow_id) {
-    const std::string dir = lease_dir(domain);
+    std::string err, owner;
+    const int dirfd = open_lease_dir(domain, false, err);
+    if (dirfd < 0) return owner;
     const std::string line = "\nflow=" + flow_id + "\n";
-    for (const std::string& n : lease_names(dir)) {
+    for (const std::string& n : lease_names(dirfd)) {
         std::string text;
-        if (probe(dir + "/" + n + kExt, &text) == 1 && ("\n" + text).find(line) != std::string::npos) return n;
+        if (probe(dirfd, n + kExt, &text) == 1 && ("\n" + text).find(line) != std::string::npos) {
+            owner = n;
+            break;
+        }
     }
-    return {};
+    ::close(dirfd);
+    return owner;
 }
 
 bool DomainLease::add_flow(const std::string& flow_id) {

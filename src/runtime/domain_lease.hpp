@@ -13,7 +13,8 @@
 
 namespace mxlv::runtime {
 
-// "<domenas>.vramflow" (galiniai '/' nuimami).
+// "<kanoninis domenas>.vramflow": simbolinės nuorodos išskleistos, `/./` ir galiniai '/' nuimami — tas pats domenas kitu
+// keliu duoda tą patį nuomos katalogą (runtime/safe_files.hpp).
 std::string lease_dir(const std::string& domain);
 // Numatytasis run_id: "<role>-<pid>-<8 hex>".
 std::string make_run_id(const std::string& role);
@@ -51,8 +52,8 @@ public:
     void release();
 
 private:
-    int fd_ = -1;
-    std::string path_, run_id_;
+    int fd_ = -1, dirfd_ = -1;  // dirfd_ — nuomos katalogas (failas šalinamas unlinkat, ne per kelią)
+    std::string path_, name_, run_id_;
 };
 
 }  // namespace mxlv::runtime

@@ -531,7 +531,7 @@ failas arba commit.
 | S1 | nepradėta | | |
 | S2 | nepradėta | | |
 | S3 | nepradėta | | |
-| S4 | nepradėta | | |
+| S4 | PASS | 9 nauji testai: prieš seną kodą krenta visi, prieš naują — visi praeina; `fstart_*`, `overload_*` 26 iš 26 | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
 | S5 | nepradėta | vartotojas `mxltest` yra | §3 |
 | S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |
 | S7 | nepradėta | | |

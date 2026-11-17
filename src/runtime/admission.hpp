@@ -102,8 +102,8 @@ public:
 private:
     Demand others() const;  // kviečiama su bendru užraktu
     bool write_own();
-    int fd_ = -1;
-    std::string dir_, path_, device_;
+    int fd_ = -1, dirfd_ = -1;  // dirfd_ — patikrintas nuomos katalogas (runtime/safe_files.hpp); viskas per openat / unlinkat
+    std::string dir_, path_, name_, device_;
     std::vector<std::pair<std::string, Demand>> res_;
 };
 

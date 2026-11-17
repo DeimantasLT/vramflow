@@ -13,6 +13,7 @@ import os
 import pathlib
 import secrets
 import shutil
+import stat
 
 SHM = pathlib.Path(os.environ.get("VF_DOMAIN_ROOT", "/dev/shm"))
 # cuda-linear reader'is jungiasi prie <domenas>/<uuid>.mxl-flow/payload.sock (Unix lizdas, sun_path 107 simboliai, iš jų 59 —
@@ -21,7 +22,9 @@ MAX_DOMAIN_PATH = 48
 
 
 def lease_dir(path) -> pathlib.Path:
-    p = str(path).rstrip("/") or "/"
+    """`<kanoninis domenas>.vramflow` — tas pats kelias kaip runtime::lease_dir (simbolinės nuorodos išskleistos: tas pats
+    domenas kitu keliu turi vieną nuomos katalogą)."""
+    p = os.path.realpath(str(path)).rstrip("/") or "/"
     return pathlib.Path(p + ".vramflow")
 
 
@@ -42,12 +45,15 @@ def make_domain(tag: str) -> pathlib.Path:
 
 
 def _probe(path: pathlib.Path) -> int:
-    """1 — gyvas savininkas, 0 — negyvas (failas pašalintas), -1 — nėra / klaida."""
+    """1 — gyvas savininkas, 0 — negyvas (failas pašalintas), -1 — nėra / klaida / ne paprastas failas.
+    O_NOFOLLOW | O_NONBLOCK ir S_ISREG — kaip runtime::open_regular_at: nuoroda nesekama, FIFO atidarymo nepakabina."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return -1
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return -1
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except OSError as e:
