@@ -31,6 +31,7 @@ import time
 import domain  # tests/perf/domain.py
 import keepwarm  # tests/perf/keepwarm.py — GPU virš P8 H / G variantams (VRAMFLOW_GPU_KEEPWARM=0 išjungia)
 import gpuinfo  # tests/perf/gpuinfo.py
+import knee  # tests/perf/knee.py — kelio paieška (P8)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BIN = os.environ.get("FUNC_BIN", str(pathlib.Path.home() / "build/vramflow/func/vramflow-func"))
@@ -524,7 +525,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--func", required=True)
-    ap.add_argument("--n", required=True)
+    ap.add_argument("--n", required=True, help="N pakopos „1,2,4“ arba „auto“ — kelio paieška (knee.py)")
+    ap.add_argument("--n-max", type=int, default=64, help="--n auto: didžiausias bandomas N")
+    ap.add_argument("--repeats", type=int, default=3, help="--n auto: pakartojimai, kuriuos pakopa turi praeiti")
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--complexity", type=int, default=2)
@@ -549,7 +552,7 @@ def main():
                          "nuo V20 — auto 3·P/4, 15 ms prie 50 Hz)")
     a = ap.parse_args()
     pathlib.Path(a.out).mkdir(parents=True, exist_ok=True)
-    results, fails = [], 0
+    results = []
     # GPU šildymas: tik H / G variantams (C — niekada, net su --source fair); kiekvienas rezultatas įrašo, ar jis veikė
     kw = keepwarm.KeepWarm(BIN, env=ENV, log_dir=a.out)
     try:
@@ -560,42 +563,82 @@ def main():
     report(a, results, variant)
 
 
-def run_levels(a, kw, results):
-    fails = 0
-    variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
-    for n in [int(x) for x in a.n.split(",")]:
-        variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
-        skip = comp_guard(a, n) if a.func == "composite" else None
-        if skip:
-            r = {"func": a.func, "layers": a.layers, "out_format": a.out_format, "variant": variant, "impl": a.impl,
-                 "storage": a.storage, "source": a.source, "n": n, "skipped": True, "skip_reason": skip, "pass": False,
-                 "pass_tol": False, "seconds": a.seconds, "power_scheme": power_scheme(), "keepwarm": kw.on()}
-            results.append(r)
-            print(f"[{func_tag(a)}/{variant} N={n:2d}] PRALEISTA: {skip}", flush=True)
-            (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
-            continue
-        r = run_level(a, n)
-        r["keepwarm"] = kw.on()
+def run_one(a, kw, results, variant, n, rep=0):
+    """Viena N pakopa (vienas pakartojimas): įrašo rezultatą, spausdina eilutę, grąžina rezultatą."""
+    out = pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json"
+    skip = comp_guard(a, n) if a.func == "composite" else None
+    if skip:
+        r = {"func": a.func, "layers": a.layers, "out_format": a.out_format, "variant": variant, "impl": a.impl,
+             "storage": a.storage, "source": a.source, "n": n, "skipped": True, "skip_reason": skip, "pass": False,
+             "pass_tol": False, "seconds": a.seconds, "power_scheme": power_scheme(), "keepwarm": kw.on()}
         results.append(r)
-        if r.get("invalid_reason"):
-            print(f"[{func_tag(a)}/{variant} N={n:2d}] NEDERINA: {r['invalid_reason']}", flush=True)
-            (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
+        print(f"[{func_tag(a)}/{variant} N={n:2d}] PRALEISTA: {skip}", flush=True)
+        out.write_text(json.dumps(results, indent=1))
+        return r
+    r = run_level(a, n)
+    r["keepwarm"] = kw.on()
+    r["repeat"] = rep
+    results.append(r)
+    if r.get("invalid_reason"):
+        print(f"[{func_tag(a)}/{variant} N={n:2d}] NEDERINA: {r['invalid_reason']}", flush=True)
+        out.write_text(json.dumps(results, indent=1))
+        return r
+    print(f"[{func_tag(a)}/{variant} N={n:2d}" + (f" #{rep + 1}" if a.n == "auto" else "") + "] "
+          f"griežtai={'PASS' if r['pass'] else 'FAIL'} tol={'PASS' if r['pass_tol'] else 'FAIL'} "
+          f"praradimai {r['loss_fraction'] * 100:.3f}% RT={r['realtime_ratio']:.4f} "
+          f"{r['losses'] or ''} verif={r['verification_errors']} CPU/srautui={r['cpu_cores_func_per_stream']:.3f} "
+          f"ΔVRAM={r['vram_delta_mb']} MB "
+          + (f"GPU={g['util_gpu']['mean']:.0f}% NVENC={g['util_enc']['mean']:.0f}% NVDEC={g['util_dec']['mean']:.0f}% "
+             f"P={g['power_w']['mean']:.0f}W " if (g := r.get("gpu")) else "")
+          + (f"gfxgen/gen CPU={r['cpu_cores_gfxgen_per_stream']:.3f}/{r['cpu_cores_gen_per_stream']:.3f} "
+             f"proc_ms p50/p99={(r['hist'].get('proc_ms') or {}).get('p50_ms')}/{(r['hist'].get('proc_ms') or {}).get('p99_ms')} "
+             f"src_exit={r['src_exit']} " if a.func == "composite" else "")
+          + f"e2e p99={r['e2e_latency_p99_ms']} exit={r['exit_codes']} {r['fatal'] or ''}",
+          flush=True)
+    out.write_text(json.dumps(results, indent=1))
+    return r
+
+
+def run_levels(a, kw, results):
+    variant = "C" if a.impl == "cpu" else ("H" if a.storage == "host" else "G")
+    if a.n == "auto":
+        return run_knee(a, kw, results, variant)
+    fails = 0
+    for n in [int(x) for x in a.n.split(",")]:
+        r = run_one(a, kw, results, variant, n)
+        if r.get("skipped") or r.get("invalid_reason"):
             continue
-        print(f"[{func_tag(a)}/{variant} N={n:2d}] griežtai={'PASS' if r['pass'] else 'FAIL'} tol={'PASS' if r['pass_tol'] else 'FAIL'} "
-              f"praradimai {r['loss_fraction'] * 100:.3f}% RT={r['realtime_ratio']:.4f} "
-              f"{r['losses'] or ''} verif={r['verification_errors']} CPU/srautui={r['cpu_cores_func_per_stream']:.3f} "
-              f"ΔVRAM={r['vram_delta_mb']} MB "
-              + (f"GPU={g['util_gpu']['mean']:.0f}% NVENC={g['util_enc']['mean']:.0f}% NVDEC={g['util_dec']['mean']:.0f}% "
-                 f"P={g['power_w']['mean']:.0f}W " if (g := r.get("gpu")) else "")
-              + (f"gfxgen/gen CPU={r['cpu_cores_gfxgen_per_stream']:.3f}/{r['cpu_cores_gen_per_stream']:.3f} "
-                 f"proc_ms p50/p99={(r['hist'].get('proc_ms') or {}).get('p50_ms')}/{(r['hist'].get('proc_ms') or {}).get('p99_ms')} "
-                 f"src_exit={r['src_exit']} " if a.func == "composite" else "")
-              + f"e2e p99={r['e2e_latency_p99_ms']} exit={r['exit_codes']} {r['fatal'] or ''}",
-              flush=True)
-        (pathlib.Path(a.out) / f"capacity-{func_tag(a)}-{variant}.json").write_text(json.dumps(results, indent=1))
         fails = 0 if r["pass_tol"] else fails + 1  # sustojam, kai viršijama talpa (tol kriterijus)
         if fails >= a.stop_after_fails:
             break
+    return variant
+
+
+def run_knee(a, kw, results, variant):
+    """--n auto: kelias = didžiausias N, praeinantis --repeats pakartojimų (tol kriterijus); knee.py paieška."""
+    reps = {}
+
+    def level(n):
+        rep = reps.get(n, 0)
+        reps[n] = rep + 1
+        r = run_one(a, kw, results, variant, n, rep)
+        # NEDERINA (aplinka, pvz. GPU laikrodis) — kelio paieškai FAIL; rezultatas pažymėtas invalid_reason
+        return bool(r.get("pass_tol")) and not r.get("invalid_reason")
+
+    guard = (lambda n: comp_guard(a, n) is None) if a.func == "composite" else None
+    kr = knee.find_knee(level, a.n_max, a.repeats, guard)
+    ok_levels = sorted({r["n"] for r in results if r.get("pass_tol") and not r.get("skipped")
+                        and r.get("vram_delta_mb") is not None and r["n"] <= kr.knee})
+    vram = None
+    pts = [(r["n"], r["vram_delta_mb"]) for r in results
+           if r.get("pass_tol") and r.get("vram_delta_mb") is not None and r["n"] <= kr.knee]
+    if len(ok_levels) >= 2:
+        slope, icpt, r2 = knee.vram_per_flow(pts)
+        vram = {"per_flow_mb": round(slope, 2), "offset_mb": round(icpt, 1), "r2": round(r2, 4), "points": pts}
+    summary = {"func": a.func, "variant": variant, "knee": kr.knee, "stopped_by": kr.stopped_by,
+               "repeats": a.repeats, "n_max": a.n_max, "tol": a.tol, "tried": kr.tried, "vram": vram}
+    (pathlib.Path(a.out) / f"knee-{func_tag(a)}-{variant}.json").write_text(json.dumps(summary, indent=1))
+    a.knee_result = summary
     return variant
 
 
@@ -608,6 +651,12 @@ def report(a, results, variant):
             best = r["n"]
         return best
 
+    k = getattr(a, "knee_result", None)
+    if k:
+        v = k["vram"]
+        print(f"KELIAS ({a.func}/{variant}) = {k['knee']} (sustabdė: {k['stopped_by']}, {k['repeats']} pakartojimai, "
+              f"tol ≤ {a.tol * 100:.1f} %)" + (f"; VRAM srautui {v['per_flow_mb']} MB (R² = {v['r2']})" if v else ""))
+        return
     print(f"N* ({a.func}/{variant}) griežtai = {nstar('pass')}, tol(≤{a.tol * 100:.1f} %) = {nstar('pass_tol')}")
 
 
