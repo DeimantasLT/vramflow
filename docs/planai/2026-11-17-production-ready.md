@@ -527,7 +527,7 @@ failas arba commit.
 | K1 | nepradėta | bazė: `ctest` 482 / 483; funkcinis 351 / 352. Po 1 fazės (`dad306b`): `ctest` 510 / 510 ir 509 / 510 (krito tik `gap_policy … < 1 ms`); visas funkcinis rinkinys kaip root — 353 iš 353, vienas paleidimas (kriterijui reikia trijų iš eilės, 6.3) | §3; `docs/rezultatai/2026-11-17-production-ready-faze1.md` |
 | K2 | nepradėta | | |
 | K3 | nepradėta | | |
-| K4 | nepradėta | | |
+| K4 | PASS | 7 klaidų kelių testai (10 atvejų) praeina kaip root ir ne root; nuo gedimo iki pabaigos 0,06–1,92 s (riba 5 s); domenas po gedimo švarus; kaimyno pora — 0 praradimų ir 0 vėlavimų po gedimo. VRAM išsekimas hog'u — `SKIP` ×3: WSL2 jo nesukelia (išmatuota), tą patį kelią dengia `fault_alloc_fail`; tikras išsekimas — NEPATIKRINAMA ČIA. Kaimyno vėlavimai startuojant kitam GPU procesui (6 per 34 poras) — ne gedimo pasekmė, perkelta į G3 | `tests/functional/faults.py`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.5 |
 | K5 | nepradėta | | |
 | K6 | nepradėta | esami etalono testai žali | `ctest` |
 | K7 | nepradėta | | |
@@ -540,7 +540,7 @@ failas arba commit.
 | S6 | PASS | 104 vertimo vienetai ir 22 ELF failai tinka; kaina: CPU +0,4 %, kelias ir vėlinimas nepakito | `ctest build_hardening`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.1 |
 | S7 | PASS | eilių ribų ir sargo testai jau buvo (4 + 2 vieneto atvejai, funkciniai `--max-queue-mb` ir `ingest_libav_watchdog`); saugus paleidimas — `SECURITY.md` | `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.6 |
 | S8 | nepradėta | | |
-| S9 | nepradėta | | |
+| S9 | PASS | injektuota CUDA klaida tick'e (`gen`, `logo`): „CUDA: unknown error“, exit 2 per 0,07–0,11 s, išėjimai atlaisvinti; NVENC sesijos atsisakymas: exit 2 per 1,8–1,9 s su tvarkyklės eilute ir paaiškinimu, veikiantis `enc` — be praradimų. Tikras GPU dingimas — NEPATIKRINAMA ČIA | `fault_cuda_midrun`, `fault_nvenc_sessions`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.5 |
 | U1 | nepradėta | | |
 | U2 | nepradėta | | |
 | U3 | nepradėta | Docker WSL integracija išjungta | §3 |
@@ -554,6 +554,9 @@ failas arba commit.
 - Ar `cuda-linear` fd perdavimas veikia tarp konteinerių (5.4).
 - Kiek užtrunka `clang-tidy` visam `src/` ir kiek radinių duoda pasirinktas rinkinys (2.4).
 - Visi natyvaus Linux skaičiai: šis planas vykdomas WSL2; natyvus matavimas — lauko bandymas (6.1).
+- Tikras VRAM išsekimas (2.5): WSL2 kitam procesui duoda daugiau VRAM, nei `cudaMemGetInfo` rodo laisvos, todėl
+  `fault_vram_exhausted[gen|logo|dec]` čia visada `SKIP` ir dar nė karto nebuvo žali; „scratch“ / „staging“ skyrimo
+  klaidų tekstai įvykdyti tik vienetų testu. Tikrinti natyviame Linux (6.1).
 
 Patikrinta 1 fazėje ir iš sąrašo išbraukta (`docs/rezultatai/2026-11-17-production-ready-faze1.md`):
 

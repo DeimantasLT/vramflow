@@ -1223,6 +1223,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in ingest.TESTS.items()})
     import overload  # priėmimo kontrolė (P4): overload_enforce_synthetic, overload_no_capacity, overload_partial (tests/functional/overload.py)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in overload.TESTS.items()})
+    import faults  # klaidų keliai (2.5): fault_vram_exhausted, fault_nvenc_sessions, fault_cuda_midrun, fault_shm_full, fault_domain_readonly (tests/functional/faults.py)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in faults.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():
