@@ -73,4 +73,38 @@ double mpix_s(const vramflow::VideoFormat& f);
 // (išėjimo flow'o ring'as cuda-linear). Garso flow'ai — host atmintyje (neskaičiuojami).
 Demand ingest_demand(const vramflow::VideoFormat& f, int surfaces, std::uint32_t ring_grains, bool nvdec);
 
+// Rezervacijų knyga tarp procesų (planas §P4; PF-4): nuomos kataloge `<domenas>.vramflow/` (P6) po vieną failą procesui
+// (`adm-<pid>-<8 hex>.adm`), laikomą su flock(LOCK_EX) — branduolys užraktą atlaisvina ir po `kill -9`, todėl mirusio proceso
+// rezervacija nebeskaičiuojama (jo failas pašalinamas kito skaitymo metu). Skaitymas + sprendimas + įrašymas — po bendru
+// `admission.lock` užraktu (atominis tarp procesų). Skaičiuojamos tik tos pačios GPU (device_uuid) rezervacijos.
+// Turinys: `device=`, `pid=`, po eilutę `r <id> <nvdec Mpix/s> <nvenc Mpix/s> <sesijos> <VRAM B>` kiekvienai rezervacijai.
+// Riba: knyga mato tik VRAMFlow procesus tame pačiame domene (kitų GPU naudotojų ir kitų domenų — ne).
+class Ledger {
+public:
+    Ledger() = default;
+    Ledger(Ledger&& o) noexcept;
+    Ledger& operator=(Ledger&& o) noexcept;
+    Ledger(const Ledger&) = delete;
+    Ledger& operator=(const Ledger&) = delete;
+    ~Ledger();
+
+    static bool open(const std::string& domain, const std::string& device_uuid, Ledger& out, std::string& err);
+    // Atominė (flock): užimta = visų gyvų šios GPU procesų rezervacijos (ir šio); telpa → įrašoma. force — įrašoma ir netilpus
+    // (--admission warn: kiti procesai turi matyti tikrą užimtumą); grąžinamas tas pats sprendimas. Tas pats id — pakeičiamas.
+    Decision reserve(const std::string& id, const Demand& d, const Capacity& c, bool force = false);
+    void release(const std::string& id);
+    Demand total() const;  // tik gyvų procesų (ir šio)
+    Demand own() const;    // tik šio Ledger rezervacijos
+    bool held() const { return fd_ >= 0; }
+    const std::string& path() const { return path_; }
+    void close();  // atlaisvina užraktą ir pašalina failą (rezervacijos dingsta)
+
+private:
+    Demand others() const;  // kviečiama su bendru užraktu
+    bool write_own();
+    int fd_ = -1;
+    std::string dir_, path_, device_;
+    std::vector<std::pair<std::string, Demand>> res_;
+};
+
 }  // namespace mxlv::runtime

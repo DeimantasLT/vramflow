@@ -1,15 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
 // SPDX-License-Identifier: Apache-2.0
 // Priėmimo kontrolė (planas §P4): sprendimo ribos (NVDEC, NVENC sesijos, VRAM), talpos failas (schema 1, UUID, tvarkyklė,
-// lower_bound) ir ingest srauto paklausa.
+// lower_bound), ingest srauto paklausa ir rezervacijų knyga tarp procesų (flock; fork / kill -9).
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "runtime/admission.hpp"
 
@@ -228,4 +235,205 @@ TEST_CASE("ingest_demand: Mpix/s pagal formatą; VRAM — NV12 paviršiai + v210
     const Demand sw = ingest_demand(p50, 4, 10, false);
     CHECK(sw.nvdec_mpix_s == 0);
     CHECK(sw.vram_bytes == 4ull * 1920 * 1088 * 3 / 2 + 10ull * 5120 * 1080);
+}
+
+// --- Ledger (rezervacijų knyga tarp procesų) --------------------------------------------------------------------------
+namespace {
+using Clock = std::chrono::steady_clock;
+
+// Laikinas domenas /dev/shm/vf-adm-<pid>-<n> (knyga — šalia: <domenas>.vramflow/); pašalinamas.
+struct TmpDomain {
+    std::string dir;
+    explicit TmpDomain(int n) : dir("/dev/shm/vf-adm-" + std::to_string(::getpid()) + "-" + std::to_string(n)) { clean(); }
+    ~TmpDomain() { clean(); }
+    void clean() const {
+        std::error_code ec;
+        std::filesystem::remove_all(dir + ".vramflow", ec);
+    }
+};
+
+Capacity nvdec_cap(double mpix, double headroom = 1.0) {
+    Capacity c;
+    c.nvdec_mpix_s = mpix;
+    c.headroom = headroom;
+    return c;
+}
+Demand nvdec(double mpix) {
+    Demand d;
+    d.nvdec_mpix_s = mpix;
+    return d;
+}
+// Vaikų procesai nužudomi ir surenkami ir nepavykus REQUIRE (kitaip pause() vaikas laikytų testo išvesties kanalą).
+struct Kids {
+    std::vector<pid_t> v;
+    void kill_all() {
+        for (pid_t p : v) {
+            ::kill(p, SIGKILL);
+            ::waitpid(p, nullptr, 0);
+        }
+        v.clear();
+    }
+    ~Kids() { kill_all(); }
+};
+}  // namespace
+
+TEST_CASE("ledger: du procesai — A rezervuoja 10, B mato 10 ir gauna tik likutį; A release → B mato tik savo", "[admission][ledger]") {
+    TmpDomain dom(1);
+    Ledger a, b;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, a, err));
+    REQUIRE(Ledger::open(dom.dir, kUuid, b, err));
+    CHECK(a.path() != b.path());
+    const Capacity c = nvdec_cap(20);
+    REQUIRE(a.reserve("a0", nvdec(10), c).admit);
+    CHECK(b.total().nvdec_mpix_s == Approx(10));
+    const Decision over = b.reserve("b0", nvdec(15), c);
+    CHECK_FALSE(over.admit);
+    CHECK(over.engine == "nvdec");
+    CHECK(over.used == Approx(10));
+    CHECK(over.limit == Approx(20));
+    CHECK(b.total().nvdec_mpix_s == Approx(10));  // atmesta — neįrašyta
+    REQUIRE(b.reserve("b0", nvdec(10), c).admit);
+    CHECK(a.total().nvdec_mpix_s == Approx(20));
+    a.release("a0");
+    CHECK(b.total().nvdec_mpix_s == Approx(10));
+    CHECK(b.own().nvdec_mpix_s == Approx(10));
+    b.release("b0");
+    CHECK(a.total().nvdec_mpix_s == Approx(0));
+}
+
+TEST_CASE("ledger: talpa 8 srautų, pirmas procesas 5, antras prašo 5 → gauna 1 (riba floor(0,85 · 8) = 6)", "[admission][ledger]") {
+    TmpDomain dom(2);
+    Ledger p1, p2;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, p1, err));
+    REQUIRE(Ledger::open(dom.dir, kUuid, p2, err));
+    const Capacity c = nvdec_cap(8 * k1080, 0.85);
+    for (int n = 0; n < 5; ++n) REQUIRE(p1.reserve("p1-" + std::to_string(n), nvdec(k1080), c).admit);
+    int got = 0;
+    Decision last;
+    for (int n = 0; n < 5; ++n) {
+        const Decision d = p2.reserve("p2-" + std::to_string(n), nvdec(k1080), c);
+        if (d.admit) ++got;
+        else last = d;
+    }
+    CHECK(got == 1);
+    CHECK(last.engine == "nvdec");
+    CHECK(last.used == Approx(6 * k1080));
+    CHECK(last.limit == Approx(0.85 * 8 * k1080));
+}
+
+TEST_CASE("ledger: force (warn režimas) įrašo ir netilpusią rezervaciją; kita GPU nesiskaičiuoja", "[admission][ledger]") {
+    TmpDomain dom(3);
+    Ledger a, other;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, a, err));
+    REQUIRE(Ledger::open(dom.dir, "GPU-00000000-1111-2222-3333-444444444444", other, err));
+    const Capacity c = nvdec_cap(10);
+    REQUIRE(other.reserve("x", nvdec(100), c, true).admit == false);  // kita GPU: įrašyta (force), bet čia nesimato
+    CHECK(other.total().nvdec_mpix_s == Approx(100));
+    CHECK(a.total().nvdec_mpix_s == Approx(0));
+    const Decision d = a.reserve("y", nvdec(15), c, true);
+    CHECK_FALSE(d.admit);
+    CHECK(a.total().nvdec_mpix_s == Approx(15));
+}
+
+TEST_CASE("ledger: mirusio proceso (kill -9) rezervacija nebeskaičiuojama per ≤ 100 ms [PF-4]", "[admission][ledger]") {
+    TmpDomain dom(4);
+    int pfd[2];
+    REQUIRE(::pipe(pfd) == 0);
+    Kids kids;
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        ::close(pfd[0]);
+        Ledger l;
+        std::string e;
+        const bool ok = Ledger::open(dom.dir, kUuid, l, e) && l.reserve("child", nvdec(10), nvdec_cap(100)).admit;
+        const char c = ok ? '1' : '0';
+        if (::write(pfd[1], &c, 1) != 1) ::_exit(3);
+        for (;;) ::pause();
+    }
+    kids.v.push_back(child);
+    ::close(pfd[1]);
+    char c = 0;
+    REQUIRE(::read(pfd[0], &c, 1) == 1);
+    ::close(pfd[0]);
+    REQUIRE(c == '1');
+    Ledger me;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, me, err));
+    CHECK(me.total().nvdec_mpix_s == Approx(10));
+    kids.kill_all();  // SIGKILL + waitpid
+    const auto t0 = Clock::now();
+    const Demand t = me.total();
+    const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    CHECK(t.nvdec_mpix_s == Approx(0));
+    CHECK(ms <= 100);
+    REQUIRE(me.reserve("new", nvdec(95), nvdec_cap(100)).admit);  // naujas srautas priimamas
+    // mirusio failas pašalintas: kataloge liko tik šio Ledger failas
+    int adm = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dom.dir + ".vramflow"))
+        if (e.path().extension() == ".adm") ++adm;
+    CHECK(adm == 1);
+}
+
+TEST_CASE("ledger: 8 procesai vienu metu, talpa 4 srautams → priimti lygiai 4 (atominė rezervacija)", "[admission][ledger]") {
+    TmpDomain dom(5);
+    const Capacity c = nvdec_cap(270, 0.85);  // riba 229,5: 4 × 51,84 = 207,36 telpa, 5 — ne
+    constexpr int kN = 8;
+    int go[2], res[2];
+    REQUIRE(::pipe(go) == 0);
+    REQUIRE(::pipe(res) == 0);
+    Kids kids;
+    for (int k = 0; k < kN; ++k) {
+        const pid_t p = ::fork();
+        REQUIRE(p >= 0);
+        if (p == 0) {
+            ::close(go[1]);
+            ::close(res[0]);
+            Ledger l;
+            std::string e;
+            if (!Ledger::open(dom.dir, kUuid, l, e)) ::_exit(3);
+            char x;
+            if (::read(go[0], &x, 1) != 0) ::_exit(4);  // laukia, kol tėvas uždarys go (visi startuoja kartu)
+            const char r = l.reserve("k", nvdec(k1080), c).admit ? 'A' : 'R';
+            if (::write(res[1], &r, 1) != 1) ::_exit(5);
+            for (;;) ::pause();
+        }
+        kids.v.push_back(p);
+    }
+    ::close(go[0]);
+    ::close(res[1]);
+    ::close(go[1]);  // startas
+    int admitted = 0, refused = 0;
+    for (int k = 0; k < kN; ++k) {
+        char r = 0;
+        REQUIRE(::read(res[0], &r, 1) == 1);
+        (r == 'A' ? admitted : refused) += 1;
+    }
+    ::close(res[0]);
+    Ledger me;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, me, err));
+    CHECK(me.total().nvdec_mpix_s == Approx(4 * k1080));
+    kids.kill_all();
+    CHECK(admitted == 4);
+    CHECK(refused == 4);
+    CHECK(me.total().nvdec_mpix_s == Approx(0));
+}
+
+TEST_CASE("ledger: close() — failas pašalintas, rezervacijos dingsta", "[admission][ledger]") {
+    TmpDomain dom(6);
+    Ledger a, b;
+    std::string err;
+    REQUIRE(Ledger::open(dom.dir, kUuid, a, err));
+    REQUIRE(Ledger::open(dom.dir, kUuid, b, err));
+    REQUIRE(a.reserve("a", nvdec(5), nvdec_cap(10)).admit);
+    const std::string p = a.path();
+    CHECK(std::filesystem::exists(p));
+    a.close();
+    CHECK_FALSE(a.held());
+    CHECK_FALSE(std::filesystem::exists(p));
+    CHECK(b.total().nvdec_mpix_s == Approx(0));
 }
