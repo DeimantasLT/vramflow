@@ -204,8 +204,8 @@ Exit kodai (variklio funkcijos; griežtas — `--strict-exit on` arba `auto` su 
 | Įėjimai neatsirado per `--input-wait-ms` | 4 | 4 |
 | Įėjimas grįžo kitu formatu (`--on-format-change exit`) | 6 | 6 |
 | Tik `ingest`: libavformat kvietimas užstrigo (nukreipimų kešo kilpa); iškart, be santraukos | 7 | 7 |
-| Priėmimo kontrolė (`--admission enforce`) atmetė srautus: nė vieno nepriimta — iškart; dalis priimta — jie veikia, pabaigoje (aukštesnė klaida — viršesnė) | 5 | 5 |
-| `--admission enforce` be tinkamo talpos failo | 1 | 1 |
+| Priėmimo kontrolė atmetė srautus (`--admission enforce` arba numatytoji `auto`, kai rastas talpos failas): nė vieno nepriimta — iškart; dalis priimta — jie veikia, pabaigoje (aukštesnė klaida — viršesnė) | 5 | 5 |
+| Aiškiai nurodytas `--admission enforce` be tinkamo talpos failo (numatytoji `auto` tik įspėja) | 1 | 1 |
 
 `verify` — exit `3`, jei yra teisingumo klaidų.
 

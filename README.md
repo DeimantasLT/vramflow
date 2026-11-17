@@ -787,8 +787,8 @@ or `auto` with `--duration S > 0` (test and measurement runs); lenient — `off`
 | An input came back with another format (`--on-format-change exit`) | 6 | 6 |
 | Stopped while still waiting for inputs | 0 | 0 |
 | `ingest` only: a libavformat call is stuck (see *libavformat redirect-cache hang*); immediate exit, no summary | 7 | 7 |
-| Admission control (`--admission enforce`) refused flows: none admitted — at once; some admitted — they run, exit at the end (an error code above wins) | 5 | 5 |
-| `--admission enforce` without a usable capacity file | 1 | 1 |
+| Admission control refused flows (`--admission enforce`, or the default `auto` when a capacity file is found): none admitted — at once; some admitted — they run, exit at the end (an error code above wins) | 5 | 5 |
+| An explicit `--admission enforce` without a usable capacity file (the default `auto` only warns) | 1 | 1 |
 
 `verify` exits `3` on verification errors. In service mode losses are reported in the summary only: `any_loss` and
 `strict_exit` (top level) and the counters; failed units — `failed_units` (proc) and `unit_failed` (per flow). A second
