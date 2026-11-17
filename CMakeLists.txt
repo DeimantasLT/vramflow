@@ -82,6 +82,7 @@ if(MXLV_BUILD_TESTS)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
     add_test(NAME perf_knee COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_knee.py)
+    add_test(NAME perf_capacity_file COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_capacity_file.py)
   endif()
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
