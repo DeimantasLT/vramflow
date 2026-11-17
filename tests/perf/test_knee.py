@@ -94,5 +94,14 @@ class VramPerFlow(unittest.TestCase):
             knee.vram_per_flow([(4, 640), (4, 650)])
 
 
+class ClassifyLimit(unittest.TestCase):
+    def test_nvenc_session_limit(self):
+        err = "[h264_nvenc @ 0x77fe840009c0] OpenEncodeSessionEx failed: incompatible client key (21): (no details)"
+        self.assertEqual(knee.classify_limit(["", err]), "nvenc_sessions")
+
+    def test_no_limit(self):
+        self.assertIsNone(knee.classify_limit(["[h264_nvenc] some other error", ""]))
+
+
 if __name__ == "__main__":
     unittest.main()

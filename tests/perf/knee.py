@@ -74,3 +74,19 @@ def vram_per_flow(levels: list) -> tuple:
     intercept = my - slope * mx
     r2 = 1.0 if syy == 0 else (sxy * sxy) / (sxx * syy)
     return slope, intercept, r2
+
+
+# Tvarkyklės ribos, kurios nėra pralaidumo riba: pakopa krenta ne dėl apkrovos (planas P8 → P4)
+DRIVER_LIMITS = {
+    # GeForce tvarkyklė riboja vienu metu atidarytas NVENC sesijas; kita sesija gauna NV_ENC_ERR_INCOMPATIBLE_CLIENT_KEY
+    "nvenc_sessions": "OpenEncodeSessionEx failed: incompatible client key",
+}
+
+
+def classify_limit(texts) -> Optional[str]:
+    """Procesų stderr tekstai → tvarkyklės ribos vardas (DRIVER_LIMITS raktas) arba None."""
+    for t in texts:
+        for name, marker in DRIVER_LIMITS.items():
+            if marker in t:
+                return name
+    return None

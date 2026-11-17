@@ -578,6 +578,8 @@ def run_one(a, kw, results, variant, n, rep=0):
     r = run_level(a, n)
     r["keepwarm"] = kw.on()
     r["repeat"] = rep
+    lvl = pathlib.Path(a.out) / f"{func_tag(a)}-{variant}-n{n}"
+    r["driver_limit"] = knee.classify_limit(p.read_text(errors="replace") for p in lvl.glob("*.err"))
     results.append(r)
     if r.get("invalid_reason"):
         print(f"[{func_tag(a)}/{variant} N={n:2d}] NEDERINA: {r['invalid_reason']}", flush=True)
@@ -593,7 +595,8 @@ def run_one(a, kw, results, variant, n, rep=0):
           + (f"gfxgen/gen CPU={r['cpu_cores_gfxgen_per_stream']:.3f}/{r['cpu_cores_gen_per_stream']:.3f} "
              f"proc_ms p50/p99={(r['hist'].get('proc_ms') or {}).get('p50_ms')}/{(r['hist'].get('proc_ms') or {}).get('p99_ms')} "
              f"src_exit={r['src_exit']} " if a.func == "composite" else "")
-          + f"e2e p99={r['e2e_latency_p99_ms']} exit={r['exit_codes']} {r['fatal'] or ''}",
+          + f"e2e p99={r['e2e_latency_p99_ms']} exit={r['exit_codes']} {r['fatal'] or ''}"
+          + (f" TVARKYKLĖS RIBA: {r['driver_limit']}" if r["driver_limit"] else ""),
           flush=True)
     out.write_text(json.dumps(results, indent=1))
     return r
@@ -627,6 +630,10 @@ def run_knee(a, kw, results, variant):
 
     guard = (lambda n: comp_guard(a, n) is None) if a.func == "composite" else None
     kr = knee.find_knee(level, a.n_max, a.repeats, guard)
+    # Kelią nulėmė tvarkyklės riba (pvz. NVENC sesijų skaičius), jei ją turi mažiausia kritusi pakopa virš kelio
+    above = sorted((r["n"], r.get("driver_limit")) for r in results if r["n"] > kr.knee and not r.get("pass_tol"))
+    if kr.stopped_by == "fail" and above and above[0][1]:
+        kr.stopped_by = above[0][1]
     ok_levels = sorted({r["n"] for r in results if r.get("pass_tol") and not r.get("skipped")
                         and r.get("vram_delta_mb") is not None and r["n"] <= kr.knee})
     vram = None
