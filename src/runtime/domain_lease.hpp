@@ -8,8 +8,12 @@
 // gauti. Turinys: `run_id=`, `pid=`, po vieną `flow=<id>` kiekvienam šio paleidimo sukurtam išėjimo flow (savininko paieškai,
 // kai antras paleidimas bando sukurti tą patį flow). Harness'as (tests/perf/domain.py) domeną trina tik be gyvų savininkų.
 // flock ant tmpfs (/dev/shm) veikia, ant tinklo FS — ne; nuomos katalogas visada tame pačiame FS kaip domenas.
+// Katalogas ir failai kuriami saugiai (runtime/safe_files.hpp); nuomos skelbiamos ir negyvos šalinamos tik po katalogo
+// užraktu `lease.lock`.
 #include <string>
 #include <vector>
+
+#include "runtime/safe_files.hpp"
 
 namespace mxlv::runtime {
 
@@ -52,7 +56,8 @@ public:
     void release();
 
 private:
-    int fd_ = -1, dirfd_ = -1;  // dirfd_ — nuomos katalogas (failas šalinamas unlinkat, ne per kelią)
+    int fd_ = -1;
+    LeaseDir dir_;  // patikrintas nuomos katalogas (failas šalinamas unlinkat per jo aprašą, ne per kelią)
     std::string path_, name_, run_id_;
 };
 

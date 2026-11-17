@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/format.hpp"
+#include "runtime/safe_files.hpp"
 
 namespace mxlv::runtime {
 
@@ -100,9 +101,10 @@ public:
     void close();  // atlaisvina užraktą ir pašalina failą (rezervacijos dingsta)
 
 private:
-    Demand others() const;  // kviečiama su bendru užraktu
+    Demand others(bool may_unlink) const;  // may_unlink — tik laikant knygos užraktą (negyvų procesų failai šalinami)
     bool write_own();
-    int fd_ = -1, dirfd_ = -1;  // dirfd_ — patikrintas nuomos katalogas (runtime/safe_files.hpp); viskas per openat / unlinkat
+    int fd_ = -1;
+    LeaseDir ld_;  // patikrintas nuomos katalogas (runtime/safe_files.hpp); viskas per openat / unlinkat
     std::string dir_, path_, name_, device_;
     std::vector<std::pair<std::string, Demand>> res_;
 };

@@ -45,7 +45,7 @@ def make_domain(tag: str) -> pathlib.Path:
 
 
 def _probe(path: pathlib.Path) -> int:
-    """1 — gyvas savininkas, 0 — negyvas (failas pašalintas), -1 — nėra / klaida / ne paprastas failas.
+    """1 — gyvas savininkas, 0 — negyvas, -1 — nėra / klaida / ne paprastas failas.
     O_NOFOLLOW | O_NONBLOCK ir S_ISREG — kaip runtime::open_regular_at: nuoroda nesekama, FIFO atidarymo nepakabina."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -58,17 +58,16 @@ def _probe(path: pathlib.Path) -> int:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except OSError as e:
             return 1 if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN) else -1
-        try:
-            os.unlink(path)  # užraktą gavom — savininkas negyvas
-        except OSError:
-            pass
+        # Užraktą gavom — savininkas negyvas. Failo čia NEšaliname: šalinti pagal vardą saugu tik laikant katalogo užraktą
+        # (runtime::DirLock „lease.lock“) — kitaip galima pašalinti ką tik tuo pačiu vardu paskelbtą gyvą nuomą. Negyvus failus
+        # pašalina pačios funkcijos (DomainLease) arba remove_domain kartu su visu katalogu.
         return 0
     finally:
         os.close(fd)
 
 
 def live_owners(path) -> list:
-    """Gyvų savininkų run_id (surūšiuoti); negyvų nuomos failai pašalinami."""
+    """Gyvų savininkų run_id (surūšiuoti)."""
     ld = lease_dir(path)
     if not ld.is_dir():
         return []
