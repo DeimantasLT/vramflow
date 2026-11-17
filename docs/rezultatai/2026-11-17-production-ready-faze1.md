@@ -121,3 +121,43 @@ katalogas gauna domeno grupę ir `setgid` bitą (failai jame paveldi grupę). Te
 (tik root: vaiko procesas kito vartotojo ir grupės teisėmis, abi tvarkos — katalogą pirmas sukuria root arba kitas
 vartotojas): be pataisos krenta (katalogo grupė 0 arba 54323 vietoje 54321, antras vartotojas nuomos negauna), su pataisa —
 `[safe_files]` 10 atvejų, 149 tvirtinimai.
+
+## 1.5 Fuzz testai parseriams (kriterijus S2, peržiūros fokusas RF-4)
+
+**Kas padaryta.** Keturi taikiniai `tests/fuzz/fuzz_<taikinys>.cpp` (gryna logika, be MXL, CUDA ir libav), kiekvienas su
+invariantais, ne tik „nelūžta“:
+
+| Taikinys | Ką fuzzina | Invariantai, kai įėjimas priimtas |
+|---|---|---|
+| `flow_def` | `format_from_flow_def` | matmenys 1…65536; interlaced aukštis lyginis; `grain_bytes` ne didesnis už 65536 × 65536 `v210a` (64 bitai) |
+| `capacity` | `parse_capacity` (ranka rašytas JSON skaitytuvas) | visi skaičiai baigtiniai ir neneigiami; atmetimas — su priežastimi |
+| `playlist` | `parse_playlist`, `check_playlist`, `resolve_playlist_url`, libav atminties sąmatos | ribos neviršytos; išspręsta nuoroda — tik `http` / `https`; klaidos tekste nėra bazinio URL paslapčių |
+| `url` | `source_url_allowed`, `redact_url`, `canonical_authority` ir kt. | leista schema — iš dokumentuoto sąrašo; išvalytame URL nėra paslapties žymės; libav grojaraščio URL ≤ 4095 B |
+
+Iš to paties šaltinio daromi du vykdomieji: `mxlv-fuzz-<taikinys>` (libFuzzer + ASan + UBSan, `MXLV_BUILD_FUZZ=ON`,
+`clang++-18`; `scripts/linux/56-fuzz.sh`) ir `mxlv-fuzz-replay-<taikinys>` gamybiniame build'e — `ctest
+fuzz_replay_<taikinys>` paleidžia korpusą `tests/fuzz/corpus/<taikinys>/`. Radinys įdedamas į korpusą ir lieka testu.
+
+**Radinys.** Trumpame (15 s) paleidime `capacity` taikinys rado: `"knee": 2232340777` netelpa į `int` ir tyliai virsta
+neigiamu skaičiumi. Ta pati klaida galiojo ir kitiems laukams: `"sessions": 3000000000` duotų neigiamą NVENC sesijų ribą, o
+neigiama riba reiškia „be ribos“ — sugadintas talpos failas būtų tyliai išjungęs sesijų apsaugą. Pataisa
+(`src/runtime/admission.cpp`): sveikieji laukai turi būti sveikieji leistinose ribose (sesijos ir kelias ≤ 10⁶, baitai ≤ 2⁵³),
+visi skaičiai — baigtiniai; kitaip klaida su lauko vardu. Testas `capacity: skaičius už lauko ribų atmetamas, ne apkarpomas`
+(prieš pataisą krito 11 iš 27 tvirtinimų) ir fuzzerio įėjimas korpuse (`crash-knee-overflow.json`; prieš pataisą
+`fuzz_replay_capacity` baigdavosi `abort`).
+
+**Paleidimas po pataisos** (`FUZZ_SECONDS=600`, po vieną branduolį):
+
+| Taikinys | Vykdymų per 600 s | Radinių |
+|---|---:|---:|
+| `flow_def` | 203 584 315 | 0 |
+| `capacity` | 23 692 361 | 0 |
+| `playlist` | 2 543 923 | 0 |
+| `url` | 6 999 219 | 0 |
+
+**Nukrypimas nuo užduoties.** CLI specifikacijų parseriams fuzz taikinių nėra (planas §2): tai operatoriaus įvestis ir
+`static` funkcijos; neigiami CLI testai jiems — paketas 2.5 kartu su klaidų keliais. Flow aprašo invariantas — 65536, ne
+7680 × 4320: parseris palaikomo dydžio netikrina (grafikos sluoksniai gali būti bet kokio dydžio), tai daro
+`check_layout` ir `format_supported`.
+
+Švarus build — 0 įspėjimų; `ctest` 502 / 503 (krito tik žinomas laiko testas `gap_policy … < 1 ms`).

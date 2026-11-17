@@ -1,0 +1,1 @@
+http://media.example.test/live/index.m3u8

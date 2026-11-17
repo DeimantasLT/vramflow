@@ -203,6 +203,34 @@ TEST_CASE("capacity: schema, trūkstami laukai, netinkamas JSON — klaida", "[a
     CHECK(v.vram_bytes == 8585216000u);
 }
 
+// Fuzzerio radinys (tests/fuzz/corpus/capacity/crash-knee-overflow.json): skaičius, netelpantis į lauko tipą, tyliai virsdavo
+// kitu — "knee": 2232340777 → neigiamas int; "sessions": 3000000000 → neigiamas, o neigiama sesijų riba reiškia „be ribos“.
+// Tokie laukai turi būti atmesti su lauko vardu, ne priimti apkarpyti.
+TEST_CASE("capacity: skaičius už lauko ribų atmetamas, ne apkarpomas", "[admission][capacity]") {
+    const std::string f = fixture();
+    Capacity c;
+    std::string err;
+    REQUIRE(parse_capacity(f, c, err));
+    REQUIRE(c.nvenc_sessions == 12);
+    CHECK_FALSE(parse_capacity(replace(f, "\"sessions\": 12", "\"sessions\": 3000000000"), c, err));
+    CHECK(err.find("engines.nvenc.sessions") != std::string::npos);
+    CHECK_FALSE(parse_capacity(replace(f, "\"sessions\": 12", "\"sessions\": 4294967308"), c, err));  // 2^32 + 12 → buvo 12
+    CHECK_FALSE(parse_capacity(replace(f, "\"sessions\": 12", "\"sessions\": 12.5"), c, err));         // ne sveikasis
+    CHECK_FALSE(parse_capacity(replace(f, "\"knee\": 22", "\"knee\": 2232340777"), c, err));
+    CHECK(err.find(".knee") != std::string::npos);
+    CHECK_FALSE(parse_capacity(replace(f, "\"vram_per_flow_bytes\": 191029576", "\"vram_per_flow_bytes\": 1e30"), c, err));
+    CHECK(err.find("vram_per_flow_bytes") != std::string::npos);
+    CHECK_FALSE(parse_capacity(replace(f, "\"mpix_s\": 1140.48", "\"mpix_s\": 1e999"), c, err));  // begalybė — talpa be ribos
+    CHECK_FALSE(err.empty());
+    CHECK_FALSE(parse_capacity(replace(f, "\"driver\": \"596.49\"", "\"driver\": \"596.49\", \"vram_bytes\": 1e40"), c, err));
+    CHECK(err.find("gpu.vram_bytes") != std::string::npos);
+    // Ribinės priimamos reikšmės
+    REQUIRE(parse_capacity(replace(f, "\"sessions\": 12", "\"sessions\": 1000000"), c, err));
+    CHECK(c.nvenc_sessions == 1000000);
+    REQUIRE(parse_capacity(replace(f, "\"driver\": \"596.49\"", "\"driver\": \"596.49\", \"vram_bytes\": 9007199254740992"), c, err));
+    CHECK(c.vram_bytes == 9007199254740992u);  // 2^53 — didžiausias tiksliai atvaizduojamas
+}
+
 TEST_CASE("capacity: įspėjimai — kita tvarkyklė (abi versijos), lower_bound", "[admission][capacity]") {
     Capacity c;
     std::string err;

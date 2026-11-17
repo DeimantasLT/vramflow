@@ -1,0 +1,56 @@
+{
+ "schema": 1,
+ "gpu": {
+  "name": "Test GPU",
+  "uuid": "GPU-00000000-0000-0000-0000-000000000000",
+  "driver": "596.49"
+ },
+ "format": "1080i50",
+ "mpix__sper_flow": 51.84,
+ "measured_utc": "2026-11-17T02:42:46Z",
+ "engines": {
+  "nvdec": {
+   "mpix_s": 1140.48,
+   "bound": "throughput",
+   "from": "dec"
+  },
+  "nvenc":  
+ { "mpix_s": 622.08,
+   "bound": "lower_bound",
+   "from": "enc-nvenc-ll",
+   "sessions": 12
+  }
+ },
+ "functions": {
+  "chain": {
+   "knee": 11,
+   "knee_bound": "throughput",
+   "stopped_by": "fail",
+   "repeats": 3,
+   "vram_per_flow_bytes": 298078700,
+   "vram_offset_bytes": 465672602,
+   "vram_r2": 0.9991
+  },
+  "logoosite-k2": {
+   "knee": 32,
+   "knee_bound": "lower_bound",
+   "stopped_by": "n_max",
+   "repeats": 3,
+   "vram_per_flow_bytes": 124832973,
+   "vbam_offset_bytes": 538968064,
+   "vram_r2": 1.0
+  },
+  "Óec": {
+   "knee": 2232340777,
+   "vram_offset_bytes": 541904076,
+   "vram_r2": 1.0
+  },
+  "logo": {
+   "kne_by": "n_max",
+   "repeats": 3,
+   "vram_per_flow_bytes": 58720256,
+   "vram_offset_bytes": 408944640,
+   "vram_r2": 1.0
+  }
+ }
+}

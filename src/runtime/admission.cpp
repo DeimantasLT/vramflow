@@ -264,13 +264,27 @@ bool parse_capacity(const std::string& json, Capacity& out, std::string& err) {
             o = 0;
             return true;
         }
-        if (!v || v->t != JVal::T::Num || v->num < 0) {
-            err = "talpos failo laukas " + k + " — ne neneigiamas skaičius";
+        if (!v || v->t != JVal::T::Num || !std::isfinite(v->num) || v->num < 0) {
+            err = "talpos failo laukas " + k + " — ne neneigiamas baigtinis skaičius";
             return false;
         }
         o = v->num;
         return true;
     };
+    // Sveikasis 0…max (imtinai). Trupmena arba per didelė reikšmė — klaida su lauko vardu: anksčiau static_cast ją tyliai
+    // apkarpydavo (fuzzerio radinys: "knee": 2232340777 → neigiamas int; neigiama sesijų riba reikštų „be ribos“).
+    auto whole = [&](const JVal* v, const std::string& k, double max, double& o, bool null_ok) {
+        if (!num(v, k, o, null_ok)) return false;
+        if (o > max || o != std::floor(o)) {
+            char b[64];
+            std::snprintf(b, sizeof b, "%.0f", max);
+            err = "talpos failo laukas " + k + " — ne sveikasis skaičius 0…" + b;
+            return false;
+        }
+        return true;
+    };
+    constexpr double kMaxCount = 1e6;                 // sesijos, kelias (srautų skaičius)
+    constexpr double kMaxBytes = 9007199254740992.0;  // 2^53 — didžiausias sveikasis, kurį double atvaizduoja tiksliai
     Capacity c;
     c.headroom = out.headroom;
     c.source = out.source;
@@ -280,10 +294,10 @@ bool parse_capacity(const std::string& json, Capacity& out, std::string& err) {
     double v = 0;
     if (!num(at(root, "engines.nvdec.mpix_s"), "engines.nvdec.mpix_s", c.nvdec_mpix_s, false)) return false;
     if (!num(at(root, "engines.nvenc.mpix_s"), "engines.nvenc.mpix_s", c.nvenc_mpix_s, false)) return false;
-    if (!num(at(root, "engines.nvenc.sessions"), "engines.nvenc.sessions", v, true)) return false;
-    c.nvenc_sessions = static_cast<int>(std::llround(v));
-    if (!num(at(root, "gpu.vram_bytes"), "gpu.vram_bytes", v, true)) return false;
-    c.vram_bytes = static_cast<std::uint64_t>(std::llround(v));
+    if (!whole(at(root, "engines.nvenc.sessions"), "engines.nvenc.sessions", kMaxCount, v, true)) return false;
+    c.nvenc_sessions = static_cast<int>(v);
+    if (!whole(at(root, "gpu.vram_bytes"), "gpu.vram_bytes", kMaxBytes, v, true)) return false;
+    c.vram_bytes = static_cast<std::uint64_t>(v);
     std::string bd, be;
     if (!str("engines.nvdec.bound", bd) || !str("engines.nvenc.bound", be)) return false;
     c.nvdec_lower_bound = bd == "lower_bound";
@@ -303,12 +317,12 @@ bool parse_capacity(const std::string& json, Capacity& out, std::string& err) {
             return false;
         }
         auto field = [&](const char* k) { return f.get(k); };
-        if (!num(field("vram_per_flow_bytes"), p + "vram_per_flow_bytes", v, true)) return false;
-        fc.vram_per_flow_bytes = static_cast<std::uint64_t>(std::llround(v));
-        if (!num(field("vram_offset_bytes"), p + "vram_offset_bytes", v, true)) return false;
-        fc.vram_offset_bytes = static_cast<std::uint64_t>(std::llround(v));
-        if (!num(field("knee"), p + "knee", v, true)) return false;
-        fc.knee = static_cast<int>(std::llround(v));
+        if (!whole(field("vram_per_flow_bytes"), p + "vram_per_flow_bytes", kMaxBytes, v, true)) return false;
+        fc.vram_per_flow_bytes = static_cast<std::uint64_t>(v);
+        if (!whole(field("vram_offset_bytes"), p + "vram_offset_bytes", kMaxBytes, v, true)) return false;
+        fc.vram_offset_bytes = static_cast<std::uint64_t>(v);
+        if (!whole(field("knee"), p + "knee", kMaxCount, v, true)) return false;
+        fc.knee = static_cast<int>(v);
         c.functions[tag] = fc;
     }
     out = std::move(c);

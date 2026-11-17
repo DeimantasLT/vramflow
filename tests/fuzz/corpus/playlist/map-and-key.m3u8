@@ -1,0 +1,9 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-KEY:METHOD=AES-128,URI="https://media.example.test/key"
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4,
+s1.m4s
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:4,
+s2.m4s

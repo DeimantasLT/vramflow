@@ -8,3 +8,5 @@ CMakeLists.txt text eol=lf
 *.cmake text eol=lf
 *.py text eol=lf
 *.patch -text
+# Fuzz korpusas — baitai tiksliai tokie, kokie yra (radinio atkūrimui)
+tests/fuzz/corpus/** -text

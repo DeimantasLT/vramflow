@@ -1,0 +1,1 @@
+https://user:pass@media.example.test:8443/a/b.m3u8?token=abc#frag

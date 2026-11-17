@@ -123,3 +123,6 @@ endif()
 
 # Alfa grafika (Raster, v210a, etalonas) — po media bloko, nes etalonas naudoja mxlv_media
 include(${CMAKE_SOURCE_DIR}/cmake/gfx.cmake)
+
+# Fuzz testai parseriams (flow aprašas, talpos failas, grojaraštis, URL) — planas 2026-11-17 §1.5
+include(${CMAKE_SOURCE_DIR}/cmake/fuzz.cmake)

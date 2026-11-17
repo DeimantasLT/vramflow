@@ -240,7 +240,7 @@ int open_regular_at(int dirfd, const std::string& name, int flags);
 
 | Taikinys | Funkcijos | Invariantas, kai priimta |
 |---|---|---|
-| `fuzz_flow_def` | `vramflow::format_from_flow_def` (`src/common/format.hpp:180`) | **[RF-4]** 1 ≤ w ≤ 7680, 1 ≤ h ≤ 4320; `grain_bytes` (64 bitų) ≤ 7680×4320 `v210a` dydis |
+| `fuzz_flow_def` | `vramflow::format_from_flow_def` (`src/common/format.hpp:180`) | **[RF-4]** 1 ≤ w, h ≤ 65536 (parseris palaikomo dydžio netikrina — tai daro `check_layout`); `grain_bytes` (64 bitų) ≤ 65536×65536 `v210a` dydis |
 | `fuzz_capacity` | `mxlv::runtime::parse_capacity` (`admission.hpp:64`) | visi skaičiai baigtiniai ir ≥ 0; `nvenc_sessions` ≥ 0 |
 | `fuzz_playlist` | `parse_playlist`, `check_playlist`, `resolve_playlist_url` (`src/ingest/url_policy.hpp:75,134,35`) | priimto grojaraščio nuorodų ≤ `HlsLimits::max_segments` |
 | `fuzz_url` | `source_url_allowed`, `canonical_authority`, `redact_url` (`url_policy.hpp:24,120,43`) | priimto URL schema — iš leidžiamų sąrašo; `redact_url` išvestyje nėra slaptažodžio |
@@ -529,7 +529,7 @@ failas arba commit.
 | K7 | nepradėta | | |
 | K8 | nepradėta | | |
 | S1 | nepradėta | | |
-| S2 | nepradėta | | |
+| S2 | PASS | 4 taikiniai po 600 s be radinių (203,6 mln. / 23,7 mln. / 2,5 mln. / 7,0 mln. vykdymų); vienas radinys trumpame paleidime pataisytas ir įdėtas į korpusą | `scripts/linux/56-fuzz.sh`; `ctest fuzz_replay_*`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.5 |
 | S3 | vyksta | skaitymo kelias (host ir `cuda-linear`) — PASS: 4 atvejai, prieš pataisą krito 3; GPU branduolių `compute-sanitizer` — paketas 2.3 | `tests/gpu/test_hostile_writer.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.4 |
 | S4 | PASS | 9 nauji testai: prieš seną kodą krenta visi, prieš naują — visi praeina; `fstart_*`, `overload_*` 26 iš 26 | `tests/unit/test_safe_files.cpp`; `docs/rezultatai/2026-11-17-production-ready-faze1.md` §1.2 |
 | S5 | nepradėta | vartotojas `mxltest` yra | §3 |

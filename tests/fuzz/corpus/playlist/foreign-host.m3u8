@@ -1,0 +1,6 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6,
+http://other.example.test/x.ts
+#EXTINF:6,
+file:///etc/passwd

@@ -1,0 +1,1 @@
+{"schema":1,"gpu":{"name":"x","uuid":"GPU-0","driver":"1"},"format":"1080i50","mpix_s_per_flow":51.84,"measured_utc":"t","engines":{"nvdec":{"mpix_s":100,"bound":"throughput","from":"dec"},"nvenc":{"mpix_s":50,"bound":"lower_bound","from":"enc","sessions":12}},"functions":{"dec":{"vram_per_flow_bytes":1048576,"vram_offset_bytes":0,"knee":2,"knee_bound":"throughput"}}}

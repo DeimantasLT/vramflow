@@ -838,7 +838,14 @@ python3 tests/perf/capacity.py ~/evidence/try --func logo --n 8 --seconds 60 --i
 # GPU vs CPU campaign and its report
 bash scripts/linux/71-compare.sh ~/evidence/cmp-logo logo 1,2,4,8,16,32,64
 python3 tests/perf/compare_report.py report.md ~/evidence/cmp-logo
+
+# Parser fuzzers (flow description, capacity file, HLS playlist, URL policy): libFuzzer + ASan + UBSan, 10 min per target
+bash scripts/linux/56-fuzz.sh ~/evidence/fuzz
 ```
+
+The fuzzers need a clang with the fuzzer runtime (`FUZZ_CXX`, default `clang++-18`). Whatever they find goes into
+`tests/fuzz/corpus/<target>/`; `ctest` replays that corpus in the normal build (`fuzz_replay_<target>`), so a finding stays
+a test.
 
 Only synthetic test media are used (generated patterns and a generated clip).
 
