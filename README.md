@@ -372,7 +372,7 @@ All options: `vramflow-func <command> --help`, `vramflow-verify <command> --help
 | `--out DIR` | Where `summary-<command>.json` is written |
 | `--format F` | Flow format, default `1080i50` (see *Formats* below) |
 | `--run-id ID` | Name of this run in the domain lease (see *Domain ownership*); default `<command>-<pid>-<8 hex>` |
-| `--admission off\|warn\|enforce` | Admission control against the measured GPU capacity (see *Capacity and admission*). `warn` (default): a flow over capacity starts with a warning line; `enforce`: flows that do not fit are not started (exit code `5`); `off`: no check. Not applied to `verify` and `--impl cpu` |
+| `--admission auto\|off\|warn\|enforce` | Admission control against the measured GPU capacity (see *Capacity and admission*). `auto` (default): `enforce` when a capacity file is found, `warn` when there is none; `enforce`: flows that do not fit are not started (exit code `5`); `warn`: a flow over capacity starts with a warning line; `off`: no check (manual experiments and capacity measurement). Not applied to `verify` and `--impl cpu` |
 | `--capacity-file PATH` | Capacity file from `tests/perf/capacity_file.py`, or a directory with `capacity-<GPU UUID>.json`; default: the `VRAMFLOW_CAPACITY` environment variable |
 | `--admission-headroom H` | Limit = capacity × `H` for Mpix/s and VRAM, default `0.85`; NVENC sessions are a hard driver count and get no headroom |
 
@@ -719,8 +719,9 @@ otherwise SKIP).
 
 ### Capacity and admission
 
-A GPU function knows how much the GPU can serve only from a measurement: `scripts/linux/70-capacity.sh` (or
-`tests/perf/capacity.py --n auto`) finds the knee per function, and `tests/perf/capacity_file.py <campaign dir>` writes
+A GPU function knows how much the GPU can serve only from a measurement: `PROFILE=knee scripts/linux/70-capacity.sh [dir]`
+finds the knee per function (`tests/perf/capacity.py --n auto`, 3 repeats) and then runs
+`tests/perf/capacity_file.py <campaign dir>`, which writes
 `capacity-<GPU UUID>.json` (schema 1: NVDEC and NVENC Mpix/s with `bound`, the NVENC session count when the driver limit set
 the knee, measured VRAM per flow for each function, GPU UUID and driver version). With `--capacity-file` each process
 reserves what its flows need before it creates any output flow — demand in Mpix/s per engine (1080i50 / 1080p25 =
@@ -741,9 +742,10 @@ requested, admitted, refused, notes).
 - A capacity value with `bound: lower_bound` (the real capacity is larger) is still used as the limit, with a warning.
 - A file for another GPU (UUID differs) is not used. A different driver version is a warning with both versions; the
   running version comes from NVML.
-- `enforce` without a usable capacity file exits `1` (`talpa neišmatuota, paleiskite 70-capacity …`); `warn` starts with one
-  warning line. `warn` is the default because most machines have no capacity file yet (plan question K13); switch to
-  `enforce` once the GPU has been measured.
+- The default is `auto` (plan decision K13): with a usable capacity file it behaves as `enforce`, so streams already on air
+  are protected as soon as the GPU has been measured; without one it behaves as `warn` and starts with one warning line.
+  An explicit `enforce` without a usable capacity file exits `1` (`talpa neišmatuota, paleiskite 70-capacity …`). The
+  capacity harness itself runs every function with `--admission off`, so a re-measurement is not capped by the old file.
 - Limits: the ledger only sees VRAMFlow processes in the same domain on the same GPU (not other GPU users, not other
   domains); VRAM is checked against the total GPU memory × headroom, not against the free memory at start.
 

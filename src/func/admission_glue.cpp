@@ -52,8 +52,9 @@ AdmissionRun& admission() {
 int admission_begin(const Opts& o, const std::string& role, std::string& fatal) {
     AdmissionRun& a = admission();
     a.role = role;
-    if (!runtime::parse_admission_mode(o.admission, a.mode)) {
-        fatal = "--admission: " + o.admission + " (off | warn | enforce)";
+    // Numatytoji „auto“ (planas K13): kol talpos failas neįkeltas — warn; įkėlus — enforce (žemiau)
+    if (!runtime::resolve_admission_mode(o.admission, false, a.mode)) {
+        fatal = "--admission: " + o.admission + " (auto | off | warn | enforce)";
         return 1;
     }
     if (a.mode == runtime::AdmissionMode::Off || o.impl == "cpu" || role == "verify") return 0;
@@ -74,6 +75,7 @@ int admission_begin(const Opts& o, const std::string& role, std::string& fatal) 
         err = "talpa neišmatuota: nenurodytas --capacity-file (arba VRAMFLOW_CAPACITY)";
     else
         ok = runtime::load_capacity(path, uuid, a.cap, err);
+    if (ok) (void)runtime::resolve_admission_mode(o.admission, true, a.mode);  // auto + talpos failas → enforce
     if (ok && !runtime::Ledger::open(o.domain, uuid, a.ledger, err)) {
         if (a.mode == runtime::AdmissionMode::Enforce) {
             fatal = "priėmimo kontrolė: " + err;
@@ -83,21 +85,23 @@ int admission_begin(const Opts& o, const std::string& role, std::string& fatal) 
     }
     if (!ok) {
         if (a.mode == runtime::AdmissionMode::Enforce) {
-            fatal = "priėmimo kontrolė (--admission enforce): talpa neišmatuota, paleiskite 70-capacity (scripts/linux/70-capacity.sh, "
-                    "tada tests/perf/capacity_file.py) ir nurodykite --capacity-file — " + err;
+            // Čia patenka tik aiškiai nurodytas enforce: „auto“ be talpos failo lieka warn (K13)
+            fatal = "priėmimo kontrolė (--admission enforce): talpa neišmatuota, paleiskite 70-capacity (PROFILE=knee scripts/linux/70-capacity.sh "
+                    "— sukuria capacity-<GPU UUID>.json) ir nurodykite --capacity-file — " + err;
             return 1;
         }
         std::fprintf(stderr, "[%s] įspėjimas: priėmimo kontrolė (warn) — talpa neišmatuota, srautai netikrinami (%s; "
-                     "matavimas: scripts/linux/70-capacity.sh + tests/perf/capacity_file.py)\n", role.c_str(), err.c_str());
+                     "matavimas: PROFILE=knee scripts/linux/70-capacity.sh)\n", role.c_str(), err.c_str());
         return 0;
     }
     if (a.cap.vram_bytes == 0) a.cap.vram_bytes = total;
     a.have_capacity = true;
     for (const std::string& w : runtime::capacity_warnings(a.cap, nvml_driver_version()))
         std::fprintf(stderr, "[%s] įspėjimas: priėmimo kontrolė — %s\n", role.c_str(), w.c_str());
-    std::fprintf(stderr, "[%s] priėmimo kontrolė (%s): talpa %s — nvdec %s, nvenc %s Mpix/s, nvenc sesijos %d, VRAM %s MB, atsarga %s\n",
-                 role.c_str(), mode_name(a.mode), a.cap.source.c_str(), num2(a.cap.nvdec_mpix_s).c_str(), num2(a.cap.nvenc_mpix_s).c_str(),
-                 a.cap.nvenc_sessions, mb(a.cap.vram_bytes).c_str(), num2(a.cap.headroom).c_str());
+    std::fprintf(stderr, "[%s] priėmimo kontrolė (%s%s): talpa %s — nvdec %s, nvenc %s Mpix/s, nvenc sesijos %d, VRAM %s MB, atsarga %s\n",
+                 role.c_str(), mode_name(a.mode), o.admission == "auto" ? ", auto — talpos failas yra" : "", a.cap.source.c_str(),
+                 num2(a.cap.nvdec_mpix_s).c_str(), num2(a.cap.nvenc_mpix_s).c_str(), a.cap.nvenc_sessions, mb(a.cap.vram_bytes).c_str(),
+                 num2(a.cap.headroom).c_str());
     return 0;
 }
 

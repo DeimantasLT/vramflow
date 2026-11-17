@@ -107,9 +107,13 @@ private:
     std::vector<std::pair<std::string, Demand>> res_;
 };
 
-// --admission off | warn | enforce (planas K13; numatyta warn — sprendimas docs/rezultatai/2026-11-17-p4-admission.md).
+// --admission auto | off | warn | enforce (planas K13; numatyta auto: enforce su talpos failu, warn be jo —
+// docs/rezultatai/2026-11-17-p4-admission.md).
 enum class AdmissionMode { Off, Warn, Enforce };
 bool parse_admission_mode(const std::string& s, AdmissionMode& out);
+// Numatytoji --admission auto (planas K13): yra talpos failas → enforce; nėra → warn. Aiškiai nurodytas režimas
+// (off | warn | enforce) nuo talpos failo nepriklauso. Nežinomas vardas → false.
+bool resolve_admission_mode(const std::string& s, bool have_capacity, AdmissionMode& out);
 
 // Srautų priėmimas iš eilės. Pirma rezervuojama proceso pastovi dalis `process` (funkcijos VRAM offset; nulinė — praleidžiama),
 // tada srautai flows[0], flows[1] … (id: "<prefix>-proc", "<prefix>-<k>"). enforce: pirmas netilpęs srautas ir VISI tolesni

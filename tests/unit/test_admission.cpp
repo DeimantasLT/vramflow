@@ -450,6 +450,23 @@ TEST_CASE("admit_in_order: režimo vardai", "[admission][order]") {
     CHECK_FALSE(parse_admission_mode("on", m));
 }
 
+// Planas K13: numatytoji „auto“ — enforce, kai yra talpos failas; warn, kai jo nėra. Aiškiai nurodytas režimas nesikeičia.
+TEST_CASE("admission: numatytoji auto — enforce su talpos failu, warn be jo (K13)", "[admission][order]") {
+    AdmissionMode m{};
+    CHECK(resolve_admission_mode("auto", true, m));
+    CHECK(m == AdmissionMode::Enforce);
+    CHECK(resolve_admission_mode("auto", false, m));
+    CHECK(m == AdmissionMode::Warn);
+    CHECK(resolve_admission_mode("warn", true, m));
+    CHECK(m == AdmissionMode::Warn);
+    CHECK(resolve_admission_mode("enforce", false, m));
+    CHECK(m == AdmissionMode::Enforce);
+    CHECK(resolve_admission_mode("off", true, m));
+    CHECK(m == AdmissionMode::Off);
+    CHECK_FALSE(resolve_admission_mode("on", true, m));
+    CHECK_FALSE(resolve_admission_mode("", false, m));
+}
+
 TEST_CASE("admit_in_order: enforce — 8 srautų, talpa 4: priimti pirmi 4, 5–8 atmesti, knygoje tik 4", "[admission][order]") {
     TmpDomain dom(7);
     Ledger l;

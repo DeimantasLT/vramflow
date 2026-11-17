@@ -347,7 +347,7 @@ std::vector<std::string> capacity_warnings(const Capacity& c, const std::string&
                     ") dar galioja");
     else if (running_driver != c.driver)
         w.push_back("tvarkyklės versija: talpos failas išmatuotas su " + c.driver + ", dabar — " + running_driver +
-                    ": talpa galėjo pasikeisti, permatuokite (scripts/linux/70-capacity.sh, tests/perf/capacity_file.py)");
+                    ": talpa galėjo pasikeisti, permatuokite (PROFILE=knee scripts/linux/70-capacity.sh)");
     auto lb = [&](bool on, const char* eng, double v) {
         if (on)
             w.push_back(std::string(eng) + ": talpa " + fmt2(v) + " Mpix/s faile pažymėta bound = lower_bound (tikra talpa didesnė — " +
@@ -589,6 +589,14 @@ bool parse_admission_mode(const std::string& s, AdmissionMode& out) {
     else if (s == "enforce") out = AdmissionMode::Enforce;
     else return false;
     return true;
+}
+
+bool resolve_admission_mode(const std::string& s, bool have_capacity, AdmissionMode& out) {
+    if (s == "auto") {
+        out = have_capacity ? AdmissionMode::Enforce : AdmissionMode::Warn;
+        return true;
+    }
+    return parse_admission_mode(s, out);
 }
 
 AdmitResult admit_in_order(Ledger& l, const std::string& prefix, const Demand& process, const std::vector<Demand>& flows,

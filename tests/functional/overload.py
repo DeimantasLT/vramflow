@@ -8,8 +8,10 @@ overload_enforce_synthetic — dirbtinis talpos failas šiai GPU (NVDEC 270 Mpix
                              60 s (exit 0, late_frames == 0, skip_to_key == 0), 5–8 — exit 5, pranešime variklis ir skaičiai
                              (prašoma 51,84, užimta 207,36, leidžiama 229,50 Mpix/s); domene lygiai 8 flow'ai (4 video + 4 garso).
                              US 3 (skip_events — kartu su termino vartais, kitas etapas; čia — esamas skip_to_key).
-overload_no_capacity       — enforce be talpos failo → exit 1 ir „talpa neišmatuota, paleiskite 70-capacity“; warn → paleidžia,
-                             lygiai viena įspėjimo eilutė (US 7).
+overload_no_capacity       — enforce be talpos failo → exit 1 ir „talpa neišmatuota, paleiskite 70-capacity“; numatytoji (auto)
+                             be failo — warn: paleidžia, lygiai viena įspėjimo eilutė (US 7).
+overload_default           — numatytoji --admission auto (planas K13) su talpos failu veikia kaip enforce: dec --flows 3 be
+                             --admission parinkties, talpa 1 srautui → 1 priimtas, 2 atmesti, exit 5.
 overload_partial           — dec --flows 3, talpa 1 srautui: priimtas 1 (domene 1 flow), 2 atmesti, procesas veikia ir baigiasi
                              exit 5 (iš eilės: „ankstesnis netilpo“ — vieneto teste); enc --flows 3, NVENC sesijų riba 2: trečias atmestas dėl nvenc_sessions (US 2, 8).
 Medžiaga — sintetinė (scripts/linux/62-make-av-clip.sh), siuntimas — tik loopback.
@@ -157,7 +159,7 @@ def overload_no_capacity(out):
     need = "talpa neišmatuota, paleiskite 70-capacity"
     ok = rc == 1 and need in e
     res.append(F.result(f"{tid}[enforce]", "PASS" if ok else "FAIL", why=f"exit {rc}, „{need}“ {'yra' if need in e else 'NĖRA'}: {e.strip()[-300:]}"))
-    # warn (numatyta), be failo: paleidžia (zondavimas be duomenų baigiasi exit 2 per --input-wait-s), lygiai viena įspėjimo eilutė
+    # numatytoji (auto) be failo → warn: paleidžia (zondavimas be duomenų baigiasi exit 2 per --input-wait-s), lygiai viena įspėjimo eilutė
     p = F.FProc(out, f"{tid}/warn", "ingest", d, "--input", f"udp://127.0.0.1:{port}", *v, "--input-wait-s", 2)
     rc = p.wait(timeout=30)
     if rc is None:
@@ -169,22 +171,16 @@ def overload_no_capacity(out):
     return res
 
 
-def overload_partial(out):
-    tid = "overload_partial"
-    res = []
-    gpu = gpu0()
-    if gpu is None:
-        return [F.result(tid, "SKIP", why="nvidia-smi nerado GPU")]
+def dec_partial(out, tid, sub, gpu, port, admission_args):
+    """dec --flows 3, NVDEC talpa 1 srautui (61 · 0,85 = 51,85 ≥ 51,84): 1 priimtas, 2 atmesti, exit 5. admission_args —
+    „--admission …“ parinktys (tuščia — numatytoji auto). VRAM — įvertis prieš visą GPU atmintį."""
     v = F.vcommon("gpu", "cuda-linear")
-    # dec: NVDEC talpa 1 srautui (61 · 0,85 = 51,85 ≥ 51,84), --flows 3 → 1 priimtas; VRAM — įvertis prieš visą GPU atmintį
-    cap = write_capacity(pathlib.Path(out) / tid / "dec" / f"capacity-{gpu['uuid']}.json", gpu, nvdec=61.0)
-    if (why := I.ensure_clips()):
-        return [F.result(tid, "FAIL", why=why)]
-    d = F.fresh_domain("ovl-dec")
-    snd = I.Sender.ts(out, f"{tid}/snd", I.CLIPS / "av_1080i50.ts", BASE_PORT + 20)  # dec flow 0 įėjimas (H.264; garsas nenaudojamas)
+    cap = write_capacity(pathlib.Path(out) / tid / sub / f"capacity-{gpu['uuid']}.json", gpu, nvdec=61.0)
+    d = F.fresh_domain(f"ovl-{sub}")
+    snd = I.Sender.ts(out, f"{tid}/snd-{sub}", I.CLIPS / "av_1080i50.ts", port)  # dec flow 0 įėjimas (H.264; garsas nenaudojamas)
     try:
-        p = F.FProc(out, f"{tid}/dec", "dec", d, "--flows", 3, "--port-base", BASE_PORT + 20, "--duration", 6, *v, "--device-uuid",
-                    gpu["uuid"], "--admission", "enforce", "--capacity-file", cap.parent)
+        p = F.FProc(out, f"{tid}/{sub}", "dec", d, "--flows", 3, "--port-base", port, "--duration", 6, *v, "--device-uuid",
+                    gpu["uuid"], *admission_args, "--capacity-file", cap.parent)
         # flow'ai tikrinami veikiant (baigdamas dec savo flow'us atlaisvina)
         wait_text(p, "priėmimo kontrolė (enforce): priimta", 30)
         end, dirs = time.monotonic() + 5, set()
@@ -212,7 +208,19 @@ def overload_partial(out):
         problems.append("nėra flow 1 atmetimo eilutės su skaičiais")
     if "flow 2: atmestas — nvdec" not in e:
         problems.append("nėra flow 2 atmetimo eilutės")
-    res.append(F.result(f"{tid}[dec]", "FAIL" if problems else "PASS", why="; ".join(problems) or f"exit {rc}, admission {adm}"))
+    return F.result(f"{tid}[{sub}]", "FAIL" if problems else "PASS", why="; ".join(problems) or f"exit {rc}, admission {adm}")
+
+
+def overload_partial(out):
+    tid = "overload_partial"
+    res = []
+    gpu = gpu0()
+    if gpu is None:
+        return [F.result(tid, "SKIP", why="nvidia-smi nerado GPU")]
+    if (why := I.ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    v = F.vcommon("gpu", "cuda-linear")
+    res.append(dec_partial(out, tid, "dec", gpu, BASE_PORT + 20, ["--admission", "enforce"]))
     # enc NVENC: sesijų riba 2 (Mpix/s neriboja), --flows 3 → trečias atmestas dėl nvenc_sessions (įėjimų nėra — exit 4 po laukimo)
     cap = write_capacity(pathlib.Path(out) / tid / "enc" / f"capacity-{gpu['uuid']}.json", gpu, nvdec=1000.0, nvenc=10000.0, sessions=2)
     d = F.fresh_domain("ovl-enc")
@@ -233,5 +241,17 @@ def overload_partial(out):
     return res
 
 
+def overload_default(out):
+    """Numatytoji --admission auto (planas K13): su talpos failu veikia kaip enforce — be jokios --admission parinkties
+    netelpantys srautai atmetami (exit 5). Be talpos failo — warn: tikrina overload_no_capacity[warn]."""
+    tid = "overload_default"
+    gpu = gpu0()
+    if gpu is None:
+        return [F.result(tid, "SKIP", why="nvidia-smi nerado GPU")]
+    if (why := I.ensure_clips()):
+        return [F.result(tid, "FAIL", why=why)]
+    return [dec_partial(out, tid, "capacity", gpu, BASE_PORT + 40, [])]
+
+
 TESTS = {"overload_enforce_synthetic": overload_enforce_synthetic, "overload_no_capacity": overload_no_capacity,
-         "overload_partial": overload_partial}
+         "overload_partial": overload_partial, "overload_default": overload_default}

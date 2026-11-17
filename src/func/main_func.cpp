@@ -66,9 +66,10 @@ void common(CLI::App* c, Opts& o) {
     c->add_flag("--allow-bad-clock", o.allow_bad_clock, "paleisti ir tada, kai TAI poslinkis ≠ 37 s (indeksai nesutaps su kitais procesais)");
     // Priėmimo kontrolė (planas §P4): verify ir --impl cpu — netaikoma
     c->add_option("--admission", o.admission,
-                  "priėmimo kontrolė pagal išmatuotą talpą: off | warn (numatyta: viršijimas — įspėjimas) | enforce (netelpantys srautai "
-                  "nepaleidžiami, visi netilpę — exit 5; be talpos failo — exit 1)")
-        ->check(CLI::IsMember({"off", "warn", "enforce"}));
+                  "priėmimo kontrolė pagal išmatuotą talpą: auto (numatyta: enforce, kai yra talpos failas; warn — kai nėra) | off | "
+                  "warn (viršijimas — įspėjimas) | enforce (netelpantys srautai nepaleidžiami, visi netilpę — exit 5; be talpos "
+                  "failo — exit 1)")
+        ->check(CLI::IsMember({"auto", "off", "warn", "enforce"}));
     c->add_option("--capacity-file", o.capacity_file,
                   "talpos failas (tests/perf/capacity_file.py) arba katalogas su capacity-<GPU UUID>.json (numatyta — VRAMFLOW_CAPACITY)");
     c->add_option("--admission-headroom", o.admission_headroom, "riba = talpa × atsarga (Mpix/s, VRAM; NVENC sesijoms netaikoma), numatyta 0.85")

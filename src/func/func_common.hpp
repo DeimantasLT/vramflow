@@ -66,7 +66,7 @@ struct Opts {
     std::string run_id;
     // Priėmimo kontrolė (planas §P4): off | warn (numatyta; K13) | enforce; talpos failas arba katalogas (capacity-<uuid>.json;
     // tuščias — aplinkos VRAMFLOW_CAPACITY); atsarga (riba = talpa × headroom; NVENC sesijoms netaikoma).
-    std::string admission = "warn";
+    std::string admission = "auto";  // planas K13: enforce, kai yra talpos failas; warn — kai nėra
     std::string capacity_file;
     double admission_headroom = 0.85;
     std::int64_t input_wait_ms = 0;

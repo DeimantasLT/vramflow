@@ -33,10 +33,13 @@ vienetas — viršesni, praradimas `4` — ne). Pranešime: variklis, prašoma, 
 
 ## Sprendimai (šio etapo)
 
-1. **Numatyta `--admission warn`** (K13 autorius neatsakė): daugumoje mašinų talpos failo dar nėra — `enforce` numatytai
-   sustabdytų visas esamas paleidimo komandas exit `1`. `warn` be failo — **viena** įspėjimo eilutė paleidžiant (user story 7
-   kriterijus siūlė kas 10 s — supaprastinta pagal brief'ą); viršijus — eilutė srautui, rezervacija vis tiek įrašoma, kad kiti
-   procesai matytų tikrą užimtumą. Įjungti `enforce`, kai GPU išmatuota.
+1. **Numatyta `--admission auto`** (plano sprendimas K13: `enforce`, kai yra talpos failas; `warn`, kai jo nėra; `off` — tik
+   rankiniams bandymams). Su tinkamu talpos failu numatytoji veikia kaip `enforce` — eteryje esantys srautai saugomi iškart,
+   kai GPU išmatuota; be failo — kaip `warn`: **viena** įspėjimo eilutė paleidžiant (user story 7 kriterijus siūlė kas 10 s —
+   supaprastinta), viršijus aiškų `warn` — eilutė srautui, rezervacija vis tiek įrašoma, kad kiti procesai matytų tikrą
+   užimtumą. Pirma šio etapo versija numatytąja laikė `warn` visada — tai neatitiko K13 ir pataisyta tą pačią dieną
+   (testai: `admission: numatytoji auto …`, `overload_default[capacity]`). Talpos matavimo skriptai (`tests/perf/capacity.py`,
+   `ingest_capacity.py`) funkcijas leidžia su `--admission off`, kad permatavimo neribotų senas talpos failas.
 2. **Exit `5`** — laisvas `vramflow-func` (7 — libav sargas; `vramflow-verify` 5 = konfliktas — kitas binaras).
    `enforce` be tinkamo talpos failo — exit `1` (konfigūracija).
 3. NVENC sesijos — atskiras resursas (`engine == "nvenc_sessions"`), `bound: lower_bound` reikšmės naudojamos kaip riba
@@ -57,13 +60,22 @@ Funkciniai (`tests/functional/overload.py`):
 - `overload_enforce_synthetic` — dirbtinis talpos failas (NVDEC 270 · 0,85 = 229,5 Mpix/s), 8 `ingest` procesai po 1 UDP
   šaltinį: pirmi 4 — 60 s, exit 0, `late_frames` 0, `skip_to_key` 0, `missing_frames` 0, po 1709 dekoduotų kadrų; 5–8 —
   exit 5, „nvdec: prašoma 51,84, užimta 207,36, leidžiama 229,50 Mpix/s“; domene 8 flow'ai (4 video + 4 garso).
-- `overload_no_capacity` — `enforce` be failo → exit 1 ir „talpa neišmatuota, paleiskite 70-capacity“; `warn` → 1 eilutė.
+- `overload_no_capacity` — `enforce` be failo → exit 1 ir „talpa neišmatuota, paleiskite 70-capacity“; numatytoji (`auto`) be
+  failo → `warn`, 1 eilutė.
+- `overload_default[capacity]` — `dec --flows 3` be `--admission` parinkties, talpa 1 srautui: priimtas 1, atmesti 2, exit 5
+  (numatytoji `auto` su talpos failu = `enforce`).
 - `overload_partial` — `dec --flows 3`, talpa 1 srautui: domene 1 flow, exit 5; `enc --flows 3`, sesijų riba 2: „flow 2:
   atmestas — nvenc_sessions: prašoma 1, užimta 2, leidžiama 2 sesijų“.
 
 Švarus build (PR 5 commit'as) — 0 įspėjimų; `ctest` 481 / 482 (nepavyko `gap_policy: … < 1 ms`: 1,161 ms, žinomas laiko
 testas; 3 pakartojimai iš eilės — PASS). Visas funkcinis rinkinys vieną kartą: 318 PASS, 32 INFO, 2 FAIL —
 `fiso_stall[G:middle]` ir `fsplit[composite-G]`, abu iš žinomų laiko testų sąrašo (jų tikrinamas kodas nekeistas).
+
+Pakartota atskirai tą pačią dieną. Ant `8bd366d`: švarus build — 0 įspėjimų, `ctest` 482 / 482, visas funkcinis rinkinys
+(352 testai, 2 h 25 min) — 1 FAIL: `fiso_stall[G:first]` (spragos commit'as ties 25 034 µs, riba 25 000 µs; žinomas laiko
+testas). Po numatytosios `auto` pataisos: švarus build — 0 įspėjimų, `ctest` 483 / 483, `overload_*` ir `fcomp1` — 9 / 9
+PASS (`overload_default[capacity]`: exit 5, `mode: enforce`, priimtas 1, atmesti 2); `capacity.py --func logo --n 2` su
+`VRAMFLOW_CAPACITY` aplinkoje — PASS, priėmimo eilučių harness'o procesų stderr — 0.
 
 Plano `skip_events == 0` dar netikrinamas — skaitiklis atsiras su termino vartais; vietoje jo — esamas `skip_to_key`.
 

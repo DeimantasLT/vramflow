@@ -173,9 +173,9 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   IDR / recovery point / I pjūvio; NVDEC nepavykus — programinis dekoderis; dingęs / nedekoduojamas garsas po prisijungimo iš
   naujo — tyla; gyvi šaltinio skaitikliai `--stats-file` eilutėse (`flows[n].fn`). **Riba:** laikrodis fiksuojamas pagal pirmą
   video paketą, ne PCR — srautui su VBV vėlinimu ≥ `--latency-ms` latenciją reikia didinti.
-- **Talpa ir priėmimo kontrolė** (`--admission off | warn | enforce`, `--capacity-file`, `--admission-headroom`). Talpa —
-  tik išmatuota: `scripts/linux/70-capacity.sh` (arba `tests/perf/capacity.py --n auto`) randa kiekvienos funkcijos kelią, o
-  `tests/perf/capacity_file.py <kampanija>` įrašo `capacity-<GPU UUID>.json` (NVDEC / NVENC Mpix/s su `bound`, NVENC sesijų skaičius,
+- **Talpa ir priėmimo kontrolė** (`--admission auto | off | warn | enforce`, `--capacity-file`, `--admission-headroom`). Talpa —
+  tik išmatuota: `PROFILE=knee scripts/linux/70-capacity.sh [katalogas]` randa kiekvienos funkcijos kelią
+  (`tests/perf/capacity.py --n auto`, 3 pakartojimai), o pabaigoje `tests/perf/capacity_file.py <kampanija>` įrašo `capacity-<GPU UUID>.json` (NVDEC / NVENC Mpix/s su `bound`, NVENC sesijų skaičius,
   kai kelią nulėmė tvarkyklės riba, VRAM srautui kiekvienai funkcijai, GPU UUID ir tvarkyklė). Prieš kurdamas išėjimų flow'us
   procesas rezervuoja savo srautų paklausą (Mpix/s varikliui — 1080i50 / 1080p25 = 51,84 srautui, NVENC sesijos, VRAM baitai)
   knygoje šalia domeno (`<domenas>.vramflow/*.adm`, failas procesui su `flock` — po `kill -9` rezervacija dingsta iškart;
@@ -184,9 +184,9 @@ README.md 6 skyriuje; visi parametrai — `--help`. Kiekvienas paleidimas rašo 
   domene nėra), pranešime variklis ir skaičiai (`flow 4: atmestas — nvdec: prašoma 51,84, užimta 207,36, leidžiama 229,50
   Mpix/s`); nė vieno — exit `5` iškart, dalis — priimtieji veikia, pabaigoje exit `5`. Tikrinama: `ingest`, `dec` — NVDEC +
   VRAM (išmatuotas arba įvertis); `enc` NVENC — NVENC Mpix/s + sesijos + VRAM (jei išmatuotas); `enc` x264, `gen`, `gfxgen`,
-  `logo`, `composite` — tik VRAM, jei talpos faile yra `functions.<žymė>`; `verify` ir `--impl cpu` — netaikoma. Numatyta `warn`
-  (dauguma mašinų talpos failo dar neturi; K13): be failo — viena įspėjimo eilutė, viršijus — įspėjimas; `enforce` be failo —
-  exit `1` („talpa neišmatuota, paleiskite 70-capacity“). Kita GPU (UUID) — failas nenaudojamas; kita tvarkyklė arba
+  `logo`, `composite` — tik VRAM, jei talpos faile yra `functions.<žymė>`; `verify` ir `--impl cpu` — netaikoma. Numatyta `auto`
+  (plano sprendimas K13): su talpos failu — kaip `enforce`, be failo — kaip `warn` (viena įspėjimo eilutė); aiškus `enforce` be
+  failo — exit `1` („talpa neišmatuota, paleiskite 70-capacity“); talpos matavimo skriptai funkcijas leidžia su `--admission off`. Kita GPU (UUID) — failas nenaudojamas; kita tvarkyklė arba
   `lower_bound` — įspėjimas. Riba: knyga mato tik VRAMFlow procesus tame pačiame domene ir GPU; VRAM lyginamas su visa GPU
   atmintimi, ne su laisva.
 - **Sąveika su MXL įrankiais.** `mxl-info` skaito visus VRAMFlow flow'us; `mxl-gst-sink` / `mxl-gst-cuda-sink` rodo `gen` ir

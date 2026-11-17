@@ -207,6 +207,10 @@ class Procs:
         self.items = []  # (vardas, Popen, kategorija)
 
     def start(self, name, args, cat="func"):
+        # Talpos matavimas pats neturi būti ribojamas priėmimo kontrolės (numatytoji auto + VRAMFLOW_CAPACITY aplinkoje
+        # atmestų srautus virš SENOS talpos · 0,85 — kiekvienas permatavimas talpą mažintų)
+        if args and args[0] == BIN:
+            args = [*args[:2], "--admission", "off", *args[2:]]
         err = open(self.d / f"{name}.err", "w")
         p = subprocess.Popen(args, stdout=subprocess.DEVNULL if cat != "sink" else open(self.d / f"{name}.out", "w"),
                              stderr=err, env=ENV)

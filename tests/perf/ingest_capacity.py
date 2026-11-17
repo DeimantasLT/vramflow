@@ -47,7 +47,7 @@ def run_level(a, n, kw):
         args += ["--input", f"udp://127.0.0.1:{p}"]
     warm, T = 8, a.seconds
     vimpl = ["--impl", "cpu", "--storage", "host"] if cpu else ["--impl", "gpu", "--storage", "cuda-linear"]
-    ing = subprocess.Popen([FUNC_BIN, "ingest", "--domain", d, *args, "--decoder", "sw" if cpu else a.decoder, *impl,
+    ing = subprocess.Popen([FUNC_BIN, "ingest", "--admission", "off", "--domain", d, *args, "--decoder", "sw" if cpu else a.decoder, *impl,
                             "--decode-lead-ms", str(a.lead_ms), "--duration", str(T + warm + 10), "--warmup", str(warm), "--out", str(out)],
                            stdout=subprocess.DEVNULL, stderr=open(out / "ingest.err", "w"), env=ENV)
     snd = [subprocess.Popen([sys.executable, str(HERE / "ts_burst.py"), str(pathlib.Path(a.clips) / f"av_{f}.ts"), "--port", str(p),
