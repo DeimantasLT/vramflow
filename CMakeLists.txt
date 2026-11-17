@@ -78,6 +78,11 @@ if(MXLV_BUILD_TESTS)
   add_test(NAME scripts_tools COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/test_tools.sh ${CMAKE_SOURCE_DIR})
   # Vienas ritmo ciklas (planas V16): funkcijos ir libvramflow-gfx be savo wait_until / mxlSleepForNs ciklų
   add_test(NAME arch_single_loop COMMAND bash ${CMAKE_SOURCE_DIR}/tests/arch/check_single_loop.sh ${CMAKE_SOURCE_DIR})
+  # Talpos kelio paieška ir VRAM nuolydis (planas P8; gryna logika, GPU nereikia)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME perf_knee COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_knee.py)
+  endif()
 
   # Atitikties testas: v210a (fill + key) ant MXL PR #653 cuda-linear (alfa kompozitoriaus vartai)
   add_executable(vramflow-v210a-gpu-tests tests/gpu/test_v210a_cuda_linear.cpp)
