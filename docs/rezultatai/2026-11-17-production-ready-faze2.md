@@ -238,3 +238,73 @@ Sąmoningi elgsenos pokyčiai (visi — griežtesnė patikra arba matomesnė kla
 | galutinis | **0** (62 vertimo vienetai, 96 s, exit 0) |
 
 Build — 0 įspėjimų; po taisymų `ctest` 534 iš 534 (137 s), 89 funkciniai testai per pakeistą kodą — visi praėjo. `NOLINT` kode nėra nė vieno. Etapas pridėtas į `scripts/linux/run-all.sh` (`55-clang-tidy`).
+
+## 2.1 ASan + UBSan (K2, RF-3)
+
+Etapas `asan` skripte `scripts/linux/50-sanitizers.sh`: atskiras clang++-18 build'as (`-fsanitize=address,undefined`,
+`-fno-sanitize-recover=undefined`), visas `ctest`, rašytojo ir skaitytojo pora 30 s, funkciniai scenarijai (`fcomp1`,
+`ffmt_logo`, `ffmt_dec`, `ffmt_enc`, `overload_partial`, visi `faults.py`) ir `fault_domain_readonly` ne root naudotoju.
+
+Build'ui reikėjo dviejų pakeitimų `CMakeLists.txt`: C++ failams — `-fno-sanitize=vptr` (C programa `gfx_c_check.c`,
+susiejama su `libvramflow-gfx.so`, nesusiejama su C++ UBSan vykdymo biblioteka), o TSan build'e — žr. §2.2.
+
+### Radiniai
+
+| Paleidimas | Ataskaitų | Atminties klaidų (ASan) | UBSan | Nutekėjimų mūsų kode |
+|---|---|---|---|---|
+| pirmas | 132 | 0 | 0 | 1 |
+| po taisymo | 131 (`ctest` 68, pora 2, funkciniai 61) | 0 | 0 | **0** |
+
+Vienintelis mūsų radinys — testo klaida: `test_gfx_writer.cpp` testas „nežinomos alpha / mem…“ nesėkmingiems
+`vfgfx_writer_create` kvietimams naudojo tą patį kintamąjį `w`. Sutartis nesėkmės atveju `*out` nustato į `NULL`, todėl
+pirmasis rašytuvas likdavo nesunaikintas (5840 B tiesioginis nutekėjimas + rastrai). Testas pataisytas atskiru kintamuoju,
+tvirtinimai tie patys; po pataisos ASan'e — 0 ataskaitų, exit 0.
+
+Visi kiti nutekėjimai — NVIDIA WSL tvarkyklėje (`#1` rėmas): `libcuda.so.1` (262 rėmai: `cuDriverGetVersion`,
+`cuGetExportTable`), `libnvdxgdmal.so.1` (17), `libnvidia-ml.so.1` (6: `loadNVMLLibrary`, `getNVMLLibraryPath` vidinėje
+`cuosOnce` inicializacijoje; `nvmlShutdown` kviečiame) ir 4 `calloc` iš `pthread_cond_broadcast` su nežinomu (be simbolių)
+kviečiančiu moduliu. Po 48–416 B per procesą, nepriklauso nuo darbo trukmės.
+
+### Sprendimas ir būsena
+
+Autorius nusprendė (2026-11-17) **slopinimo sąrašo nedaryti**. Todėl etapo verdiktas lieka `FAIL`: `asan-ctest`
+(69 testai — visi GPU, procesas baigiasi kodu 86 dėl tvarkyklės nutekėjimų), `asan-pair-30s`, `asan-functional`,
+`asan-functional-nonroot`. Plano vertinimo taisyklė („ataskaitų mūsų kode = 0“) įvykdyta, bet K2 WSL2 aplinkoje
+neuždaromas: tai reikia pakartoti natyviame Linux su NVIDIA tvarkykle, kur `libcuda` gali elgtis kitaip.
+
+## 2.2 TSan (K2)
+
+Etapas `tsan`: atskiras build'as su `MXLV_ENABLE_TSAN=ON` (kartu su `MXLV_ENABLE_SANITIZERS` — konfigūravimo klaida,
+patikrinta), aštuoni CPU vieneto binarai, `vramflow-glue-tests "~[realtime]"`, `gen → logo → verify --impl cpu
+--storage host` ir `ingest --decoder sw`.
+
+Build'o kliūtis: `test_stats.cpp` ir `test_second_ring.cpp` skaičiuoja alokacijas savu globaliu `operator new`, o TSan
+vykdymo biblioteka turi savą — viename binare nesusiejama. Sprendimas: TSan build'e (`MXLV_TSAN`) savas `operator new`
+neapibrėžiamas ir praleidžiami (SKIP) tik du alokacijų skaičiavimo testai; kiti abiejų failų testai vykdomi. Savybė
+„be alokacijų“ toliau tikrinama release ir ASan build'uose.
+
+### Radiniai
+
+1. **`VirtualClock` lenktynės (mūsų kodas, pataisyta).** Testų laikrodį keičia variklio gija, o atkūrimo gija jį skaito
+   per `OutputPort::reopen` (`RecordingOutput::reopen` įsimena laiką). Laikrodžio sutartis teigė „viena gija“ — neteisingai.
+   `tai_` ir `mono_` dabar atominiai, sutartis pataisyta („keičia viena gija, skaityti gali bet kuri“).
+2. **`review5: B5` testai priklausė nuo gijų tvarkaraščio (mūsų testas, pataisyta autoriui leidus).** Trys testai tikrina,
+   kad sugedęs vienetas užbaigiamas vieną kartą ir daugiau nebekviečiamas, bet naudojo numatytą atkūrimą (po 1 s virtualaus
+   laiko, atskiroje gijoje). Release build'e virtualios 3 s prabėga greičiau, nei gija spėja įsijungti, todėl testai
+   praeidavo; TSan build'e gija spėja, vienetas atsigauna ir tvirtinimai krenta (180). Variklis elgėsi teisingai. Testams
+   nustatyta `retry_min_s = 0` su komentaru; tvirtinimai nepakeisti; atkūrimą tikrina atskiri D8 testai.
+3. **`ingest --decoder sw` — lenktynės `libavcodec` viduje (trečioji šalis, nepataisoma pas mus).** `av_mallocz`
+   dekoderio kadrų gijoje (`av:h264:df0`) prieš `av_buffer_unref` per `avcodec_send_packet` mūsų vienintelėje vaizdo
+   gijoje. Dekoderį kviečiame iš vienos gijos; `libavcodec` kadrų gijų sinchronizacija naudoja atominius kintamuosius
+   neinstrumentuotoje bibliotekoje, kurių TSan nemato. Neslopinama (autoriaus sprendimas); patikrinti galima tik su TSan
+   sukompiliuota FFmpeg.
+
+### Rezultatas
+
+| Paleidimas | PASS | FAIL |
+|---|---|---|
+| pirmas (build nesusiejo) | 1 | 1 |
+| po build pataisos | 11 | 2 (`mxlv-engine-unit`: 2 lenktynių ataskaitos + 2 nepraėję testai; `func-ingest-sw`) |
+| po taisymų | **12** | 1 (`func-ingest-sw` — `libavcodec`) |
+
+`mxlv-engine-unit` po taisymų: 137 testai praėjo, 1 SKIP, 0 ataskaitų. Release build — 0 įspėjimų, `ctest` 534 iš 534.

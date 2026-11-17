@@ -95,6 +95,9 @@ void check_fail_once(Rig& r, Outcome want) {
 TEST_CASE("review5: B5 — fail_unit iš process() (vienetas batch'e)", "[engine][review5][service]") {
     EngineConfig c = Rig::test_config();
     c.duration_s = 3;
+    // Atkūrimas (D8) išjungtas: tikrinamas vienkartinis užbaigimas. Su numatytu atkūrimu (po 1 s, atskiroje gijoje) vienetas
+    // atsigautų, o ar spės iki pabaigos — priklauso nuo gijų tvarkaraščio (TSan build'e — spėja; autoriaus sprendimas 2026-11-17)
+    c.retry_min_s = 0;
     Rig r(2, c);
     r.fn.on_process = [](const Batch& b, TickContext& ctx) {
         if (b.index != kF) return;
@@ -109,6 +112,9 @@ TEST_CASE("review5: B5 — fail_unit iš process() (vienetas batch'e)", "[engine
 TEST_CASE("review5: B5 — fail_unit iš end_unit po commit'o", "[engine][review5][service]") {
     EngineConfig c = Rig::test_config();
     c.duration_s = 3;
+    // Atkūrimas (D8) išjungtas: tikrinamas vienkartinis užbaigimas. Su numatytu atkūrimu (po 1 s, atskiroje gijoje) vienetas
+    // atsigautų, o ar spės iki pabaigos — priklauso nuo gijų tvarkaraščio (TSan build'e — spėja; autoriaus sprendimas 2026-11-17)
+    c.retry_min_s = 0;
     Rig r(2, c);
     r.fn.on_end_unit = [](const UnitTick& u, Outcome o, TickContext& ctx) {
         if (u.unit == 0 && u.index == kF && o == Outcome::Ready) ctx.fail_unit(0, "end_unit");
@@ -121,6 +127,9 @@ TEST_CASE("review5: B5 — fail_unit iš end_unit po commit'o", "[engine][review
 TEST_CASE("review5: B5 — fail_unit iš end_unit spragos kelyje", "[engine][review5][service]") {
     EngineConfig c = Rig::test_config();
     c.duration_s = 3;
+    // Atkūrimas (D8) išjungtas: tikrinamas vienkartinis užbaigimas. Su numatytu atkūrimu (po 1 s, atskiroje gijoje) vienetas
+    // atsigautų, o ar spės iki pabaigos — priklauso nuo gijų tvarkaraščio (TSan build'e — spėja; autoriaus sprendimas 2026-11-17)
+    c.retry_min_s = 0;
     Rig r(2, c);
     r.ins[0]->arrival = [](Index j) { return j == kF ? kNever : std::int64_t{1'200'000}; };  // vienas grain'as neateina
     r.fn.on_end_unit = [](const UnitTick& u, Outcome o, TickContext& ctx) {

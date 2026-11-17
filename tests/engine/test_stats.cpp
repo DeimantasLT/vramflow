@@ -26,6 +26,7 @@ std::atomic<std::uint64_t> g_allocs{0};
 std::vector<int>* g_escape = nullptr;
 }  // namespace
 
+#ifndef MXLV_TSAN  // TSan vykdymo biblioteka turi savą operator new (CMakeLists.txt, MXLV_ENABLE_TSAN)
 void* operator new(std::size_t n) {
     if (g_count) g_allocs.fetch_add(1, std::memory_order_relaxed);
     if (void* p = std::malloc(n != 0 ? n : 1)) return p;
@@ -33,6 +34,7 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#endif
 
 namespace {
 // Sink'as, kuris įsimena skirtumus; publish kviečia hub'o gija.
@@ -209,6 +211,9 @@ public:
 }  // namespace
 
 TEST_CASE("stats: be alokacijų tick'e", "[engine][stats][alloc]") {
+#ifdef MXLV_TSAN
+    SKIP("TSan build: alokacijų skaitiklis neįmanomas (savo operator new nėra)");
+#endif
     constexpr std::uint32_t kN = 8;
     CollectSink sink;
     VirtualClock clk(static_cast<std::uint64_t>(T(1000)));

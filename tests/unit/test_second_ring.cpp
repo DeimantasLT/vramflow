@@ -16,6 +16,7 @@ thread_local bool g_on = false;
 }  // namespace
 
 // Skaičiuojantis alokatorius (tik kai g_on — šio testo gijoje).
+#ifndef MXLV_TSAN  // TSan vykdymo biblioteka turi savą operator new (CMakeLists.txt, MXLV_ENABLE_TSAN)
 void* operator new(std::size_t n) {
     if (g_on) g_new.fetch_add(1, std::memory_order_relaxed);
     if (void* p = std::malloc(n != 0 ? n : 1)) return p;
@@ -23,8 +24,12 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#endif
 
 TEST_CASE("second_ring: 100 000 imituotų sekundžių — atmintis pastovi, be alokacijų", "[unit][second_ring]") {
+#ifdef MXLV_TSAN
+    SKIP("TSan build: alokacijų skaitiklis neįmanomas (savo operator new nėra)");
+#endif
     mxlv::SecondRing lat, loss;
     REQUIRE(lat.capacity() == 3600);
     g_new = 0;

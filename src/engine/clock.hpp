@@ -22,13 +22,14 @@ public:
     virtual void sleep_until(std::uint64_t tai_ns, const std::atomic<bool>& stop) = 0;
 };
 
-// Testų laikrodis: laikas juda tik advance / sleep_until / step. Viena gija (variklio); kitos gijos jo neliečia.
+// Testų laikrodis: laikas juda tik advance / sleep_until / step, ir keičia jį viena gija (variklio). Skaityti (now_tai,
+// now_mono_raw) gali bet kuri gija — pvz. atkūrimo gija per OutputPort::reopen (TSan, planas §2.2), todėl laikai atominiai.
 class VirtualClock final : public Clock {
 public:
     explicit VirtualClock(std::uint64_t start_tai_ns, std::int64_t start_mono_ns = 1'000'000'000);
 
-    std::uint64_t now_tai() const override { return tai_; }
-    std::int64_t now_mono_raw() const override { return mono_; }
+    std::uint64_t now_tai() const override { return tai_.load(std::memory_order_relaxed); }
+    std::int64_t now_mono_raw() const override { return mono_.load(std::memory_order_relaxed); }
     void sleep_until(std::uint64_t tai_ns, const std::atomic<bool>& stop) override;
 
     void advance(std::uint64_t ns);    // abu laikrodžiai (suplanuoti žingsniai pritaikomi pakeliui)
@@ -45,8 +46,8 @@ public:
     std::uint64_t sleeps = 0;
 
 private:
-    std::uint64_t tai_;
-    std::int64_t mono_;
+    std::atomic<std::uint64_t> tai_;
+    std::atomic<std::int64_t> mono_;
     std::int64_t mono_start_;
     bool step_pending_ = false;
     std::int64_t step_at_mono_ = 0, step_delta_ = 0;

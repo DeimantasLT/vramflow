@@ -42,13 +42,19 @@ if(MXLV_ENABLE_SANITIZERS AND MXLV_ENABLE_TSAN)
 endif()
 if(MXLV_ENABLE_SANITIZERS)
   # -fno-sanitize-recover: UBSan radinys baigia procesą (kitaip tik eilutė stderr, o exit kodas lieka 0)
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined> $<$<COMPILE_LANGUAGE:CXX>:-fno-sanitize-recover=undefined>
+  # -fno-sanitize=vptr: tipo patikrai reikia C++ UBSan vykdymo bibliotekos, o libvramflow-gfx.so naudoja ir C programa
+  # (tests/gpu/gfx_c_check.c, susiejama per clang, ne clang++) — su vptr ji nesusiejama.
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address,undefined> $<$<COMPILE_LANGUAGE:CXX>:-fno-sanitize=vptr>
+                      $<$<COMPILE_LANGUAGE:CXX>:-fno-sanitize-recover=undefined>
                       $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>)
   add_link_options(-fsanitize=address,undefined)
 endif()
 if(MXLV_ENABLE_TSAN)
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fsanitize=thread> $<$<COMPILE_LANGUAGE:CXX>:-fno-omit-frame-pointer>)
   add_link_options(-fsanitize=thread)
+  # Testai, skaičiuojantys alokacijas savu globaliu operator new, TSan build'e jo neapibrėžia (TSan vykdymo biblioteka turi
+  # savą, ir abu viename binare nesusiejami) ir praleidžia tik alokacijų skaičiavimo testus (SKIP).
+  add_compile_definitions(MXLV_TSAN=1)
 endif()
 
 add_library(mxlv_common INTERFACE)
@@ -76,8 +82,8 @@ if(MXLV_BUILD_TESTS)
   find_package(Catch2 3 CONFIG REQUIRED)
   enable_testing()
   include(Catch)
-  add_executable(mxlv-unit tests/unit/test_common.cpp tests/unit/test_format.cpp tests/unit/test_second_ring.cpp tests/unit/test_textf.cpp
-                 tests/unit/test_parse_num.cpp)
+  add_executable(mxlv-unit tests/unit/test_common.cpp tests/unit/test_format.cpp tests/unit/test_textf.cpp tests/unit/test_parse_num.cpp
+                 tests/unit/test_second_ring.cpp)
   vramflow_warnings(mxlv-unit)
   target_link_libraries(mxlv-unit PRIVATE mxlv_common Catch2::Catch2WithMain)
   catch_discover_tests(mxlv-unit)
