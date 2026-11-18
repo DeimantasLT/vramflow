@@ -308,3 +308,42 @@ neapibrėžiamas ir praleidžiami (SKIP) tik du alokacijų skaičiavimo testai; 
 | po taisymų | **12** | 1 (`func-ingest-sw` — `libavcodec`) |
 
 `mxlv-engine-unit` po taisymų: 137 testai praėjo, 1 SKIP, 0 ataskaitų. Release build — 0 įspėjimų, `ctest` 534 iš 534.
+
+## 2.6 Pilni rinkiniai po 2 fazės ir nepriklausoma peržiūra (K1, K8, S5)
+
+Būsena `1a26023`, release build. Vienas paleidimas kaip root, po jo — kaip `mxltest` (`45-nonroot.sh mxltest all`).
+
+| Rinkinys | Rezultatas | Kritę |
+|---|---|---|
+| root `ctest` | 534 / 534 | — |
+| root funkcinis (364 testai) | 325 PASS, 34 INFO, 4 SKIP, **3 FAIL** | `fiso_stall[G:last]`, `fiso_enc_audio[C:last]`, `fcomp_layer_kill[G]` |
+| `mxltest` `ctest` | **532 / 534** | `gap_policy … < 1 ms`, `gfx_writer: 32 rašytojai — viena ritmo gija` |
+| `mxltest` funkcinis | **4 FAIL** | `fiso_enc_audio[C:middle]`, `fsplit[composite-G]`, `fchain5_kill[G]`, `ingest_drift_accelerated` |
+| likučiai | procesų 0, nuomos katalogų 0 | |
+
+Kritę testai pakartoti izoliuotai, tris kartus iš eilės:
+
+- `fcomp_layer_kill`, `fchain5_kill`, `ingest_drift_accelerated` — 3 iš 3 `PASS` (A/V maks. 19,71–19,90 ms, riba 20 ms).
+- `gfx_writer: 32 rašytojai` — 15 iš 15 `PASS` (10 kaip `mxltest`, 5 kaip root).
+- `fiso_enc_audio` — iš 18 variantų × 3 paleidimų krito 3. Kiekvieną kartą tame paleidime vėlavo ir sveikas aukštupis
+  `gen` (`late_commits` 1–8): sveikiems koduotuvams trūksta 2 kadrų (647 vietoj 649) arba maks. vėlavimas viršija ribą.
+
+Visi kritę — laiko tvirtinimai apkrautoje WSL2 aplinkoje, ne logikos klaidos; ribos nekeistos. Jie įtraukti į 3 fazės
+stabilumo sąrašą kartu su jau žinomais (`gap_policy`, `fiso_stall`, `fsplit[composite-G]`). K1 (trys žali paleidimai iš
+eilės) neįvykdytas, kol 3 fazė jų nesutvarkys.
+
+### Nepriklausoma peržiūra
+
+Visos 2 fazės pakeitimų peržiūra (atskiras agentas, tik skaitymas): 0 kritinių, 2 svarbūs, 7 smulkūs radiniai.
+
+1. **Svarbus — testo tvirtinimas tapo tuščias (pataisyta, `40e7766`).** Nesėkmingi `vfgfx_writer_create` kvietimai dabar
+   prasideda nuo gyvos rankenos, todėl testas tikrina `gfx.h` sutartį „On error `*out` = NULL“. Patikra: išjungus
+   nustatymą gamybiniame kode krenta 3 tvirtinimai; grąžinus — 54 iš 54, `ctest` 534 / 534.
+2. **Svarbus — sanitizerio exit 86 be ataskaitos buvo INFO (pataisyta, `40e7766`).** Dabar FAIL; kiti exit kodai be
+   ataskaitų lieka INFO, nes laiko tvirtinimai po sanitizeriu nevertinami (release rinkiniuose jie vertinami griežtai).
+
+Atidėti smulkūs radiniai: `faults.py` likučių patikra nemato `<domain>.vramflow` nuomos katalogo; `racecheck` /
+`synccheck` vardų filtrai gali nieko neatrinkti ir rodyti INFO; po `clang-tidy` parinktys skaitomos griežčiau
+(`"10, 20"`, `--layer-*`, `"1920x1080junk"` atmetami) — reikia įrašo pakeitimų žurnale; `VirtualClock` kiti laukai
+neatominiai; `func_common.cpp` `static int ordinal` neatominis, `storage_note` `cuda-linear` spėja iš netuščių parinkčių;
+`flows.cpp` vietoj `nullptr` srauto turėtų būti `cudaStreamLegacy`.
