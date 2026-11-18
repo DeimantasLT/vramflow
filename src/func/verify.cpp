@@ -95,6 +95,15 @@ void check_invalid_payload(const VideoIn& v, const std::uint32_t* p, const std::
     if (!f.c.count("invalid_not_black_first")) f.c["invalid_not_black_first"] = i;
 }
 
+// Nerastas indeksas (missing / too_late — ne INVALID: tų laukas commit'intas) į stderr, kaip logo „praradimas“ eilutės:
+// fsplit apskaita susieja juos su funkcijos vėliais commit'ais pagal indeksą (targeted.late_hits). Ribota kNoteMax eilučių
+// kiekvienam flow'ui (atjungtas flow'as — šimtai).
+constexpr std::uint32_t kNoteMax = 256;
+void note_loss(std::uint32_t n, std::uint64_t i, const char* kind, std::vector<std::uint32_t>& noted) {
+    if (noted[n]++ < kNoteMax)
+        std::fprintf(stderr, "[verify] trūkumas: flow %u, indeksas %llu (%s)\n", n, static_cast<unsigned long long>(i), kind);
+}
+
 // Skaitikliai -> exit kodas ir proc santrauka (bendra visiems režimams).
 int summarize(Stats& st) {
     std::uint64_t verify_err = 0, capacity = 0, samples = 0;
@@ -557,6 +566,7 @@ int run_verify(const Opts& o_in) {
     // kopijuojami). Kai įėjimo grain'o nėra, o išėjimas yra (ne INVALID), jis klasifikuojamas: == paskutinis geras to paties
     // pariteto (gap_repeat — freeze), juodas (gap_black — Y 64, Cb / Cr 512 visose aktyviose grupėse) ar kita (gap_other —
     // išgalvotas turinys). Pilnam vaizdui reikia --every 1 (kitaip „paskutinis geras“ — paskutinė imtis).
+    std::vector<std::uint32_t> noted(o.flows, 0);  // note_loss: išspausdintų trūkumo eilučių skaičius kiekvienam flow'ui
     std::vector<std::array<std::vector<std::uint32_t>, 2>> good(o.flows);
     std::vector<std::array<std::uint64_t, 2>> good_idx(o.flows, {~0ull, ~0ull});
     auto is_black = [&](const std::vector<std::uint32_t>& g) {
@@ -594,10 +604,10 @@ int run_verify(const Opts& o_in) {
             mxlGrainInfo info{};
             const std::uint32_t* p = nullptr;
             auto& f = st.flows[n];
-            if (out[n].state() != runtime::InputSlot::State::Attached) { f.inc("missing"); continue; }
+            if (out[n].state() != runtime::InputSlot::State::Attached) { f.inc("missing"); note_loss(n, i, "missing", noted); continue; }
             const mxlStatus s = out[n].get(i, 0, info, p);
-            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || s == MXL_ERR_FLOW_INVALID) { f.inc("missing"); continue; }
-            if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); continue; }
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || s == MXL_ERR_FLOW_INVALID) { f.inc("missing"); note_loss(n, i, "missing", noted); continue; }
+            if (s == MXL_ERR_OUT_OF_RANGE_TOO_LATE) { f.inc("too_late"); note_loss(n, i, "too_late", noted); continue; }
             if (s != MXL_STATUS_OK) { f.inc("read_errors"); continue; }
             if (info.flags & MXL_GRAIN_FLAG_INVALID) {
                 f.inc("invalid");

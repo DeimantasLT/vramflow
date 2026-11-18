@@ -256,10 +256,40 @@ def scenario(out, name, func, tag, impl, storage, faults, aligned=False):
             "special": special, "jitter_up": I.upstream([procs["jitter"]]) if "jitter" in procs else None}
 
 
+VERIFY_LOSS = re.compile(r"\[verify\] trūkumas: flow (\d+), indeksas (\d+) \((missing|too_late)\)")
+FN_LOSS = re.compile(r"\[\w+\] praradimas: flow (\d+), indeksas (\d+) \(")
+FN_LATE = re.compile(r"\[\w+\] vėlus commit: flow (\d+), indeksas (\d+), (\d+) µs")
+
+
+def late_hits(verify_err, func_err):
+    """{flow: {indeksas: vėlavimas µs}} — verify „missing“ / „too_late“ indeksai, kuriuos funkcija commit'ino (Ready) tik po savo
+    ribos D (eilutė „vėlus commit“) ir nelaiko praradimu: per sustojimą tarp sprendimo ir commit'o laukas atsiranda po verify
+    skaitymo (lag). fsplit r01, 2026-11-18 — atkurta SIGSTOP 91 ms tik funkcijai."""
+    lost, late, res = set(), {}, {}
+    for m in FN_LOSS.finditer(func_err):
+        lost.add((int(m[1]), int(m[2])))
+    for m in FN_LATE.finditer(func_err):
+        late[(int(m[1]), int(m[2]))] = int(m[3])
+    for m in VERIFY_LOSS.finditer(verify_err):
+        k = (int(m[1]), int(m[2]))
+        if k in late and k not in lost:
+            res.setdefault(k[0], {})[k[1]] = late[k]
+    return res
+
+
+def read_err(d, name):
+    try:
+        return (pathlib.Path(d) / name).read_text(errors="replace")
+    except OSError:
+        return ""
+
+
 def check_split(r, func):
     bad = []
     sf, sv = r["fn"], r["verify"]
     ff, vfl = sf.get("flows") or [], sv.get("flows") or []
+    # verify trūkumai, kuriuos paaiškina tik funkcijos vėlus Ready commit'as (logo — eilutės pagal indeksą; composite jų neturi)
+    hits = late_hits(read_err(r["dir"], "verify.err"), read_err(r["dir"], f"{func}.err")) if r.get("dir") else {}
     # Sveiko aukštupio (gen A…) paties praradimai (eilutės „vėlus commit“ > --deadline-ms ir „praleista“) — ne funkcijos;
     # kitų procesų GPU įvykiai (pvz. perkrauto gen CUDA kontekstas H variante) gali pavėlinti ir sveiką gamintoją.
     up = r.get("upstream") or {}
@@ -273,9 +303,13 @@ def check_split(r, func):
         # Kiekvienas verify matomas trūkumas turi būti funkcijos apskaitytas: savo praradimai ARBA aukštupio spraga
         # (gap_upstream — įėjimas pateikė INVALID, pvz. gen praleistas indeksas; peržiūra 2026-11-13 p. 3: tai ne praradimas,
         # anksčiau skaičiuota in_invalid)
-        acc = fn_loss(f) + f.get("gap_upstream", 0)
+        late = hits.get(n, {})
+        acc = fn_loss(f) + f.get("gap_upstream", 0) + len(late)
         if vl > acc:
-            bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai + gap_upstream {acc}")
+            bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai + gap_upstream + vėlūs commit'ai {acc}")
+        if late and n not in r["special"]:  # sveiko vėlus pristatymas — laiko pažeidimas: liudytas GPU įvykis → INFO (b)
+            bad.append(I.Timed(f"sveiko #{n} vėlus commit po verify skaitymo: indeksai {sorted(late)} (maks. {max(late.values()) / 1000:.1f} ms)",
+                               [(i * I.FIELD_NS, i * I.FIELD_NS + us * 1000) for i, us in sorted(late.items())], flow=n))
         if n not in r["special"] and unexplained_losses(f, up) > 0:  # output_errors — be laiko (neliudijama)
             bad.append(I.Timed(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
                                f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})",

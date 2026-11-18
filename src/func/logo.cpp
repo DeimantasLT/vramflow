@@ -104,6 +104,8 @@ struct LogoFn final : engine::TickFunction {
     std::vector<std::uint32_t> job_flow;
     std::vector<engine::InCounters> seen;  // įėjimų skaitikliai po paskutinio vieneto sprendimo (spragos priežasčiai)
     std::vector<std::uint64_t> loss_lines;  // kiek praradimo eilučių išspausdinta kiekvienam flow'ui (riba kMaxLossLines)
+    std::vector<std::uint64_t> late_lines;  // kiek „vėlus commit“ eilučių (Ready po D) — ta pati riba
+    std::uint64_t late_line_ns;             // D (V20: auto 3·P/4) — vėlesnis Ready commit'as spausdinamas
     TickTimes times;  // proc_ms / wait_ms / held_ms / out_lateness — atskirai kiekvienam indeksui (pernešimas)
     std::uint64_t injected_at = ~0ull;
     std::uint64_t missing_at = ~0ull;  // paskutinis indeksas su GapBlocked vienetu (--test-fault-proc-delay-ms)
@@ -118,7 +120,8 @@ struct LogoFn final : engine::TickFunction {
            std::vector<std::uint32_t*>& s_out_, double warm_)
         : o(o_), st(st_), hub(hub_), eng(eng_), cpu(cpu_), host_gpu(host_gpu_), inter(inter_), dim(dim_), gbytes(gbytes_),
           inject_word(inject_word_), pool(pool_), dlogo(dlogo_), hlogo(hlogo_), stream(stream_), s_in(s_in_), s_out(s_out_),
-          warm(warm_), seen(o_.flows), loss_lines(o_.flows, 0) {
+          warm(warm_), seen(o_.flows), loss_lines(o_.flows, 0), late_lines(o_.flows, 0),
+          late_line_ns(static_cast<std::uint64_t>(deadline_ns(o_))) {
         jobs.reserve(o.flows);
         host_jobs.reserve(o.flows);
         job_flow.reserve(o.flows);
@@ -247,6 +250,11 @@ struct LogoFn final : engine::TickFunction {
                 const std::uint64_t t_commit = now_tai();
                 times.unit_done(ut.index, t_commit, true);
                 f.note_lateness(t_commit, ti, warm);
+                // Ready, bet commit'as po ribos D (sustojimas tarp sprendimo ir commit'o, pvz. GPU įvykis): ne praradimas, tačiau
+                // žemupis, skaitantis anksčiau, lauko nerado — eilutė pagal indeksą (fsplit apskaita, targeted.late_hits)
+                if (t_commit > ti + late_line_ns && late_lines[n]++ < kMaxLossLines)
+                    std::fprintf(stderr, "[logo] vėlus commit: flow %u, indeksas %llu, %llu µs\n", n,
+                                 static_cast<unsigned long long>(ut.index), static_cast<unsigned long long>((t_commit - ti) / 1000));
                 break;
             }
             case engine::Outcome::Lapped:
