@@ -6,13 +6,15 @@
 // docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md §4–§6; su nuolatine lengva apkrova 0 / 105 pliūpsnių, be jos 29 / 55).
 // Ką daro: kas --interval-ms (absoliutus periodas, be dreifo) užpildo --size-mb VRAM bloką (cudaMemsetAsync — device
 // užpildymo kernel'is, ta pati darbo klasė kaip tyrimo gpu_ctx_probe busy) ir palaukia jo pabaigos.
-// Kol veikia — nespausdina nieko; pabaigoje (trukmė arba SIGINT / SIGTERM) — viena santraukos eilutė į stderr.
+// Kol veikia — nespausdina nieko (išskyrus --event-ms: ilgesni užpildymai — „GPU įvykis“ su TAI pradžia); pabaigoje (trukmė arba
+// SIGINT / SIGTERM) — viena santraukos eilutė į stderr.
 // Numatytosios reikšmės — iš tyrimo (64 MB kas 5 ms). --duration 0 — iki sustabdymo. --parent-pid P — baigti ir tada, kai
 // proceso P nebėra (harness'as, nužudytas SIGKILL, neturi kaip sustabdyti „amžino“ keepwarm): PR_SET_PDEATHSIG (SIGTERM, kai
 // miršta tėvas) ir patikra kiekviename cikle (tiesioginiam tėvui — getppid pasikeitimas: nužudytas tėvas gali likti zombiu,
 // kurį kill(P, 0) dar „mato“).
 #include <cuda_runtime_api.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -75,6 +77,8 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
             break;
         }
         const auto a = clk::now();
+        timespec tai{};
+        if (k.event_ms >= 0) clock_gettime(CLOCK_TAI, &tai);  // įvykio pradžia — ta pati laiko skalė kaip mxlGetTime
         ce = cudaMemsetAsync(p, static_cast<int>(fills & 0xff), bytes, s);
         if (ce == cudaSuccess) ce = cudaStreamSynchronize(s);
         if (ce != cudaSuccess) break;
@@ -82,6 +86,8 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
         ++fills;
         fill_sum_ms += ms;
         fill_max_ms = std::max(fill_max_ms, ms);
+        if (k.event_ms >= 0 && ms > k.event_ms)
+            std::fprintf(stderr, "[keepwarm] GPU įvykis: TAI %lld%09ld trukmė %.3f ms\n", static_cast<long long>(tai.tv_sec), tai.tv_nsec, ms);
         next += period;
         const auto now = clk::now();
         if (next <= now) {  // užpildymas ilgesnis už periodą — nepasivejama (kitas — nuo dabar)

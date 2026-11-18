@@ -25,6 +25,8 @@ import time
 
 ENABLED = os.environ.get("VRAMFLOW_GPU_KEEPWARM", "1") != "0"
 SETTLE_S = 2.0  # P8 → P3 perėjimas trunka ≤ ~0,35 s; atsarga, kad testas prasidėtų jau pakilusiais taktais
+# GPU įvykio slenkstis: užpildymas (64 MB memset, įprastai ~1,1 ms) ilgesnis už periodą (5 ms) — „GPU įvykis“ eilutė
+EVENT_MS = float(os.environ.get("VRAMFLOW_KEEPWARM_EVENT_MS", "5"))
 
 
 class KeepWarm:
@@ -74,7 +76,9 @@ class KeepWarm:
         if self.log_dir is not None:
             os.makedirs(self.log_dir, exist_ok=True)
             err = open(os.path.join(str(self.log_dir), f"keepwarm-{self.starts}.err"), "w")
-        self.p = subprocess.Popen([self.func_bin, "keepwarm", "--duration", "0", "--parent-pid", str(os.getpid())],
+        # --event-ms: GPU įvykių liudytojas (užpildymas > EVENT_MS — eilutė su TAI; izoliacijos vartai, planas production-ready §3.1)
+        self.p = subprocess.Popen([self.func_bin, "keepwarm", "--duration", "0", "--parent-pid", str(os.getpid()),
+                                   "--event-ms", str(EVENT_MS)],
                                   stdout=subprocess.DEVNULL, stderr=err, env=self.env)
         self.starts += 1
         time.sleep(SETTLE_S)

@@ -212,6 +212,9 @@ struct KeepWarmOpts {
     double interval_ms = 5.0;
     double duration_s = 0;
     int parent_pid = 0;
+    // event_ms ≥ 0: kiekvienas užpildymas, trukęs ilgiau — eilutė „GPU įvykis: TAI <ns> trukmė <ms> ms“ į stderr (GPU įvykių
+    // liudytojas izoliacijos vartams, planas production-ready §3.1); < 0 — išjungta (numatyta).
+    double event_ms = -1;
 };
 int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
 

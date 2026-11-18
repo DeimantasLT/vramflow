@@ -283,6 +283,10 @@ int func_main(int argc, char** argv) {
     k->add_option("--device-uuid", o.device_uuid);
     k->add_option("--parent-pid", kw.parent_pid, "baigti, kai šio proceso nebėra (harness'ui; 0 — netikrinti)")
         ->check(CLI::NonNegativeNumber);
+    k->add_option("--event-ms", kw.event_ms,
+                  "užpildymą, trukusį ilgiau nei tiek ms, išvesti kaip „GPU įvykis: TAI <ns> trukmė <ms> ms“ (0 — kiekvieną; "
+                  "numatyta — išjungta)")
+        ->check(CLI::NonNegativeNumber);
     CLI11_PARSE(app, argc, argv);
     if (app.got_subcommand("keepwarm")) return run_keepwarm(kw, o.device_uuid);  // ne MXL funkcija: be domeno ir nuomos
     if (app.got_subcommand("ingest") && ig->count("--format") == 0) o.format = "auto";  // ingest: formatas — iš srauto

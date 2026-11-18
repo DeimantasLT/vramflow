@@ -46,6 +46,9 @@ if(MXLV_BUILD_TESTS)
 endif()
 
 if(MXLV_BUILD_TESTS)
+  # keepwarm --event-ms: GPU įvykių liudytojas izoliacijos vartams (planas production-ready §3.1); be GPU — SKIP (77)
+  add_test(NAME func_keepwarm_events COMMAND bash ${CMAKE_SOURCE_DIR}/tests/func/test_keepwarm_events.sh $<TARGET_FILE:vramflow-func>)
+  set_tests_properties(func_keepwarm_events PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
   # Chromos PSNR prieš FFmpeg progresyviam turiniui (planas §P2): kadro chroma U/V >= 60 dB, Y identiškas; lauko chroma < 56 dB.
   # Be ffmpeg (arba be psnr / zoneplate filtro) — SKIP (77).
   find_program(MXLV_FFMPEG ffmpeg)
