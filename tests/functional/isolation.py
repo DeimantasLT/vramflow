@@ -295,6 +295,73 @@ def window_losses(r, n):
     return int(sum(flt))
 
 
+def window_loss_wins(r, n):
+    """Sveiko flow'o n funkcijos praradimų sekundės gedimo lange → laiko langai [s, s + 1 s + LOSS_SLACK_NS] (sprendimas (b))."""
+    sec = (r.get("loss_s") or {}).get(n) or {}
+    lo_f = r["fault_tai"] - int(LEAD_S * 1e9)
+    return [(k * 1_000_000_000, (k + 1) * 1_000_000_000 + LOSS_SLACK_NS) for k, v in sorted(sec.items())
+            if v and (k + 1) * 1_000_000_000 > lo_f and k * 1_000_000_000 <= r["end_tai"]]
+
+
+# --- platformos įvykis (sprendimas (b), autorius 2026-11-17; planas production-ready §3.1) ------------------------------------
+# Vėlavimo / kadrų pažeidimas pažymimas INFO „platformos įvykis“ (ne PASS ir ne FAIL) tik kai: (1) VISI pažeidimai turi laiko
+# langus (Timed) ir KIEKVIENĄ langą dengia keepwarm užfiksuotas GPU įvykis (WDDM sustabdo visų procesų GPU darbą —
+# docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); (2) sveikų flow'ų pažeidimai apima VISUS sveikus flow'us (įvykis —
+# visiems, ne vienam). Bet kas be laiko (p99 mediana, po SIGCONT, mismatch), be liudininko (C — keepwarm neveikia) ar ne visiems
+# — FAIL kaip anksčiau. Ribos nekeičiamos.
+LOSS_SLACK_NS = 100_000_000  # praradimo sekundė + iki 100 ms: E + D + pabudimas visoms funkcijoms < 100 ms
+GPU_EVENT_RE = re.compile(r"GPU įvykis: TAI (\d+) trukmė ([\d.]+) ms")
+
+
+class Timed(str):
+    """Pažeidimo tekstas su laiko langais [(nuo, iki) ns TAI]; flow — sveiko flow'o numeris (None — paveikto)."""
+
+    def __new__(cls, text, wins, flow=None):
+        o = super().__new__(cls, text)
+        o.wins, o.flow = list(wins), flow
+        return o
+
+
+def gpu_events(d):
+    """keepwarm-*.err (KeepWarm log_dir; --event-ms) → surikiuoti GPU įvykiai [(pradžia, pabaiga) ns TAI]."""
+    ev = []
+    for f in sorted(pathlib.Path(d).glob("keepwarm-*.err")):
+        for m in GPU_EVENT_RE.finditer(f.read_text(errors="replace")):
+            t = int(m.group(1))
+            ev.append((t, t + round(float(m.group(2)) * 1e6)))
+    return sorted(ev)
+
+
+def _hits(w, events):
+    return [e for e in events if e[0] <= w[1] and w[0] <= e[1]]
+
+
+def platform_split(bad, healthy, events):
+    """→ (FAIL sąrašas, INFO sąrašas): viskas arba nieko — INFO tik kai visi pažeidimai liudyti (žr. aukščiau)."""
+    if not bad or not events or not all(isinstance(b, Timed) and b.wins for b in bad):
+        return list(bad), []
+    if not all(_hits(w, events) for b in bad for w in b.wins):
+        return list(bad), []
+    flows = {b.flow for b in bad if b.flow is not None}
+    if flows and not set(healthy) <= flows:
+        return list(bad), []
+    return [], list(bad)
+
+
+def verdict(bad, healthy, out):
+    """Vartų sąrašas → (būsena, prefiksas why): PASS / FAIL / INFO „platformos įvykis“ su liudininkais; healthy — sveikų flow'ų
+    numeriai, out — katalogas su keepwarm-*.err."""
+    if not bad:
+        return "PASS", ""
+    events = gpu_events(out)
+    fail, info = platform_split(bad, healthy, events)
+    if fail:
+        return "FAIL", f"{'; '.join(fail)} || "
+    seen = sorted({e for b in info for w in b.wins for e in _hits(w, events)})
+    wit = ", ".join(f"TAI {a / 1e9:.3f} s {(b - a) / 1e6:.1f} ms" for a, b in seen[:6])
+    return "INFO", f"platformos įvykis (GPU liudininkai {len(seen)}: {wit}): {'; '.join(info)} || "
+
+
 def stop_all(procs):
     for pr in procs:
         if pr is not None and pr.p.poll() is None:
@@ -615,9 +682,10 @@ def max_lateness_bad(r, what):
         worst = max(flt, key=lambda kv: kv[1] - up_delta(r, kv[0]))
         s, v = worst
         lim = base + up_delta(r, s)
-        if v > lim:
-            bad.append(f"sveiko #{n} maks. vėlavimas gedimo lange {v:.2f} ms (sek. {s}) > {lim:.2f} ms "
-                       f"(atskaita {ref:.2f}, Δup {up_delta(r, s):.2f})")
+        if v > lim:  # langas: indekso sekundė s … jos pabaiga + vėlavimas (commit'as galėjo būti kitą sekundę)
+            bad.append(Timed(f"sveiko #{n} maks. vėlavimas gedimo lange {v:.2f} ms (sek. {s}) > {lim:.2f} ms "
+                             f"(atskaita {ref:.2f}, Δup {up_delta(r, s):.2f})",
+                             [(s * 1_000_000_000, (s + 1) * 1_000_000_000 + int(v * 1e6))], flow=n))
     return bad
 
 
@@ -648,12 +716,13 @@ def healthy_bad(r):
     for n, f in zip(hv, r.get("fn_flows") or []):
         lost = window_losses(r, n)  # gedimo lange — ta pati atkarpa kaip aukštupio biudžetas (ne viso gyvenimo skaitikliai)
         if lost > budget:
-            bad.append(f"sveiko #{n} funkcijos praradimai gedimo lange {lost} > aukštupio {budget} "
-                       f"(viso gyvenimo { {k: f[k] for k in FN_LOSS if f.get(k)} })")
+            bad.append(Timed(f"sveiko #{n} funkcijos praradimai gedimo lange {lost} > aukštupio {budget} "
+                             f"(viso gyvenimo { {k: f[k] for k in FN_LOSS if f.get(k)} })", window_loss_wins(r, n), flow=n))
     for n, v in zip(hv, r.get("verify_flows") or []):
         lost = v.get("missing", 0) + v.get("invalid", 0)
-        if lost > budget:
-            bad.append(f"verify sveiko #{n} missing + invalid {lost} > aukštupio {budget}")
+        if lost > budget:  # verify laikų neturi: langai — to paties flow'o funkcijos praradimų (be jų — neliudijama)
+            bad.append(Timed(f"verify sveiko #{n} missing + invalid {lost} > aukštupio {budget}",
+                             window_loss_wins(r, n) if lost <= window_losses(r, n) else [], flow=n))
         if v.get("mismatch_fields", 0):
             bad.append(f"verify sveiko #{n} mismatch={v['mismatch_fields']}")
     bad += max_lateness_bad(r, "out_lateness")
@@ -715,8 +784,13 @@ def logo_gate(fault, r):
         cut = DEADLINE_US + (r.get("expect_us") or 0)
         lo, hi, nl_ = gap_commits_in_window(r)
         if nl_ < 3 or lo is None or hi is None or lo < cut - DEADLINE_TOL_US or hi > cut + DEADLINE_WAKE_US:
-            bad.append(f"paveikto spragų commit'ai gedimo lange ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
-                       f"[{cut - DEADLINE_TOL_US}, {cut + DEADLINE_WAKE_US}] µs (E + D − 1 ms … E + D + pabudimo riba)")
+            msg = (f"paveikto spragų commit'ai gedimo lange ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
+                   f"[{cut - DEADLINE_TOL_US}, {cut + DEADLINE_WAKE_US}] µs (E + D − 1 ms … E + D + pabudimo riba)")
+            # tik per vėlūs (ne per ankstyvi, ne per maža n) — laiko langai [T(i), T(i) + vėlavimas]
+            late = [] if nl_ < 3 or lo < cut - DEADLINE_TOL_US or r.get("gap_recent") is None else [
+                (t, t + u * 1000) for t, u in r["gap_recent"]
+                if u > cut + DEADLINE_WAKE_US and t >= r["fault_tai"] - int(LEAD_S * 1e9) and t <= r["end_tai"]]
+            bad.append(Timed(msg, late) if late else msg)
         post = r.get("post") or {}
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
                 post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):
@@ -870,8 +944,8 @@ def probe(out, name, runner, faults):
             bad = gate(fault, r)
             if r.get("post"):
                 why += f" | po SIGCONT: {r['post']}"
-            res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"N={N} {'; '.join(bad)} || " if bad else f"N={N} ") + why,
-                                after=r))
+            status, pre = verdict(bad, healthy_of(r["victim"]), out)
+            res.append(F.result(tid, status, why=f"N={N} {pre}" + why, after=r))
     return res
 
 
@@ -889,9 +963,8 @@ def fiso_kill(out):
             if r.get("err"):
                 res.append(F.result(tid, "FAIL", why=describe(r)))
                 continue
-            bad = logo_gate("kill", r)
-            res.append(F.result(tid, "FAIL" if bad else "PASS", why=(f"{'; '.join(bad)} || " if bad else "") +
-                                f"{describe(r)} | spragų verify: {r.get('gapv')}", after=r))
+            status, pre = verdict(logo_gate("kill", r), healthy_of(r["victim"]), out)
+            res.append(F.result(tid, status, why=pre + f"{describe(r)} | spragų verify: {r.get('gapv')}", after=r))
     return res
 
 

@@ -61,6 +61,11 @@ def unexplained_losses(f, up):
     sekundę s (loss_s) − aukštupio vėlūs / praleisti indeksai, kurių T(i) toje sekundėje). Indeksų atitikimas — sekundės
     tikslumu (anksčiau — viso gyvenimo sumos: aukštupio praradimas bet kada „paaiškindavo“ funkcijos praradimą bet kada).
     output_errors — aukštupis nepaaiškina niekada."""
+    return sum(unexplained_by_second(f, up).values()) + f.get("output_errors", 0)
+
+
+def unexplained_by_second(f, up):
+    """{sekundė: funkcijos praradimai, kurių aukštupis tą sekundę nepaaiškina} (tik > 0)."""
     ups = {}
     for i in up.get("late_index") or []:
         s = i * I.FIELD_NS // 1_000_000_000
@@ -70,7 +75,12 @@ def unexplained_losses(f, up):
             s = i * I.FIELD_NS // 1_000_000_000
             ups[s] = ups.get(s, 0) + 1
     fn = {int(k): v for k, v in (f.get("loss_s") or [])}
-    return sum(max(0, v - ups.get(s, 0)) for s, v in fn.items()) + f.get("output_errors", 0)
+    return {s: v - ups.get(s, 0) for s, v in sorted(fn.items()) if v > ups.get(s, 0)}
+
+
+def unexplained_wins(f, up):
+    """Nepaaiškintų praradimų laiko langai (sprendimas (b), isolation.platform_split): [s, s + 1 s + LOSS_SLACK_NS]."""
+    return [(s * 1_000_000_000, (s + 1) * 1_000_000_000 + I.LOSS_SLACK_NS) for s in unexplained_by_second(f, up)]
 
 
 def proc_mem(pid):
@@ -266,9 +276,10 @@ def check_split(r, func):
         acc = fn_loss(f) + f.get("gap_upstream", 0)
         if vl > acc:
             bad.append(f"#{n} verify missing + invalid {vl} > funkcijos praradimai + gap_upstream {acc}")
-        if n not in r["special"] and unexplained_losses(f, up) > 0:
-            bad.append(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
-                       f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})")
+        if n not in r["special"] and unexplained_losses(f, up) > 0:  # output_errors — be laiko (neliudijama)
+            bad.append(I.Timed(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
+                               f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})",
+                               [] if f.get("output_errors") else unexplained_wins(f, up), flow=n))
     if func == "composite":
         bad += layer_dropped_bad(r)
     held = ((sf.get("hist") or {}).get("held_ms") or {}).get("count", 0)
@@ -354,8 +365,8 @@ def fsplit(out):
                 res.append(F.result(tid, "FAIL", why=r["err"]))
                 continue
             bad, held = check_split(r, func)
-            res.append(F.result(tid, "PASS" if not bad else "FAIL",
-                                why=f"exit={r['rc']} held_ms count={held}; {'; '.join(bad) or 'verify --every 1: 0 neatitikimų'}"))
+            status, pre = I.verdict(bad, [healthy], out)  # sprendimas (b): liudytas GPU įvykis — INFO
+            res.append(F.result(tid, status, why=f"exit={r['rc']} held_ms count={held}; {pre or 'verify --every 1: 0 neatitikimų'}"))
     return res
 
 
