@@ -34,11 +34,14 @@ ENV = dict(os.environ, LD_LIBRARY_PATH=LIB)
 # GPU „šildymas“ (tests/perf/keepwarm.py): įjungiamas GPU variantams, išjungiamas CPU (C) variantams — per gpu_mode()
 # (vcommon jį kviečia kiekvieno varianto pradžioje); kiekvienas rezultatas įrašo, ar jis veikė (laukas keepwarm).
 KW = keepwarm.KeepWarm(FUNC_BIN, ENV)
+# host'o / VM pauzių liudytojas (hostwatch) — visiems variantams, ir C (izoliacijos vartų sprendimas (b), išplėstas 2026-11-18)
+HW = keepwarm.HostWatch(FUNC_BIN, ENV)
 
 
 def gpu_mode(impl):
-    """Prieš varianto procesus: impl gpu (H, G) — keepwarm veikia, cpu (C) — ne."""
+    """Prieš varianto procesus: impl gpu (H, G) — keepwarm veikia, cpu (C) — ne; hostwatch — visada."""
     KW.want(impl == "gpu")
+    HW.want()
 
 
 class Proc:
@@ -1192,7 +1195,7 @@ def main():
     out = pathlib.Path(a.out)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
-    KW.log_dir = out
+    KW.log_dir = HW.log_dir = out
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "f7_teeth": lambda: [f7_teeth(out)], "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),

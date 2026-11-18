@@ -27,9 +27,18 @@ ENABLED = os.environ.get("VRAMFLOW_GPU_KEEPWARM", "1") != "0"
 SETTLE_S = 2.0  # P8 → P3 perėjimas trunka ≤ ~0,35 s; atsarga, kad testas prasidėtų jau pakilusiais taktais
 # GPU įvykio slenkstis: užpildymas (64 MB memset, įprastai ~1,1 ms) ilgesnis už periodą (5 ms) — „GPU įvykis“ eilutė
 EVENT_MS = float(os.environ.get("VRAMFLOW_KEEPWARM_EVENT_MS", "5"))
+# hostwatch (host'o / VM pauzių liudytojas, visiems variantams): pabudimų kas 1 ms tarpas > 1 + HOST_EVENT_MS ms — „host įvykis“
+HOST_ENABLED = os.environ.get("VRAMFLOW_HOSTWATCH", "1") != "0"
+HOST_EVENT_MS = float(os.environ.get("VRAMFLOW_HOSTWATCH_EVENT_MS", "5"))
 
 
 class KeepWarm:
+    NAME, SETTLE = "keepwarm", SETTLE_S
+
+    def args(self):
+        # --event-ms: GPU įvykių liudytojas (užpildymas > EVENT_MS — eilutė su TAI; izoliacijos vartai, planas production-ready §3.1)
+        return ["--event-ms", str(EVENT_MS)]
+
     def __init__(self, func_bin, env=None, log_dir=None):
         self.func_bin, self.env, self.log_dir = func_bin, env, log_dir
         self.p = None
@@ -75,13 +84,11 @@ class KeepWarm:
         err = subprocess.DEVNULL
         if self.log_dir is not None:
             os.makedirs(self.log_dir, exist_ok=True)
-            err = open(os.path.join(str(self.log_dir), f"keepwarm-{self.starts}.err"), "w")
-        # --event-ms: GPU įvykių liudytojas (užpildymas > EVENT_MS — eilutė su TAI; izoliacijos vartai, planas production-ready §3.1)
-        self.p = subprocess.Popen([self.func_bin, "keepwarm", "--duration", "0", "--parent-pid", str(os.getpid()),
-                                   "--event-ms", str(EVENT_MS)],
+            err = open(os.path.join(str(self.log_dir), f"{self.NAME}-{self.starts}.err"), "w")
+        self.p = subprocess.Popen([self.func_bin, self.NAME, "--duration", "0", "--parent-pid", str(os.getpid()), *self.args()],
                                   stdout=subprocess.DEVNULL, stderr=err, env=self.env)
         self.starts += 1
-        time.sleep(SETTLE_S)
+        time.sleep(self.SETTLE)
         if self.p.poll() is not None:  # neprasidėjo (nėra GPU / binaro) — testai tęsiasi be jo, rezultatai tai parodo
             self.p = None
 
@@ -96,3 +103,19 @@ class KeepWarm:
                 self.p.kill()
                 self.p.wait()
         self.p = None
+
+
+class HostWatch(KeepWarm):
+    """`vramflow-func hostwatch` fone VISIEMS variantams (ir C): host'o planuoklės / VM pauzių liudytojas izoliacijos vartams
+    (sprendimas (b), išplėstas 2026-11-18). Ta pati gyvavimo tvarka kaip keepwarm (--parent-pid, signalai, atexit);
+    log_dir — hostwatch-N.err. GPU neliečia, todėl laukti nereikia. `VRAMFLOW_HOSTWATCH=0` išjungia."""
+    NAME, SETTLE = "hostwatch", 0.1
+
+    def args(self):
+        return ["--event-ms", str(HOST_EVENT_MS)]
+
+    def want(self, gpu=True):
+        if HOST_ENABLED and not self.off:
+            self.start()
+        else:
+            self.stop()

@@ -222,6 +222,17 @@ struct KeepWarmOpts {
 };
 int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid);
 
+// hostwatch (keepwarm.cpp): host'o planuoklės / VM pauzių liudytojas (be GPU) — miega period_ms absoliučiu periodu
+// (CLOCK_MONOTONIC); tarpas tarp dviejų pabudimų > period_ms + event_ms — eilutė „host įvykis: TAI <ns> trukmė <ms> ms“
+// (TAI — paskutinis pabudimas prieš pauzę). Izoliacijos vartams (sprendimas (b), išplėstas 2026-11-18 — ir C variantui).
+struct HostWatchOpts {
+    double period_ms = 1.0;
+    double duration_s = 0;  // 0 — iki sustabdymo (SIGINT / SIGTERM)
+    int parent_pid = 0;     // kaip keepwarm: baigti, kai harness'o nebėra
+    double event_ms = -1;   // < 0 — be įvykio eilučių (tik santrauka)
+};
+int run_hostwatch(const HostWatchOpts& h);
+
 // Vieno flow'o skaitikliai. Vardai — ataskaitoje. Tick'o kelyje be alokacijų: raktas (std::string) sukuriamas tik pirmą kartą
 // (std::less<> — paieška pagal const char*, be laikino std::string; anksčiau > 15 simbolių raktas alokuodavo kiekvieną kartą),
 // sekundžių eilės — fiksuoto dydžio žiedai (SecondRing, numatyta paskutinės 3600 s; --lateness-seconds).

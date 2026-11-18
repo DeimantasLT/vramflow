@@ -112,4 +112,56 @@ int run_keepwarm(const KeepWarmOpts& k, const std::string& device_uuid) {
     return 0;
 }
 
+int run_hostwatch(const HostWatchOpts& h) {
+    auto& stop = stop_flag();
+    const pid_t ppid0 = getppid();
+    if (h.parent_pid > 0) {
+        if (h.parent_pid == ppid0) prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (!parent_alive(h.parent_pid, ppid0)) {
+            std::fprintf(stderr, "[hostwatch] --parent-pid %d: proceso nėra\n", h.parent_pid);
+            return 0;
+        }
+    }
+    auto ns = [](clockid_t c) {
+        timespec t{};
+        clock_gettime(c, &t);
+        return static_cast<std::int64_t>(t.tv_sec) * 1'000'000'000 + t.tv_nsec;
+    };
+    const auto period = static_cast<std::int64_t>(h.period_ms * 1e6);
+    const std::int64_t limit = h.event_ms >= 0 ? period + static_cast<std::int64_t>(h.event_ms * 1e6) : INT64_MAX;
+    const std::int64_t t0 = ns(CLOCK_MONOTONIC);
+    const std::int64_t end = h.duration_s > 0 ? t0 + static_cast<std::int64_t>(h.duration_s * 1e9) : INT64_MAX;
+    // TAI — ta pati laiko skalė kaip mxlGetTime ir keepwarm įvykiai
+    std::int64_t prev = t0, prev_tai = ns(CLOCK_TAI), next = t0, gap_max = 0;
+    std::uint64_t wakes = 0, events = 0;
+    bool orphan = false;
+    while (!stop.load(std::memory_order_relaxed)) {
+        next += period;
+        const timespec ts{static_cast<time_t>(next / 1'000'000'000), static_cast<long>(next % 1'000'000'000)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR && !stop.load(std::memory_order_relaxed)) {
+        }
+        const std::int64_t now = ns(CLOCK_MONOTONIC), now_tai = ns(CLOCK_TAI);
+        ++wakes;
+        const std::int64_t gap = now - prev;
+        gap_max = std::max(gap_max, gap);
+        if (gap > limit) {
+            ++events;
+            std::fprintf(stderr, "[hostwatch] host įvykis: TAI %lld trukmė %.3f ms\n", static_cast<long long>(prev_tai),
+                         static_cast<double>(gap) / 1e6);
+        }
+        prev = now;
+        prev_tai = now_tai;
+        if (next <= now) next = now;  // pauzė ilgesnė už periodą — nepasivejama (kitas — nuo dabar)
+        if (now >= end) break;
+        if (!parent_alive(h.parent_pid, ppid0)) {  // harness'as dingo (SIGKILL) — nelikti veikti be galo
+            orphan = true;
+            break;
+        }
+    }
+    std::fprintf(stderr, "[hostwatch] baigta: %llu pabudimų kas %.1f ms, %.1f s; įvykių %llu, maks. tarpas %.3f ms%s\n",
+                 static_cast<unsigned long long>(wakes), h.period_ms, static_cast<double>(ns(CLOCK_MONOTONIC) - t0) / 1e9,
+                 static_cast<unsigned long long>(events), static_cast<double>(gap_max) / 1e6, orphan ? " (tėvinio proceso nebėra)" : "");
+    return 0;
+}
+
 }  // namespace mxlv::func

@@ -307,8 +307,8 @@ def window_loss_wins(r, n):
 # Vėlavimo / kadrų pažeidimas pažymimas INFO „platformos įvykis“ (ne PASS ir ne FAIL) tik kai: (1) VISI pažeidimai turi laiko
 # langus (Timed) ir KIEKVIENĄ langą dengia keepwarm užfiksuotas GPU įvykis (WDDM sustabdo visų procesų GPU darbą —
 # docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); (2) sveikų flow'ų pažeidimai apima VISUS sveikus flow'us (įvykis —
-# visiems, ne vienam). Bet kas be laiko (p99 mediana, po SIGCONT, mismatch), be liudininko (C — keepwarm neveikia) ar ne visiems
-# — FAIL kaip anksčiau. Ribos nekeičiamos.
+# visiems, ne vienam). Bet kas be laiko (p99 mediana, po SIGCONT, mismatch), be liudininko ar ne visiems — FAIL kaip anksčiau.
+# Ribos nekeičiamos. 2026-11-18: liudininkas — ir hostwatch (host'o / VM pauzė; veikia visiems variantams, ir C).
 LOSS_SLACK_NS = 100_000_000  # praradimo sekundė + iki 100 ms: E + D + pabudimas visoms funkcijoms < 100 ms
 GPU_EVENT_RE = re.compile(r"GPU įvykis: TAI (\d+) trukmė ([\d.]+) ms")
 
@@ -322,14 +322,32 @@ class Timed(str):
         return o
 
 
-def gpu_events(d):
-    """keepwarm-*.err (KeepWarm log_dir; --event-ms) → surikiuoti GPU įvykiai [(pradžia, pabaiga) ns TAI]."""
+def _events(d, glob, rx):
     ev = []
-    for f in sorted(pathlib.Path(d).glob("keepwarm-*.err")):
-        for m in GPU_EVENT_RE.finditer(f.read_text(errors="replace")):
+    for f in sorted(pathlib.Path(d).glob(glob)):
+        for m in rx.finditer(f.read_text(errors="replace")):
             t = int(m.group(1))
             ev.append((t, t + round(float(m.group(2)) * 1e6)))
     return sorted(ev)
+
+
+def gpu_events(d):
+    """keepwarm-*.err (KeepWarm log_dir; --event-ms) → surikiuoti GPU įvykiai [(pradžia, pabaiga) ns TAI]."""
+    return _events(d, "keepwarm-*.err", GPU_EVENT_RE)
+
+
+# (b) išplėsta 2026-11-18 (autorius: „CPU liudininkas“): host'o planuoklės / VM pauzė — hostwatch-*.err (HostWatch, visiems
+# variantams ir C). Tos pačios taisyklės: kiekvienas langas dengiamas, visi sveiki; be liudininko — FAIL.
+HOST_EVENT_RE = re.compile(r"host įvykis: TAI (\d+) trukmė ([\d.]+) ms")
+
+
+def host_events(d):
+    return _events(d, "hostwatch-*.err", HOST_EVENT_RE)
+
+
+def platform_events(d):
+    """GPU ir host liudininkų įvykiai kartu [(pradžia, pabaiga) ns TAI]."""
+    return sorted(gpu_events(d) + host_events(d))
 
 
 def _hits(w, events):
@@ -353,13 +371,14 @@ def verdict(bad, healthy, out):
     numeriai, out — katalogas su keepwarm-*.err."""
     if not bad:
         return "PASS", ""
-    events = gpu_events(out)
+    gpu = set(gpu_events(out))
+    events = sorted(gpu | set(host_events(out)))
     fail, info = platform_split(bad, healthy, events)
     if fail:
         return "FAIL", f"{'; '.join(fail)} || "
     seen = sorted({e for b in info for w in b.wins for e in _hits(w, events)})
-    wit = ", ".join(f"TAI {a / 1e9:.3f} s {(b - a) / 1e6:.1f} ms" for a, b in seen[:6])
-    return "INFO", f"platformos įvykis (GPU liudininkai {len(seen)}: {wit}): {'; '.join(info)} || "
+    wit = ", ".join(f"{'GPU' if (a, b) in gpu else 'host'} TAI {a / 1e9:.3f} s {(b - a) / 1e6:.1f} ms" for a, b in seen[:6])
+    return "INFO", f"platformos įvykis (liudininkai {len(seen)}: {wit}): {'; '.join(info)} || "
 
 
 def stop_all(procs):

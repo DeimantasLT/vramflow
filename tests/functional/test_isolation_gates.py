@@ -55,6 +55,7 @@ def main():
     if (lo, hi, n) != (1, 2, 4):
         bad.append(f"be gap_recent: {(lo, hi, n)}")
     bad += platform_cases()
+    bad += late_delivery_cases()
     print("PASS" if not bad else f"FAIL: {bad}")
     return 1 if bad else 0
 
@@ -111,12 +112,59 @@ def platform_cases():
         st2, _ = I.verdict([I.Timed("sveiko #3 nepaaiškinti", [w], flow=3), "held_ms tuščia"], [3], d)
     if (st, st2) != ("INFO", "FAIL"):
         bad.append(f"verdict fsplit: {st}, {st2}")
+    # (b) išplėsta 2026-11-18: host'o pauzė (hostwatch-*.err; ir C variantui, be keepwarm) — toks pat liudininkas
+    with tempfile.TemporaryDirectory() as d:
+        pathlib.Path(d, "hostwatch-0.err").write_text(f"[hostwatch] host įvykis: TAI {s * S + 200_000_000} trukmė 91.100 ms\n"
+                                                      "[hostwatch] baigta: 10 pabudimų\n")
+        st3, pre3 = I.verdict([I.Timed("sveiko #3 nepaaiškinti", [w], flow=3)], [3], d)
+        ev = I.platform_events(d)
+    if st3 != "INFO" or "host" not in pre3 or ev != [(s * S + 200_000_000, s * S + 200_000_000 + 91_100_000)]:
+        bad.append(f"verdict host: {st3}, {pre3[:80]}, {ev}")
     # keepwarm-*.err → [(pradžia, pabaiga)] ns
     with tempfile.TemporaryDirectory() as d:
         pathlib.Path(d, "keepwarm-1.err").write_text("[keepwarm] GPU įvykis: TAI 1795009526012345678 trukmė 16.084 ms\nkita\n")
         ev = I.gpu_events(d)
     if ev != [(1795009526012345678, 1795009526012345678 + 16_084_000)]:
         bad.append(f"gpu_events: {ev}")
+    return bad
+
+
+def late_delivery_cases():
+    """fsplit r01 (2026-11-18): per 91 ms sustojimą logo laukas jau Ready, commit'as — po verify skaitymo (lag 4 laukai = 80 ms):
+    verify „missing“, funkcija — fields_ok. Toks indeksas apskaitomas tik pagal funkcijos eilutę „vėlus commit“ (Ready po D);
+    sveikam flow'ui tai laiko pažeidimas (Timed — sprendimas (b)), ne paprasta apskaitos eilutė."""
+    import tempfile
+    import targeted as T
+    bad = []
+    i0 = 89751406305
+    ferr = "".join(f"[logo] praradimas: flow 1, indeksas {i0 + k} (late_skips)\n" for k in (0, 1, 2, 5)) + \
+        f"[logo] vėlus commit: flow 1, indeksas {i0 + 3}, 91059 µs\n[logo] vėlus commit: flow 1, indeksas {i0 + 9}, 31000 µs\n"
+    verr = f"[verify] trūkumas: flow 1, indeksas {i0} (missing)\n" + \
+        "".join(f"[verify] trūkumas: flow 1, indeksas {i0 + k} (invalid_skipped)\n" for k in (1, 2, 5)) + \
+        f"[verify] trūkumas: flow 1, indeksas {i0 + 3} (missing)\n[verify] trūkumas: flow 1, indeksas {i0 + 4} (missing)\n"
+    got = T.late_hits(verr, ferr)
+    if got != {1: {i0 + 3: 91059}}:  # i0 — praradimas; i0+4 — be vėlaus commit'o eilutės; i0+9 — verify matė
+        bad.append(f"late_hits: {got}")
+    with tempfile.TemporaryDirectory() as d:
+        pathlib.Path(d, "logo.err").write_text(ferr)
+        pathlib.Path(d, "verify.err").write_text(verr.replace(f"indeksas {i0 + 4} (missing)", f"indeksas {i0 + 4} (invalid_skipped)"))
+        fl = {"late_skips": 4, "loss_s": [[i0 * I.FIELD_NS // S, 4]], "gap_upstream": 1}
+        vv = {"samples": 700, "missing": 2, "invalid": 4}  # 6 = 4 praradimai + 1 aukštupio spraga + 1 vėlus commit
+        mk = lambda: {"fn": {"flows": [{}, fl], "hist": {"held_ms": {"count": 3}}}, "verify": {"flows": [{"samples": 700}, vv]},
+                      "special": {0}, "upstream": {"late_index": [i0 + k for k in (0, 1, 2, 5)]}, "dir": pathlib.Path(d)}
+        orig_n, T.N = T.N, 2
+        try:
+            got, _ = T.check_split(mk(), "logo")
+            vv["missing"] = 3  # dar vienas nepaaiškintas — paprasta apskaitos eilutė (FAIL)
+            got2, _ = T.check_split(mk(), "logo")
+        finally:
+            T.N = orig_n
+    t = i0 * I.FIELD_NS + I.FIELD_NS * 3
+    if [(str(b)[:20], getattr(b, "wins", None), getattr(b, "flow", None)) for b in got] != \
+            [("sveiko #1 vėlus comm", [(t, t + 91_059_000)], 1)]:
+        bad.append(f"check_split vėlus commit: {[(str(b), getattr(b, 'wins', None)) for b in got]}")
+    if not any(not isinstance(b, I.Timed) and "verify missing + invalid 7" in b for b in got2):
+        bad.append(f"check_split +1 nepaaiškintas: {[str(b) for b in got2]}")
     return bad
 
 

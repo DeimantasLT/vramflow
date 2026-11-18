@@ -290,8 +290,19 @@ int func_main(int argc, char** argv) {
                   "užpildymą, trukusį ilgiau nei tiek ms, išvesti kaip „GPU įvykis: TAI <ns> trukmė <ms> ms“ (0 — kiekvieną; "
                   "numatyta — išjungta)")
         ->check(CLI::NonNegativeNumber);
+    HostWatchOpts hw;
+    auto* h = app.add_subcommand("hostwatch",
+                                 "host'o planuoklės / VM pauzių liudytojas (be GPU): pabudimų tarpas > --period-ms + --event-ms — "
+                                 "„host įvykis: TAI <ns> trukmė <ms> ms“ (izoliacijos vartams)");
+    h->add_option("--period-ms", hw.period_ms, "pabudimų periodas, ms")->check(CLI::Range(0.1, 1000.0));
+    h->add_option("--duration", hw.duration_s, "trukmė, s; 0 — iki sustabdymo (SIGINT / SIGTERM; numatyta)")->check(CLI::NonNegativeNumber);
+    h->add_option("--parent-pid", hw.parent_pid, "baigti, kai šio proceso nebėra (harness'ui; 0 — netikrinti)")
+        ->check(CLI::NonNegativeNumber);
+    h->add_option("--event-ms", hw.event_ms, "pabudimų tarpą, ilgesnį už periodą daugiau nei tiek ms, išvesti kaip įvykį (numatyta — išjungta)")
+        ->check(CLI::NonNegativeNumber);
     CLI11_PARSE(app, argc, argv);
     if (app.got_subcommand("keepwarm")) return run_keepwarm(kw, o.device_uuid);  // ne MXL funkcija: be domeno ir nuomos
+    if (app.got_subcommand("hostwatch")) return run_hostwatch(hw);
     if (app.got_subcommand("ingest") && ig->count("--format") == 0) o.format = "auto";  // ingest: formatas — iš srauto
     if (!(app.got_subcommand("ingest") && o.format == "auto")) {
         std::string why;
