@@ -269,6 +269,8 @@ int run_gen(const Opts& o) {
     GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
     for (auto& v : vout)
         if (!rc && !gap_fill.prepare(v.raster, st.fatal)) rc = 2;
+    for (auto& v : vout)
+        if (!rc && !gap_fill.warm(v)) log_line("gen", "spragų kopijos kelio pašildymas nepavyko (pirmoji cuda-linear spraga gali vėluoti ~0,75 ms)");
     for (auto& v : vout) ports.emplace_back(v, gap_fill.copy(), gap_fill.flush(), gap_fill.black(v.raster));
     // Sugedęs vienetas — jo video flow'as atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports, vout, inst, [&](std::size_t n) {

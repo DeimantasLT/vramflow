@@ -1224,6 +1224,8 @@ int run_ingest(const Opts& o_in) {
     GapFill gap_fill(gap_policy(o.on_loss), !cpu);
     for (std::size_t k = 0; k < src.size() && !rc; ++k)
         if (src[k]->video && !gap_fill.prepare(vout[k].raster, st.fatal)) rc = 2;
+    for (std::size_t k = 0; k < src.size() && !rc; ++k)
+        if (src[k]->video && !gap_fill.warm(vout[k])) log_line("ingest", "spragų kopijos kelio pašildymas nepavyko (pirmoji cuda-linear spraga gali vėluoti ~0,75 ms)");
     std::vector<std::unique_ptr<engine::MxlVideoOutput>> ports(src.size());
     std::vector<std::unique_ptr<StridePort>> sports(src.size());
     for (std::size_t k = 0; k < src.size(); ++k) {

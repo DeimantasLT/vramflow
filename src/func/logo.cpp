@@ -408,6 +408,8 @@ int run_logo(const Opts& o_in) {
     GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
         if (!gap_fill.prepare(out[n].raster, err)) { st.fatal = err; rc = 2; }
+    for (std::uint32_t n = 0; n < o.flows && !rc; ++n)
+        if (!gap_fill.warm(out[n])) log_line("logo", "spragų kopijos kelio pašildymas nepavyko (pirmoji cuda-linear spraga gali vėluoti ~0,75 ms)");
     for (std::uint32_t n = 0; n < o.flows; ++n) {
         ports_in.emplace_back(in[n], inst);
         ports_out.emplace_back(out[n], gap_fill.copy(), gap_fill.flush(), gap_fill.black(out[n].raster));

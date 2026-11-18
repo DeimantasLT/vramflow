@@ -14,6 +14,7 @@
 #include <string>
 
 #include "common/textf.hpp"
+#include "mxlio/slots.hpp"
 
 namespace mxlv::func {
 
@@ -153,7 +154,31 @@ GapFill::GapFill(engine::GapPolicy p, bool cuda) : policy_(p), cuda_(cuda) {
 GapFill::~GapFill() {
     for (Black& b : black_)
         if (cuda_ && b.p) cudaFree(b.p);
+    if (warm_buf_) cudaFree(warm_buf_);
     if (stream_) cudaStreamDestroy(static_cast<cudaStream_t>(stream_));
+}
+
+bool GapFill::warm(const VideoOut& v) {
+    if (!cuda_ || policy_ == engine::GapPolicy::Leave) return true;  // leave — kopijų nėra
+    cudaStream_t s = static_cast<cudaStream_t>(stream_);
+    if (!s) return false;
+    if (!warm_buf_ && cudaMalloc(&warm_buf_, kWarmBytes) != cudaSuccess) {
+        cudaGetLastError();
+        warm_buf_ = nullptr;
+        return false;
+    }
+    const std::size_t n = std::min<std::size_t>(kWarmBytes, vramflow::gfx::grain_bytes(v.raster));
+    for (const mxlGrainStorage& g : v.slots)
+        if (cudaMemcpyAsync(warm_buf_, slot_ptr(v.layout, g), n, cudaMemcpyDeviceToDevice, s) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+    if (cudaStreamSynchronize(s) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    warmed_ += v.slots.size();
+    return true;
 }
 
 bool GapFill::prepare(const vramflow::gfx::Raster& r, std::string& err) {

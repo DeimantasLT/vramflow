@@ -67,7 +67,10 @@ engine::GapPolicy gap_policy(const std::string& s);
 // prieš variklio run(), tick'e nealokuojama) visoms politikoms, išskyrus leave: invalid politikai juodas grain'as — INVALID
 // grain'o turinys (kartą slot'ui per gedimą, VideoOut::paint_black), kad žymės nepaisantis skaitytojas nematytų pasenusio
 // kadro; kaina — vienas grain'as kiekvienam rastrui (black_bytes).
-// Naudojimas: prepare(v.raster) → ports.emplace_back(v, gf.copy(), gf.flush(), gf.black(v.raster)).
+// Naudojimas: prepare(v.raster) → warm(v) → ports.emplace_back(v, gf.copy(), gf.flush(), gf.black(v.raster)).
+// warm (planas production-ready §3.1): pirmoji D2D kopija į cuda-linear išėjimo alokaciją kainavo 0,73–0,80 ms vien
+// cudaMemcpyAsync iškvietime (vėlesnės ~50 µs) — pirmos spragos commit'as vėluodavo ~0,75 ms. Todėl paleidimo metu savo
+// stream'u nuskaitoma po kWarmBytes iš kiekvieno išėjimo slot'o į vidinį buferį (į bendrą atmintį nerašoma) ir sinchronizuojama.
 // cuda — išėjimai cuda-linear; tada konstruktorius kviečiamas po cudaSetDevice (stream'as ir buferiai — tame įrenginyje).
 class GapFill {
 public:
@@ -81,8 +84,12 @@ public:
     std::function<bool()> flush() const;                      // host — tuščias (kopija sinchroninė)
     const void* black(const vramflow::gfx::Raster& r) const;  // nullptr — politikai juodo nereikia / neparuošta
     std::uint64_t black_bytes() const { return black_bytes_; }  // paruoštų juodų grain'ų atmintis (VRAM, kai cuda-linear)
+    // Kopijos kelio pašildymas išėjimui v (host / leave — nieko, true); false — CUDA klaida (tik latencija, ne turinys).
+    bool warm(const VideoOut& v);
+    std::uint64_t warmed() const { return warmed_; }  // nuskaitytų slot'ų skaičius
 
 private:
+    static constexpr std::size_t kWarmBytes = 256;
     struct Black {
         vramflow::gfx::Raster r;
         void* p = nullptr;
@@ -93,6 +100,8 @@ private:
     void* stream_ = nullptr;  // cudaStream_t (antraštė be CUDA)
     std::vector<Black> black_;
     std::uint64_t black_bytes_ = 0;
+    void* warm_buf_ = nullptr;  // kWarmBytes VRAM (tik cuda)
+    std::uint64_t warmed_ = 0;
 };
 
 // „0,2-3“ → {0, 2, 3}; false — netinkamas sąrašas (tuščias — tinkamas, nieko).

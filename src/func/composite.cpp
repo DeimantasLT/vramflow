@@ -527,6 +527,8 @@ int run_composite(const Opts& o) {
     GapFill gap_fill(gap_policy(o.on_loss), !cpu && !host_gpu);
     for (auto& v : out)
         if (!rc && !gap_fill.prepare(v.raster, err)) { st.fatal = err; rc = 2; }
+    for (auto& v : out)
+        if (!rc && !gap_fill.warm(v)) log_line("composite", "spragų kopijos kelio pašildymas nepavyko (pirmoji cuda-linear spraga gali vėluoti ~0,75 ms)");
     for (auto& v : out) ports_out.emplace_back(v, gap_fill.copy(), gap_fill.flush(), gap_fill.black(v.raster));
     // Sugedęs vienetas — jo išėjimas atlaisvinamas (K-T11); atkūrimas (D8) — flow'as sukuriamas iš naujo atkūrimo gijoje.
     set_release(ports_out, out, inst, [&](std::size_t n) {

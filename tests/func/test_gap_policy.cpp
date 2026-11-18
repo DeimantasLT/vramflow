@@ -242,6 +242,39 @@ TEST_CASE("gap_policy: invalid politikai juodas grain'as paruošiamas (INVALID t
     CHECK(gl.black_bytes() == 0);
 }
 
+// Planas production-ready §3.1 (fiso_stall G:first): pirmoji D2D kopija į cuda-linear išėjimo alokaciją kainuodavo 0,73–0,80 ms
+// vien cudaMemcpyAsync iškvietime (vėliau ~50 µs) — pirmos spragos commit'as vėluodavo virš ribos. warm() paleidimo metu
+// GapFill stream'u nuskaito po 256 B iš kiekvieno slot'o (išėjimo turinys nekeičiamas; į bendrą atmintį nerašoma);
+// host saugykla ir leave politika — nieko (warmed() == 0).
+TEST_CASE("gap_policy: GapFill::warm — cuda-linear išėjimo slot'ai nuskaitomi, turinys nepakitęs; host / leave — nieko",
+          "[func][gap][mxl]") {
+    const bool cuda = GENERATE(false, true);
+    if (cuda && !have_gpu()) SKIP("nėra CUDA įrenginio");
+    if (cuda) REQUIRE(cudaSetDevice(0) == cudaSuccess);
+    Domain d(cuda ? 32 : 31);
+    VideoOut o;
+    std::string err;
+    REQUIRE(o.create(d.inst, func::video_def(func::kRoleLogo, 3, 1, k1080i), opts_for(cuda), err, k1080i));
+    o.id = func::flow_id(func::kRoleLogo, 3);
+    GapFill gf(GapPolicy::Invalid, cuda);
+    REQUIRE(gf.prepare(o.raster, err));
+    MxlVideoOutput port(o, gf.copy(), gf.flush(), gf.black(o.raster));
+    REQUIRE(commit_pattern(port, 100, cuda));
+    REQUIRE(gf.warm(o));
+    CHECK(gf.warmed() == (cuda ? o.layout.slotCount : 0u));
+    {
+        Reader r(d.inst, o.id);
+        const std::vector<std::uint8_t> b = read_grain(r.in, 100);
+        bool same = true;
+        for (std::size_t k = 0; k < b.size() && same; ++k) same = b[k] == static_cast<std::uint8_t>((100 * 7 + k) & 0xff);
+        CHECK(same);
+    }
+    GapFill gl(GapPolicy::Leave, cuda);
+    REQUIRE(gl.warm(o));
+    CHECK(gl.warmed() == 0u);
+    o.release(d.inst);
+}
+
 // Peržiūra 2026-11-13 p. 2: INVALID grain'as neša juodą turinį — žymės nepaisantis skaitytojas nemato pasenusio ring'o kadro.
 // Slot'ai užpildomi turiniu (pilnas ratas), tada visas ratas INVALID: kiekvieno grain'o turinys == juodas, juoda rašyta lygiai
 // slotCount kartų (pirmas ratas); antras INVALID ratas juodos nebeperrašo (0 rašymų), turinys vis tiek juodas; tikras turinys
