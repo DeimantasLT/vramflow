@@ -26,10 +26,14 @@
 #include <vramflow/gfx.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -180,6 +184,89 @@ struct GfxgenFn final : engine::TickFunction {
     }
 };
 
+// pace commit'ų stebėtojas (planas production-ready §3.1). Ritmo gijos commit'ų laiko gfxgen nemato (bibliotekos vidiniai
+// kabliukai iš .so neeksportuojami), todėl atskira gija kaip MXL skaitytojas tikrina kiekvieną indeksą ties T(i) + E + 0,5 ms
+// (E — skelbiama commit'o riba): grain'o nėra arba jis INVALID → tas pats indeksas tikrinamas po 2 periodų: yra — „vėlus
+// commit“, nėra — „praleista“ (eilutė su indeksu; žemupio sluoksnio nebuvimą testai sieja su šiuo indeksu). Pavėlavusi pati
+// stebėtojo gija vėlavimo nemato (rezultatas — konservatyvus: aukštupis „nekaltinamas“). Eilučių — ne daugiau kaip kMaxLines
+// flow'ui; skaitikliai (watch_late, watch_missed) — visi.
+class CommitWatch {
+public:
+    struct Flow {
+        std::string id;
+        std::uint32_t n = 0, k = 0;
+        std::uint64_t late = 0, missed = 0;
+    };
+    CommitWatch(mxlInstance inst, std::vector<Flow> flows, mxlRational rate, std::int64_t bound_ns, std::uint64_t first)
+        : inst_(inst), f_(std::move(flows)), rate_(rate), bound_ns_(bound_ns), first_(first) {
+        t_ = std::thread([this] { run(); });
+    }
+    CommitWatch(const CommitWatch&) = delete;
+    CommitWatch& operator=(const CommitWatch&) = delete;
+    ~CommitWatch() { stop(); }
+    // Sustabdo ir grąžina flow'us su skaitikliais (kviesti prieš ritmo sustabdymą — kitaip paskutiniai indeksai „praleisti“).
+    const std::vector<Flow>& stop() {
+        stop_.store(true);
+        if (t_.joinable()) t_.join();
+        return f_;
+    }
+
+private:
+    static constexpr std::uint64_t kMaxLines = 200;
+    bool present(mxlFlowReader r, std::uint64_t i) const {
+        mxlGrainInfo gi{};
+        std::uint8_t* p = nullptr;
+        return r && mxlFlowReaderGetGrainNonBlocking(r, i, &gi, &p) == MXL_STATUS_OK && gi.index == i &&
+               !(gi.flags & MXL_GRAIN_FLAG_INVALID) && gi.validSlices == gi.totalSlices;
+    }
+    void sleep_to(std::uint64_t tai) const {
+        while (!stop_.load()) {
+            const std::uint64_t now = now_tai();
+            if (now >= tai) return;
+            std::this_thread::sleep_for(std::chrono::nanoseconds(std::min<std::uint64_t>(tai - now, 20'000'000)));
+        }
+    }
+    void run() {
+        std::vector<mxlFlowReader> r(f_.size(), nullptr);
+        for (std::size_t j = 0; j < f_.size(); ++j) mxlCreateFlowReader(inst_, f_[j].id.c_str(), "", &r[j]);
+        const std::uint64_t P = mxlIndexToTimestamp(&rate_, first_ + 1) - mxlIndexToTimestamp(&rate_, first_);
+        std::vector<std::pair<std::size_t, std::uint64_t>> pend, keep;  // (flow, indeksas)
+        for (std::uint64_t i = first_; !stop_.load(); ++i) {
+            const std::uint64_t t = mxlIndexToTimestamp(&rate_, i) + static_cast<std::uint64_t>(bound_ns_) + 500'000;
+            sleep_to(t);
+            if (stop_.load()) break;
+            if (now_tai() > t + P) {  // stebėtojas pats pavėlavo — šio indekso nevertina (konservatyvu)
+                continue;
+            }
+            for (std::size_t j = 0; j < f_.size(); ++j)
+                if (!present(r[j], i)) pend.emplace_back(j, i);
+            keep.clear();
+            for (const auto& [j, pi] : pend) {
+                if (pi + 2 > i) {
+                    keep.emplace_back(j, pi);
+                    continue;
+                }
+                Flow& f = f_[j];
+                const bool late = present(r[j], pi);
+                ++(late ? f.late : f.missed);
+                if (f.late + f.missed <= kMaxLines)
+                    std::fprintf(stderr, late ? "[gfxgen] vėlus commit: flow %u/%u indeksas %llu\n" : "[gfxgen] praleista: flow %u/%u indeksas %llu\n",
+                                 f.n, f.k, static_cast<unsigned long long>(pi));
+            }
+            pend.swap(keep);
+        }
+        for (mxlFlowReader x : r)
+            if (x) mxlReleaseFlowReader(inst_, x);
+    }
+    mxlInstance inst_;
+    std::vector<Flow> f_;
+    mxlRational rate_;
+    std::int64_t bound_ns_;
+    std::uint64_t first_;
+    std::atomic<bool> stop_{false};
+    std::thread t_;
+};
+
 }  // namespace
 
 int run_gfxgen(const Opts& o) {
@@ -302,7 +389,21 @@ int run_gfxgen(const Opts& o) {
                 if (c) { st.fatal = "start_pacing: " + std::to_string(c) + " " + vfgfx_last_error(s.w); rc = 2; break; }
             }
         }
-        if (!rc) engine::SystemClock().sleep_until(end_tai, stop);  // ritmą laiko biblioteka; čia tik --duration
+        std::unique_ptr<CommitWatch> watch;
+        if (!rc) {
+            std::vector<CommitWatch::Flow> wf;
+            for (const Src& s : src) wf.push_back(CommitWatch::Flow{flow_id(kRoleGfx, s.n * 8 + s.k), s.n, s.k});
+            // nuo antro indekso: pirmas gali būti atidarytas dar prieš ritmo gijos startą
+            watch = std::make_unique<CommitWatch>(inst, std::move(wf), rate, plan.out.commit_bound_ns, idx0 + 1);
+            engine::SystemClock().sleep_until(end_tai, stop);  // ritmą laiko biblioteka; čia tik --duration
+        }
+        if (watch) {
+            const auto& wf = watch->stop();  // prieš ritmo sustabdymą — kitaip paskutiniai indeksai atrodytų praleisti
+            for (std::size_t i = 0; i < wf.size(); ++i) {
+                if (wf[i].late) st.flows[i].inc("watch_late", wf[i].late);
+                if (wf[i].missed) st.flows[i].inc("watch_missed", wf[i].missed);
+            }
+        }
         const std::uint64_t idx1 = mxlGetCurrentIndex(&rate);
         for (std::size_t i = 0; i < src.size(); ++i) {
             const int c = vfgfx_stop_pacing(src[i].w);

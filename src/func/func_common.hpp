@@ -128,6 +128,9 @@ struct Opts {
     // verify --mode composite: sluoksnio k nebuvimas indeksuose [I1, I2] — "K:I1-I2[@N]" (kartojama; @N — tik flow'ui N). absent — tame lange
     // laukiamas etalonas BE sluoksnio k; either — priimamas ir su juo, ir be jo (perėjimo langai, kai tiksli riba nežinoma).
     std::vector<std::string> layer_absent, layer_either;
+    // verify --mode composite: laukas, TIKSLIAI lygus etalonui be kurio nors sluoksnio, — layer_dropped_fields + eilutė su indeksu
+    // (ne mismatch); kodėl sluoksnio nebuvo — sprendžia harness'as (composite layer_absent, aukštupio vėlavimas). Planas production-ready §3.1.
+    bool layer_dropped_ok = false;
     // enc
     std::string encoder = "nvenc";
     std::string preset = "p4";

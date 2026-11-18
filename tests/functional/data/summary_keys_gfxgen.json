@@ -51,7 +51,9 @@
    "submits",
    "unit_failed",
    "unit_failures",
-   "unit_recoveries"
+   "unit_recoveries",
+   "watch_late",
+   "watch_missed"
   ]
  }
 }

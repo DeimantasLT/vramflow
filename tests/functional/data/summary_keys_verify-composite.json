@@ -53,6 +53,7 @@
    "invalid_black",
    "invalid_not_black",
    "invalid_not_black_first",
+   "layer_dropped_fields",
    "samples_absent",
    "samples_either_absent"
   ]

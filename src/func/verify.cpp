@@ -209,6 +209,8 @@ int verify_composite(const Opts& o, Stats& st) {
     std::vector<std::unique_ptr<Worker>> wk;
     std::vector<LayerCache> cache(static_cast<std::size_t>(N) * K);
     std::atomic<int> dumped{0};
+    std::atomic<std::uint64_t> dropped_lines{0};
+    constexpr std::uint64_t kDroppedLines = 2000;  // eilučių riba (skaitiklis — visi)
 
     auto check = [&](Worker& w, Job& job, std::vector<std::uint32_t>& base, std::vector<std::uint8_t>& exp, std::vector<gfx::Layer>& lay) {
         FlowStats& f = w.fs[job.n];
@@ -263,6 +265,21 @@ int verify_composite(const Opts& o, Stats& st) {
             if (crc32c(exp.data(), out_bytes) == act_crc) {
                 f.inc("samples_either_absent");
                 return;
+            }
+            compose(must);  // diagnostikai — pagrindinis etalonas
+        }
+        if (o.layer_dropped_ok) {  // ar tai TIKSLIAI etalonas be kurio nors sluoksnio (po vieną, tada visi)?
+            const std::uint32_t all = (K >= 32 ? ~0u : (1u << K) - 1u) & ~must;
+            for (std::uint32_t k = 0; k <= K; ++k) {
+                const std::uint32_t omit = k < K ? (1u << k) & all : all;
+                if (!omit || (k == K && K == 1)) continue;
+                if (compose(must | omit) && crc32c(exp.data(), out_bytes) == act_crc) {
+                    f.inc("layer_dropped_fields");
+                    if (dropped_lines.fetch_add(1) < kDroppedLines)
+                        std::fprintf(stderr, "[verify] layer_dropped: flow %u indeksas %llu sluoksniai 0x%x\n", o.flow_base + job.n,
+                                     static_cast<unsigned long long>(job.i), omit);
+                    return;
+                }
             }
             compose(must);  // diagnostikai — pagrindinis etalonas
         }

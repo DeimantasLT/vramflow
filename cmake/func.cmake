@@ -49,6 +49,14 @@ if(MXLV_BUILD_TESTS)
   # keepwarm --event-ms: GPU įvykių liudytojas izoliacijos vartams (planas production-ready §3.1); be GPU — SKIP (77)
   add_test(NAME func_keepwarm_events COMMAND bash ${CMAKE_SOURCE_DIR}/tests/func/test_keepwarm_events.sh $<TARGET_FILE:vramflow-func>)
   set_tests_properties(func_keepwarm_events PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+  # gfxgen pace commit'ų stebėtojas: vėlus / praleistas indeksas — eilutė su indeksu (fsplit sluoksnio nebuvimo apskaita)
+  add_test(NAME func_gfxgen_watch COMMAND bash ${CMAKE_SOURCE_DIR}/tests/func/test_gfxgen_watch.sh $<TARGET_FILE:vramflow-func>
+                                          ${CMAKE_BINARY_DIR}/gfxgen_watch)
+  set_tests_properties(func_gfxgen_watch PROPERTIES TIMEOUT 60 RESOURCE_LOCK realtime)
+  # verify --layer-dropped-ok: laukas = etalonas be sluoksnio → layer_dropped su indeksu, ne mismatch
+  add_test(NAME func_verify_layer_dropped COMMAND bash ${CMAKE_SOURCE_DIR}/tests/func/test_verify_layer_dropped.sh
+                                                  $<TARGET_FILE:vramflow-func> ${CMAKE_BINARY_DIR}/verify_layer_dropped)
+  set_tests_properties(func_verify_layer_dropped PROPERTIES TIMEOUT 90 RESOURCE_LOCK realtime)
   # Chromos PSNR prieš FFmpeg progresyviam turiniui (planas §P2): kadro chroma U/V >= 60 dB, Y identiškas; lauko chroma < 56 dB.
   # Be ffmpeg (arba be psnr / zoneplate filtro) — SKIP (77).
   find_program(MXLV_FFMPEG ffmpeg)

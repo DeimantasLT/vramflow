@@ -21,6 +21,7 @@ Testai tikrina tik iš išorės (procesai, signalai, exit kodai, santraukos, /pr
 """
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import threading
@@ -155,7 +156,7 @@ def run_func(out, sub, d, func, v, impl, storage):
                      "--deadline-ms", 30, *common)
         vf = NiceVerify(out, sub, d, "--mode", "composite", "--flows", N, "--layers", 1, "--layer-geom", "logo", "--gfx-mode",
                      "pace", "--base", "gen", "--out-format", "v210", "--every", 1, "--duration", DUR - 4, "--warmup", 1, *xy,
-                     "--opacity", "1.0", *F.vimpl(impl, storage))
+                     "--opacity", "1.0", "--layer-dropped-ok", *F.vimpl(impl, storage))
     return fn, vf
 
 
@@ -241,7 +242,7 @@ def scenario(out, name, func, tag, impl, storage, faults, aligned=False):
     sv = F.vsummary(vf, "verify-composite" if func == "composite" else "verify-logo")
     if sf is None or sv is None:
         return {"err": f"nėra santraukų ({func}={sf is not None}, verify={sv is not None})"}
-    return {"rc": rc, "fn": sf, "verify": sv, "upstream": I.upstream([p for k, p in procs.items() if k.startswith("A")]),
+    return {"rc": rc, "fn": sf, "verify": sv, "dir": pathlib.Path(out) / sub, "upstream": I.upstream([p for k, p in procs.items() if k.startswith("A")]),
             "special": special, "jitter_up": I.upstream([procs["jitter"]]) if "jitter" in procs else None}
 
 
@@ -268,10 +269,72 @@ def check_split(r, func):
         if n not in r["special"] and unexplained_losses(f, up) > 0:
             bad.append(f"sveiko #{n} aukštupio nepaaiškinti praradimai {unexplained_losses(f, up)} "
                        f"({ {k: f[k] for k in LOSS if f.get(k)} }, loss_s {f.get('loss_s')})")
+    if func == "composite":
+        bad += layer_dropped_bad(r)
     held = ((sf.get("hist") or {}).get("held_ms") or {}).get("count", 0)
     if not held:
         bad.append("held_ms tuščia — fazės neskilo (scenarijus nepatikrino skilusio indekso)")
     return bad, held
+
+
+# composite sluoksnio grįžimo histerezė (--layer-return-frames, numatyta 12 kadrų) laukais + 2 (pariteto lygiavimas)
+RETURN_FIELDS = 12 * 2 + 2
+# aukštupio vėlavimo / praleidimo indeksas gali būti iki tiek laukų prieš composite layer_absent pradžią (composite sprendžia
+# ties savo vieneto riba to paties indekso, todėl paprastai lygu; 1 — pariteto ir stebėtojo atsarga)
+START_TOL = 1
+
+
+def layer_events(path):
+    """composite.err → {n: [(X, Y)]}: sluoksnio nebuvimo intervalai [X, Y) (Y None — iki pabaigos), tik „nėra iki vieneto ribos“
+    (ne „neprisijungęs“ — paleidimo atvejis)."""
+    iv = {}
+    cur = {}
+    for m in re.finditer(r"composite: layer_(absent|present) [0-9a-f-]+?([0-9a-f]{4})/in\d+: ([^\n]*?)\(indeksas (\d+)\)",
+                         path.read_text(errors="replace") if path.exists() else ""):
+        kind, n, why, i = m.group(1), int(m.group(2), 16), m.group(3), int(m.group(4))
+        if kind == "absent":
+            cur[n] = (i, "neprisijung" in why)
+        elif n in cur:
+            x, startup = cur.pop(n)
+            iv.setdefault(n, []).append((x, i, startup))
+    for n, (x, startup) in cur.items():
+        iv.setdefault(n, []).append((x, None, startup))
+    return iv
+
+
+def layer_dropped_bad(r):
+    """Tikslus sluoksnio nebuvimo apskaitymas (autoriaus sprendimas 2026-11-18, planas production-ready §3.1): kiekvienas verify
+    layer_dropped laukas (išvestis TIKSLIAI lygi etalonui be sluoksnio) turi būti composite layer_absent intervale [X, Y), kurio
+    pradžią X pateisina gfxgen stebėtojo vėlavimas / praleidimas tam flow'ui (indeksas L, X − START_TOL ≤ L ≤ X), o laukas — ne
+    vėliau kaip paskutinis tokio intervalo aukštupio vėlavimas + histerezė (RETURN_FIELDS). Kitaip — FAIL."""
+    d = r.get("dir")
+    if d is None:
+        return ["nėra scenarijaus katalogo (layer_dropped nepatikrinta)"]
+    dropped = [(int(m.group(1)), int(m.group(2))) for m in
+               re.finditer(r"^\[verify\] layer_dropped: flow (\d+) indeksas (\d+)", (d / "verify.err").read_text(errors="replace"), re.M)]
+    if not dropped:
+        return []
+    ups = {}
+    for m in re.finditer(r"^\[gfxgen\] (?:vėlus commit|praleista): flow (\d+)/\d+ indeksas (\d+)",
+                         (d / "gfx" / "gfxgen.err").read_text(errors="replace"), re.M):
+        ups.setdefault(int(m.group(1)), []).append(int(m.group(2)))
+    iv = layer_events(d / "composite.err")
+    bad, why = [], {}
+    for n, i in dropped:
+        ok = False
+        for x, y, startup in iv.get(n, []):
+            if i < x or (y is not None and i >= y) or startup:
+                continue
+            ls = [u for u in ups.get(n, []) if x - START_TOL <= u <= (y if y is not None else i)]
+            if any(u <= x for u in ls) and i <= max(ls) + RETURN_FIELDS:
+                ok = True
+                break
+        if not ok:
+            why.setdefault(n, []).append(i)
+    for n, idx in why.items():
+        bad.append(f"#{n} layer_dropped be aukštupio priežasties {len(idx)} (pvz. indeksas {idx[0]}; composite intervalai "
+                   f"{iv.get(n, [])[:3]}, gfxgen vėlavimai {ups.get(n, [])[:5]})")
+    return bad
 
 
 SPLIT_HEALTHY = {("logo", "C"): 0, ("logo", "H"): 1, ("logo", "G"): 2, ("composite", "H"): 3, ("composite", "G"): 1}

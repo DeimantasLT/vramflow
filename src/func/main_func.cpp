@@ -172,6 +172,9 @@ int func_main(int argc, char** argv) {
     v->add_option("--opacity", o.opacity, "composite: kaip composite (K kartų)");
     v->add_option("--base", o.base, "composite: gen | none")->check(CLI::IsMember({"gen", "none"}));
     v->add_option("--out-format", o.out_format, "composite: v210 | v210a")->check(CLI::IsMember({"v210", "v210a"}));
+    v->add_flag("--layer-dropped-ok", o.layer_dropped_ok,
+                "composite: laukas, tiksliai lygus etalonui be kurio nors sluoksnio, — layer_dropped_fields ir eilutė su indeksu, ne "
+                "mismatch (sluoksnio nebuvimo priežastį vertina harness'as)");
     v->add_option("--layer-absent", o.layer_absent, "composite: K:I1-I2[@N] — indeksuose I1…I2 sluoksnio K nėra (laukiamas etalonas be jo; @N — tik flow'ui N; kartoti)");
     v->add_option("--layer-either", o.layer_either, "composite: K:I1-I2[@N] — indeksuose I1…I2 sluoksnis K gali būti arba nebūti (@N — tik flow'ui N; kartoti)");
     v->add_option("--every", o.every);
