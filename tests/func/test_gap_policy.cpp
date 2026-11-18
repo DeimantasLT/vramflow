@@ -366,9 +366,25 @@ public:
         last.store(ut.index);
     }
 };
+
+// WSL2 (branduolio leidimas su „microsoft“): gryno libmxl šuolio commit → skaitytojo grįžimas uodega čia siekia 1,22 ms
+// (tests/perf/mxl_hop_probe.cpp: p50 113 µs, 80 imčių lango max ≥ 1 ms — 0–2 iš 75; planas production-ready §3.1), todėl
+// 1 ms riba, teisinga natyviam Linux, WSL2 iš principo netelpa. Autoriaus sprendimas 2026-11-18: riba nekeičiama, WSL2 —
+// SKIP. VRAMFLOW_PLATFORM_TIMING=1 paleidžia vis tiek (matavimui).
+bool on_wsl() {
+    if (const char* e = std::getenv("VRAMFLOW_PLATFORM_TIMING"); e && std::strcmp(e, "1") == 0) return false;
+    std::FILE* f = std::fopen("/proc/sys/kernel/osrelease", "r");
+    if (!f) return false;
+    char buf[256] = {};
+    const std::size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    const std::string rel(buf, n);
+    return rel.find("microsoft") != std::string::npos || rel.find("Microsoft") != std::string::npos;
+}
 }  // namespace
 
 TEST_CASE("gap_policy: žemupio blokuojantis skaitymas spragos indekse grįžta per < 1 ms nuo spragos commit'o", "[func][gap][mxl][realtime]") {
+    if (on_wsl()) SKIP("WSL2: platformos šuolio uodega > 1 ms (mxl_hop_probe), riba — natyviam Linux; VRAMFLOW_PLATFORM_TIMING=1 — vis tiek");
     Domain d(3);
     VideoOut o;
     std::string err;
