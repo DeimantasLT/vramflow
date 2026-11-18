@@ -1827,14 +1827,18 @@ TEST_CASE("gfx_writer: nežinomos alpha / mem / pixel_format / scan reikšmės -
     CHECK(vfgfx_flow_def(&p, buf, sizeof buf, nullptr) == VFGFX_ERR_GEOMETRY);
     msgs.emplace_back(vfgfx_last_error(nullptr));
     CHECK(msgs.back().find("24/1") != std::string::npos);
-    // Nesėkmingi kūrimai — į atskirą kintamąjį: nesėkmė *out nustato į NULL, o w dar reikia sunaikinti (kitaip — LSan
-    // nutekėjimas, planas §2.1)
+    // Nesėkmingi kūrimai — į atskirą kintamąjį, kuris prieš kiekvieną kvietimą rodo į gyvą rašytuvą (pasenusi rankena):
+    // nesėkmė *out turi nustatyti į NULL (gfx.h). Ne į w: jį dar reikia sunaikinti (kitaip — LSan nutekėjimas, planas §2.1)
     FlowId f2;
-    vfgfx_writer bad = nullptr;
+    vfgfx_writer bad = w;
     CHECK(vfgfx_writer_create(d.inst, def(f2.id, 64, 16, false, 24).c_str(), nullptr, &bad) == VFGFX_ERR_GEOMETRY);
     msgs.emplace_back(vfgfx_last_error(nullptr));
+    CHECK(bad == nullptr);
+    bad = w;
     CHECK(vfgfx_writer_create(d.inst, "nonsense", nullptr, &bad) == VFGFX_ERR_INVALID_ARG);
     msgs.emplace_back(vfgfx_last_error(nullptr));
+    CHECK(bad == nullptr);
+    bad = w;
     CHECK(vfgfx_writer_create(d.inst, def(fid.id, 64, 16, false).c_str(), nullptr, &bad) == VFGFX_ERR_STATE);  // jau yra
     msgs.emplace_back(vfgfx_last_error(nullptr));
     REQUIRE(bad == nullptr);

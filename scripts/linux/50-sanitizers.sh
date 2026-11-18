@@ -52,10 +52,11 @@ add() { # id, statusas (PASS | FAIL | INFO | NOT_RUN), exit kodas, žurnalas, pa
 reports() { cat "$@" 2>/dev/null | grep -cE "$RX_REPORT"; }
 report_heads() { cat "$@" 2>/dev/null | grep -E "$RX_REPORT|SUMMARY: " | sort | uniq -c | sort -rn | head -4 | cut -c1-170 | tr '\n' ';'; }
 crashed() { [[ $1 -ge 128 ]]; }
-# ASan / TSan vertinimas: ataskaitos → FAIL; avarija → FAIL; kitaip exit 0 → PASS, ne 0 → INFO (pastaboje — kas nepraėjo)
+# ASan / TSan vertinimas: ataskaitos → FAIL; avarija → FAIL; exit 86 (sanitizerio kodas) → FAIL; kitaip exit 0 → PASS, ne 0 → INFO (pastaboje — kas nepraėjo)
 judge() { # id, exit, žurnalas, ataskaitų skaičius, pastaba
   if [[ $4 != 0 ]]; then add "$1" FAIL "$2" "$3" "sanitizerio ataskaitų: $4; $5$SUPP_NOTE"
   elif crashed "$2"; then add "$1" FAIL "$2" "$3" "avarija (signalas); $5$SUPP_NOTE"
+  elif [[ $2 == 86 ]]; then add "$1" FAIL "$2" "$3" "sanitizerio exit kodas 86 be perskaitytos ataskaitos; $5$SUPP_NOTE"
   elif [[ $2 == 0 ]]; then add "$1" PASS "$2" "$3" "ataskaitų 0; $5$SUPP_NOTE"
   else add "$1" INFO "$2" "$3" "ataskaitų 0, bet exit $2 (laiko tvirtinimai po sanitizeriu nevertinami): $5$SUPP_NOTE"; fi
 }
