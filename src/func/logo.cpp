@@ -274,6 +274,7 @@ struct LogoFn final : engine::TickFunction {
                 f.inc("gap_late_commits");
                 if (!f.c.count("gap_late_commit_min_us") || us < f.c["gap_late_commit_min_us"]) f.c["gap_late_commit_min_us"] = us;
                 if (us > f.c["gap_late_commit_max_us"]) f.c["gap_late_commit_max_us"] = us;
+                f.note_gap_late(ti, us);  // gedimo lango vartams — su T(i)
             }
                 // Kodėl: įėjimo skaitiklių pokytis nuo paskutinio šio vieneto sprendimo
                 if (c.invalid > s.invalid) loss(n, "in_invalid", ut.index, ti);

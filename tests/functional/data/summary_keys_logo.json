@@ -60,6 +60,7 @@
    "gap_late_commit_max_us",
    "gap_late_commit_min_us",
    "gap_late_commits",
+   "gap_late_recent",
    "gap_startup",
    "gap_upstream",
    "lateness_max_us",

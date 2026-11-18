@@ -393,6 +393,9 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
     rec["deadline_us"] = (sl.get("proc") or {}).get("deadline_us")
     rec["expect_us"] = (sl.get("proc") or {}).get("expect_us", 0)  # V24: fazė E (aukštupio gen skelbiama riba)
     rec["verify_last_index"] = sv.get("last_index")
+    vf_ = (sl.get("flows") or [])
+    if victim < len(vf_) and "gap_late_recent" in vf_[victim]:  # gedimo lango spragų commit'ų vartams (gap_commits_in_window)
+        rec["gap_recent"] = [tuple(x) for x in vf_[victim]["gap_late_recent"]]
     if vg is not None:
         sg = F.vsummary(vg, "verify-logo")
         rec["gapv"] = {"exit": rg, "last_index": (sg or {}).get("last_index"),
@@ -679,6 +682,19 @@ def composite_gate(fault, r):
     return bad
 
 
+def gap_commits_in_window(r):
+    """Paveikto flow'o spragų commit'ai (lo µs, hi µs, n) GEDIMO LANGE [fault_tai − LEAD_S, end_tai] iš gap_late_recent
+    ([T(i) ns, µs]; planas production-ready §3.1): paleidimo GPU įvykio spraga (visi flow'ai, prieš langą) neįskaičiuojama.
+    Be gap_recent (sena santrauka) — viso gyvenimo min / max / skaičius, kaip anksčiau."""
+    rec_ = r.get("gap_recent")
+    if rec_ is None:
+        fa = r["fn"]["affected"]
+        return fa.get("gap_late_commit_min_us"), fa.get("gap_late_commit_max_us"), fa.get("gap_late_commits", 0)
+    lo_t = (r.get("fault_tai") or 0) - int(LEAD_S * 1e9)
+    us = [u for t, u in rec_ if lo_t <= t <= (r.get("end_tai") or 0)]
+    return (min(us) if us else None), (max(us) if us else None), len(us)
+
+
 def logo_gate(fault, r):
     """V10 / V11 vartai: sveikiems — healthy_bad; paveiktam — missing_fields > 0, fiso_stall: stalls ≥ 1 ir po SIGCONT POST_S s
     be praradimų. Grąžina neatitikimų sąrašą (tuščias — PASS)."""
@@ -697,9 +713,9 @@ def logo_gate(fault, r):
         if r.get("deadline_us") != DEADLINE_US:
             bad.append(f"logo deadline_us={r.get('deadline_us')} ≠ {DEADLINE_US} (numatytoji 3·P/4)")
         cut = DEADLINE_US + (r.get("expect_us") or 0)
-        lo, hi, nl_ = fa.get("gap_late_commit_min_us"), fa.get("gap_late_commit_max_us"), fa.get("gap_late_commits", 0)
+        lo, hi, nl_ = gap_commits_in_window(r)
         if nl_ < 3 or lo is None or hi is None or lo < cut - DEADLINE_TOL_US or hi > cut + DEADLINE_WAKE_US:
-            bad.append(f"paveikto spragų commit'ai ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
+            bad.append(f"paveikto spragų commit'ai gedimo lange ties [{lo}, {hi}] µs po T(i) (n = {nl_}); laukta ≥ 3 ties "
                        f"[{cut - DEADLINE_TOL_US}, {cut + DEADLINE_WAKE_US}] µs (E + D − 1 ms … E + D + pabudimo riba)")
         post = r.get("post") or {}
         if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(

@@ -137,3 +137,23 @@ TEST_CASE("exit_code_for: priėmimo kontrolė atmetė dalį srautų → 5 abiem 
     func::admission_refused() = 0;
     CHECK(func::exit_code_for(o, 0, false, 0, st) == 0);
 }
+
+// gap_late_recent (planas production-ready §3.1): izoliacijos vartai vertina tik GEDIMO LANGO spragų commit'us — paleidimo
+// GPU įvykio spraga (visi flow'ai, ~11 s prieš gedimą) neturi patekti į paveikto flow'o spragų commit'ų vartus.
+TEST_CASE("FlowStats::note_gap_late: paskutiniai įrašai [T(i), µs] chronologiškai, žiedas ribotas", "[func][gap_late]") {
+    func::FlowStats f;
+    f.note_gap_late(1'000'000'000, 30'300);
+    f.note_gap_late(12'000'000'000, 23'744);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> v;
+    f.for_each_gap_late([&](std::uint64_t t, std::uint64_t us) { v.emplace_back(t, us); });
+    REQUIRE(v.size() == 2);
+    CHECK(v[0] == std::pair<std::uint64_t, std::uint64_t>{1'000'000'000, 30'300});
+    CHECK(v[1] == std::pair<std::uint64_t, std::uint64_t>{12'000'000'000, 23'744});
+    // perpildymas: lieka paskutiniai kGapLateRecent, seniausias pirmas
+    for (std::uint64_t i = 0; i < func::FlowStats::kGapLateRecent + 5; ++i) f.note_gap_late(100 + i, i);
+    v.clear();
+    f.for_each_gap_late([&](std::uint64_t t, std::uint64_t us) { v.emplace_back(t, us); });
+    REQUIRE(v.size() == func::FlowStats::kGapLateRecent);
+    CHECK(v.front().first == 100 + 5);
+    CHECK(v.back().second == func::FlowStats::kGapLateRecent + 4);
+}

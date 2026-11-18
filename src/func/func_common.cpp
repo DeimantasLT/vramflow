@@ -267,6 +267,15 @@ void write_summary(const Opts& o, const std::string& role, const Stats& s, const
             f.pop_back();
             f += std::string(f.size() > 1 ? "," : "") + "\"loss_s\":" + seconds_json(s.flows[i].loss_s) + "}";
         }
+        if (s.flows[i].has_gap_late()) {  // [[T(i) ns, µs], …] — paskutinės spragų commit'ų vėlavimo reikšmės
+            std::string g = "[";
+            s.flows[i].for_each_gap_late([&](std::uint64_t t, std::uint64_t us) {
+                if (g.size() > 1) g += ",";
+                g += "[" + std::to_string(t) + "," + std::to_string(us) + "]";
+            });
+            f.pop_back();
+            f += std::string(f.size() > 1 ? "," : "") + "\"gap_late_recent\":" + g + "]}";
+        }
         j += f;
     }
     j += "]";

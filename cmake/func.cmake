@@ -61,6 +61,11 @@ if(MXLV_BUILD_TESTS)
   # Be ffmpeg (arba be psnr / zoneplate filtro) — SKIP (77).
   find_program(MXLV_FFMPEG ffmpeg)
   find_package(Python3 COMPONENTS Interpreter)
+  # izoliacijos vartų logika su sintetiniais duomenimis (fiso_stall spragų commit'ai tik gedimo lange; be GPU ir procesų)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME isolation_gates COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/functional/test_isolation_gates.py)
+    set_tests_properties(isolation_gates PROPERTIES TIMEOUT 30)
+  endif()
   if(MXLV_FFMPEG AND Python3_Interpreter_FOUND)
     foreach(fmt 1080p50 1080p25 720p50)
       add_test(NAME chroma_psnr_${fmt}

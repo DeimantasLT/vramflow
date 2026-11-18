@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "common/histogram.hpp"
@@ -277,8 +278,28 @@ struct FlowStats {
         p99_s.set_capacity(n);
         loss_s.set_capacity(n);
     }
+    // gap_late_recent: paskutinių kGapLateRecent spragų commit'ų (GapLate) [T(i) ns, vėlavimas µs] — izoliacijos vartai
+    // vertina tik gedimo lango spragas (paleidimo GPU įvykio spraga, ištikusi visus flow'us, į paveikto vartus nepatenka).
+    // Fiksuoto dydžio žiedas: tick'e be alokacijų.
+    static constexpr std::size_t kGapLateRecent = 64;
+    void note_gap_late(std::uint64_t t_index, std::uint64_t us) {
+        gap_late_[gap_late_n_ % kGapLateRecent] = {t_index, us};
+        ++gap_late_n_;
+    }
+    bool has_gap_late() const { return gap_late_n_ != 0; }
+    // Seniausias → naujausias: f(T(i) ns, µs).
+    template <class F>
+    void for_each_gap_late(F f) const {
+        const std::uint64_t n = std::min<std::uint64_t>(gap_late_n_, kGapLateRecent);
+        for (std::uint64_t k = gap_late_n_ - n; k < gap_late_n_; ++k) {
+            const auto& e = gap_late_[k % kGapLateRecent];
+            f(e.first, e.second);
+        }
+    }
 
 private:
+    std::array<std::pair<std::uint64_t, std::uint64_t>, kGapLateRecent> gap_late_{};
+    std::uint64_t gap_late_n_ = 0;
     static constexpr std::uint64_t kNoSec = ~std::uint64_t{0};
     std::array<std::uint32_t, 512> cur_{};
     std::uint32_t cur_n_ = 0;
