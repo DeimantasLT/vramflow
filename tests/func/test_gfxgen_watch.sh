@@ -21,5 +21,15 @@ e2="$("$BIN" gfxgen --domain "$W/d2" --out "$W/o2" "${common[@]}" 2>&1)"
 grep -qE '^\[gfxgen\] (praleista|vėlus commit):' <<<"$e2" && { echo "FAIL (2): įprastame pace yra stebėtojo eilučių"; grep -E 'praleista|vėlus' <<<"$e2" | head -3; exit 1; }
 keys=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); print(sum(("watch_missed" in f) + ("watch_late" in f) for f in s["flows"]))' "$W/o2/summary-gfxgen.json")
 [[ $keys == 0 ]] || { echo "FAIL (2): watch_* raktai santraukoje be įvykių"; exit 1; }
+# (3) įprastas pace ant cuda-linear (G): stebėtojas neturi skaityti device payload'o — tylu kaip host'e (be GPU — praleidžiama)
+g3="be GPU — praleista"
+if nvidia-smi -L >/dev/null 2>&1; then
+  mkdir -p "$W/d3" "$W/o3"
+  e3="$("$BIN" gfxgen --domain "$W/d3" --out "$W/o3" --flows 2 --layers 1 --layer-geom logo --mode pace --duration 2 --impl gpu \
+        --storage cuda-linear --admission off 2>&1)"
+  n3=$(grep -cE '^\[gfxgen\] (praleista|vėlus commit):' <<<"$e3")
+  [[ $n3 -le 2 ]] || { echo "FAIL (3): cuda-linear įprastame pace $n3 stebėtojo eilučių"; grep -E 'praleista|vėlus' <<<"$e3" | head -3; exit 1; }
+  g3="cuda-linear — $n3 eilučių"
+fi
 rm -rf "$W"
-echo "PASS: no-submit — $n_miss praleista eilučių = watch_missed; įprastas pace — tylu"
+echo "PASS: no-submit — $n_miss praleista eilučių = watch_missed; įprastas pace — tylu; $g3"

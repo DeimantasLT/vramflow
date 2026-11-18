@@ -213,10 +213,11 @@ public:
 
 private:
     static constexpr std::uint64_t kMaxLines = 200;
+    // GetGrainSlot (timeout 0) — be payload'o: GetGrainNonBlocking cuda-linear flow'ui grąžina klaidą (payload'as — device)
     bool present(mxlFlowReader r, std::uint64_t i) const {
         mxlGrainInfo gi{};
-        std::uint8_t* p = nullptr;
-        return r && mxlFlowReaderGetGrainNonBlocking(r, i, &gi, &p) == MXL_STATUS_OK && gi.index == i &&
+        std::uint32_t slot = 0;
+        return r && mxlFlowReaderGetGrainSlot(r, i, MXL_GRAIN_VALID_SLICES_ALL, 0, &gi, &slot) == MXL_STATUS_OK && gi.index == i &&
                !(gi.flags & MXL_GRAIN_FLAG_INVALID) && gi.validSlices == gi.totalSlices;
     }
     void sleep_to(std::uint64_t tai) const {
