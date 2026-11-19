@@ -93,6 +93,8 @@ struct Stream {
     bool done = false;
     std::thread th;
     std::string error;
+    // koderis ir muxer'is paruošti arba nepavyko (error) — paleidimas laukia jo, o ne fiksuoto laiko (OK-2.1)
+    std::atomic<bool> setup_done{false};
     // statistika (rašo darbininkas; skaitoma po join)
     std::uint64_t frames_encoded = 0, packets_video = 0, packets_audio = 0, bytes_video = 0, mux_errors = 0, encode_errors = 0;
     std::uint64_t drain_until = 0, drain_dropped = 0;  // sustabdant: išleidimo riba (TAI, 0 — neribota), neišleisti kadrai
@@ -212,6 +214,7 @@ void worker(Ctx& cx, Stream& s) {
     AVPacket* pkt = av_packet_alloc();
     auto fail = [&](const std::string& e) {
         s.error = e;
+        s.setup_done.store(true, std::memory_order_release);
         std::fprintf(stderr, "[enc %d] %s\n", s.n, e.c_str());
     };
     int e = 0;
@@ -310,6 +313,7 @@ void worker(Ctx& cx, Stream& s) {
         if (e = avformat_write_header(oc, &md); e < 0) { fail("write_header: " + averr(e)); av_dict_free(&md); goto out; }
         av_dict_free(&md);
     }
+    s.setup_done.store(true, std::memory_order_release);
     // --- ciklas
     for (;;) {
         Item it;
@@ -599,8 +603,20 @@ int run_enc(const Opts& o) {
         streams.push_back(std::move(s));
     }
     for (auto& s : streams) s->th = std::thread([&cx, sp = s.get()] { worker(cx, *sp); });
-    // palaukti, kol koderiai atsidarys (13-a NVENC sesija turi aiškiai nepavykti)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    // palaukti, kol koderiai atsidarys (13-a NVENC sesija turi aiškiai nepavykti): kol kiekvienas darbininkas praneša „paruošta“
+    // arba klaidą (setup_done), ne ilgiau kaip 10 s. Anksčiau — fiksuotos 1500 ms kritiniame paleidimo kelyje (OK-2.1).
+    {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        auto all_done = [&] {
+            return std::all_of(streams.begin(), streams.end(), [](const auto& p) { return p->setup_done.load(std::memory_order_acquire); });
+        };
+        while (!all_done() && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        for (auto& s : streams)
+            if (!s->setup_done.load(std::memory_order_acquire) && !rc) {
+                st.fatal = "srautas " + std::to_string(s->n) + ": koderis neatsidarė per 10 s";
+                rc = 2;
+            }
+    }
     for (auto& s : streams)
         if (!s->error.empty() && !rc) { st.fatal = "srautas " + std::to_string(s->n) + ": " + s->error; rc = 2; }
 

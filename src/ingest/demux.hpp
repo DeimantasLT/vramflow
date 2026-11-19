@@ -84,7 +84,9 @@ public:
     // laukų tvarka, rastras, dažnis). HEVC 8 bitų 4:2:0 palaikomas (tas pats NVDEC / programinis kelias).
     bool video_format(vramflow::VideoFormat& out, std::string& why) const;
     // Kitas paketas (video arba garso; kiti srautai praleidžiami). < 0 — pabaiga / klaida / tyla (why).
-    int read(AVPacket* pkt, Kind& kind, std::string& why);
+    // arrival_tai (nebūtinas): paketo atvykimo TAI ns, jei jis perskaitytas anksčiau (zondavimo skenavimo įėjimo taškas — žr.
+    // key_field_order); 0 — paketas ką tik perskaitytas (atvykimą žymi kvietėjas).
+    int read(AVPacket* pkt, Kind& kind, std::string& why, std::int64_t* arrival_tai = nullptr);
     // HLS: #EXT-X-TARGETDURATION ns (0 — ne HLS / nežinoma); naudojama latencijai ≥ 3 segmentai (K7).
     std::int64_t hls_target_ns() const { return hls_target_ns_; }
     // B7: kuo prasidėjo zondavimo skenavimas (H.264) ir kiek paketų tam išmesta
@@ -102,6 +104,10 @@ private:
     int field_order_ = AV_FIELD_UNKNOWN;  // laukų tvarka iš rakto kadro (key_field_order)
     Entry entry_ = Entry::None;
     std::uint64_t entry_discarded_ = 0;
+    // OK-2.1: skenavimo rastas įėjimo taško paketas (IDR / recovery point / I pjūvis) ir jo atvykimo laikas — read() jį grąžina
+    // pirmą; anksčiau jis būdavo išmetamas ir dekoderis laukdavo kito rakto kadro (+1 GOP iki pirmo grain'o).
+    AVPacket* held_ = nullptr;
+    std::int64_t held_arrival_ = 0;
     int key_field_order();
 
 public:

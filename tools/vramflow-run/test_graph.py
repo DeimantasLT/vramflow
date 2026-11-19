@@ -68,6 +68,10 @@ class Logo(unittest.TestCase):
         self.assertEqual(set(ing.flows), {flow_id(7, 0), flow_id(8, 0)})
         self.assertEqual(set(logo.flows), {flow_id(2, 0)})
         self.assertEqual(enc.flows, ())
+        # OK-2.6: šaltinio spraga — esama rašytojų politika „freeze“ (paskutinis kadras ≤ --hold-ms, tada juoda), ne INVALID
+        for p in (ing, logo):
+            self.assertEqual(opt(p.argv, "--on-loss"), ["freeze"], p.name)
+        self.assertEqual(opt(enc.argv, "--on-loss"), [])
         # paleidimo vartai: logo — kai yra ingest video (logo briaunos žymas skaito paleidimo metu, ne prisijungęs);
         # enc pats laukia savo įėjimų ir žymas skaito po prisijungimo — paleidžiamas iškart (CUDA / NVENC paruošimas
         # sutampa su ingest zondavimu)
@@ -149,6 +153,8 @@ class Composite(unittest.TestCase):
         # composite sluoksnių žymas skaito paleidimo metu (sluoksnių nelaukia) — paleidžiamas, kai yra ir bazė, ir sluoksniai
         self.assertEqual(set(comp.wait_for), {flow_id(7, 0), flow_id(7, 1)} | set(gfx.flows))
         self.assertEqual(gfx.wait_for, ())
+        self.assertEqual(opt(comp.argv, "--on-loss"), ["freeze"])
+        self.assertEqual(opt(procs[0].argv, "--on-loss"), ["freeze"])
         self.assertEqual(enc.wait_for, ())
 
 

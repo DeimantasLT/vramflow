@@ -567,7 +567,14 @@ int Demux::key_field_order() {
         if (e == AVERROR(EAGAIN)) continue;
         if (e < 0) break;
         intr_.packet();
-        if (pkt->stream_index == vs_) scan.feed(pkt->data, static_cast<std::size_t>(pkt->size));
+        if (pkt->stream_index == vs_ && scan.feed(pkt->data, static_cast<std::size_t>(pkt->size))) {
+            // įėjimo taškas — šis paketas: laikomas su atvykimo laiku ir grąžinamas pirmas (read), ne išmetamas
+            held_ = pkt;
+            pkt = nullptr;
+            held_arrival_ = static_cast<std::int64_t>(tai_now());
+            --read;
+            break;
+        }
         av_packet_unref(pkt);
     }
     av_packet_free(&pkt);
@@ -590,6 +597,8 @@ int Demux::key_field_order() {
 }
 
 void Demux::close() {
+    av_packet_free(&held_);
+    held_arrival_ = 0;
     LibavCall g(intr_, "avformat_close_input");
     if (ic_) avformat_close_input(&ic_);
     ic_ = nullptr;
@@ -818,7 +827,16 @@ void Demux::ff_close(AVFormatContext* s, AVIOContext** pb) {
     *pb = nullptr;
 }
 
-int Demux::read(AVPacket* pkt, Kind& kind, std::string& why) {
+int Demux::read(AVPacket* pkt, Kind& kind, std::string& why, std::int64_t* arrival_tai) {
+    if (arrival_tai) *arrival_tai = 0;
+    if (held_) {  // zondavimo skenavimo įėjimo taškas (key_field_order) — pirmas, su tikru atvykimo laiku
+        av_packet_move_ref(pkt, held_);
+        av_packet_free(&held_);
+        kind = Kind::Video;
+        if (arrival_tai) *arrival_tai = held_arrival_;
+        held_arrival_ = 0;
+        return 0;
+    }
     for (;;) {
         int e = 0;
         {

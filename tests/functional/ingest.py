@@ -2190,3 +2190,25 @@ TESTS["ingest_hls_token_redacted"] = ingest_hls_token_redacted
 TESTS["ingest_srt_passphrase_file"] = ingest_srt_passphrase_file
 TESTS["ingest_queue_byte_cap"] = ingest_queue_byte_cap
 TESTS["ingest_libav_watchdog"] = ingest_libav_watchdog
+
+
+def ingest_entry_kept(out):
+    """OK-2.1 paleidimo laikas: zondavimo skenavimo rastas įėjimo taškas (IDR) atiduodamas dekoderiui, o ne išmetamas — kitaip
+    dekoderis laukia KITO rakto kadro (dar vienas GOP prieš pirmą grain'ą). entry_dropped_pkts == 0 (po (re)atidarymo prieš
+    įėjimo tašką išmesta 0), dekoduota, A/V ≤ 1 laukas (tas paketas su tikru atvykimo laiku — laikrodžio fiksavimas nepasislenka)."""
+    if (why := ensure_clips()):
+        return [F.result("ingest_entry_kept", "FAIL", why=why)]
+    tid, port = "ingest_entry_kept", free_port()
+    T = 15
+    si, sv, ri, err, _ = run_case(out, tid, [f"udp://127.0.0.1:{port}"],
+                                  [lambda: Sender.ts(out, f"{tid}/snd", CLIPS / "av_1080i50.ts", port, "--loop")], T)
+    problems, a, r = base_checks(si, sv, ri, 20.0, T)
+    fi = flow(si)
+    if fi.get("entry_dropped_pkts", -1) != 0:
+        problems.append(f"entry_dropped_pkts {fi.get('entry_dropped_pkts')} (dekoderis laukė kito rakto kadro)")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + f" | probe_scan_dropped_pkts "
+                     f"{fi.get('probe_scan_dropped_pkts')} entry_dropped_pkts {fi.get('entry_dropped_pkts')} | " + summary_line(si, sv, a, r),
+                     ingest=si)]
+
+
+TESTS["ingest_entry_kept"] = ingest_entry_kept

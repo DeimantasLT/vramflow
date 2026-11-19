@@ -25,6 +25,10 @@ from .config import Plan
 from .redact import redact_url, url_scheme
 
 ROLE_LOGO, ROLE_GFX, ROLE_COMP, ROLE_INGEST, ROLE_INGEST_AUDIO = 2, 5, 6, 7, 8
+# OK-2.6: šaltinio spraga — rašytojų politika K3 „freeze“ (paskutinis geras grain'as ≤ --hold-ms 1000, tada juoda), ne
+# numatytoji „invalid“: INVALID grain'ą enc laiko aukštupio spraga ir video kadro nekoduoja — išėjimo TS sustotų.
+# Spragos lieka suskaičiuotos (ingest gap_fields, logo / composite santraukose — žr. task-4 ataskaitą).
+ON_LOSS = ["--on-loss", "freeze"]
 
 
 def flow_id(role: int, n: int) -> str:
@@ -69,14 +73,14 @@ def commands(plan: Plan, domain: str, exe: str, out_dir: Optional[str] = None, b
         procs.append(Proc(name, argv + [str(a) for a in args], env, tuple(flows), tuple(wait_for)))
 
     ins = [a for it in plan.inputs for a in ("--input", it.url)]
-    add("ingest", "ingest", ["--flow-base", 0, *ins, "--input-wait-s", _num(plan.input_wait_s), *_secret(plan.inputs)],
+    add("ingest", "ingest", ["--flow-base", 0, *ins, *ON_LOSS, "--input-wait-s", _num(plan.input_wait_s), *_secret(plan.inputs)],
         [flow_id(r, n) for n in range(N) for r in (ROLE_INGEST, ROLE_INGEST_AUDIO)])
     base = ["--in-role", ROLE_INGEST, "--in-flow-base", 0, "--flow-base", 0]
     video = [flow_id(ROLE_INGEST, n) for n in range(N)]
     if plan.process.kind == "logo":
         lg = plan.process.logo
         xy = (["--logo-x", lg.x] if lg.x is not None else []) + (["--logo-y", lg.y] if lg.y is not None else [])
-        add("logo", "logo", [*base, "--logo", lg.file, *xy], [flow_id(ROLE_LOGO, n) for n in range(N)], video)
+        add("logo", "logo", [*base, *ON_LOSS, "--logo", lg.file, *xy], [flow_id(ROLE_LOGO, n) for n in range(N)], video)
         enc_in = ROLE_LOGO
     else:
         layers = plan.process.composite.layers
@@ -85,7 +89,7 @@ def commands(plan: Plan, domain: str, exe: str, out_dir: Optional[str] = None, b
         add("gfx", "gfxgen", ["--flow-base", 0, "--layers", K, "--layer-geom", ",".join(L.geom for L in layers), "--mode", "pace"], gfx)
         xy = [a for L in layers for a in ("--layer-xy", f"{L.x},{L.y}")]
         op = [a for L in layers for a in ("--opacity", _num(L.opacity))]
-        add("composite", "composite", [*base, "--base", "gen", "--layers", K, *xy, *op, "--out-format", "v210"],
+        add("composite", "composite", [*base, *ON_LOSS, "--base", "gen", "--layers", K, *xy, *op, "--out-format", "v210"],
             [flow_id(ROLE_COMP, n) for n in range(N)], video + gfx)
         enc_in = ROLE_COMP
     o0 = plan.outputs[0]  # config: visų išėjimų spartos vienodos

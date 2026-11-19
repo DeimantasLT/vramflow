@@ -305,13 +305,14 @@ void demux_thread(Source& s, Shared& c) {
             first = false;
             while (!c.stop.load() && !s.fmt_stopped.load()) {
                 ig::Kind k{};
-                if (s.demux.read(pkt, k, why) < 0) break;
+                std::int64_t held_at = 0;  // > 0 — zondavimo įėjimo taškas, perskaitytas anksčiau (tikras atvykimo laikas)
+                if (s.demux.read(pkt, k, why, &held_at) < 0) break;
                 if ((k == ig::Kind::Video && !s.video) || (k == ig::Kind::Audio && !s.audio)) {
                     av_packet_unref(pkt);
                     continue;
                 }
                 if (const std::int64_t d = s.pending_step.exchange(0); d != 0) s.clock->on_clock_step(d);
-                const auto arrival = static_cast<std::int64_t>(ig::tai_now());
+                const auto arrival = held_at > 0 ? held_at : static_cast<std::int64_t>(ig::tai_now());
                 const int sid = k == ig::Kind::Video ? ig::kVideoStream : ig::kAudioStream;
                 const timing::Stamp st = s.clock->observe(sid, pkt->pts, pkt->dts, pkt->duration, arrival);
                 if (st.ev == timing::Event::Dropped) {

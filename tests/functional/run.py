@@ -18,7 +18,10 @@ frun_child_kill — OK-2.5: kill -9 logo → perkrautas, išėjimo spraga (enc s
                   (suskaičiuota statistikoje); antras paleidimas: 6 kritimai per 60 s → exit 2, stderr „logo nukrito 6 kartus per
                   60 s“, vaikų nelieka, domenas pašalintas.
 frun_source_gap — OK-2.6: SRT šaltinis (ffmpeg caller → ingest listener) dingsta 10 s ir grįžta: išėjimo TS nenutrūksta (tarpas tarp
-                  paketų < 1 s), nė vienas vaikas neperkrautas, po grįžimo A/V ≤ 20 ms, ingest input_reconnects ≥ 1.
+                  paketų < 1 s; ingest / logo --on-loss freeze — paskutinis kadras ≤ 1 s, tada juoda, garsas — tyla), nė vienas
+                  vaikas neperkrautas, po grįžimo A/V ≤ 20 ms (1 s impulsų tinklelis; pakartoti kadrai ne tinklelyje ≤ 2),
+                  ingest input_reconnects ≥ 1; spraga matoma: ingest gap_fields / gap_frozen / gap_black / audio_silent_samples.
+fenc_startup    — OK-2.1 dalis: gen jau veikia → enc --output: nuo Popen iki pirmo TS paketo ≤ 2 s (be fiksuoto 1,5 s laukimo).
 frun_no_source  — fokusas 4: įėjimas be duomenų → po input_wait_s exit 2, žinutė su redaguotu URL (užklausos reikšmė — „***“).
 frun_bad_config — OK-2.3: nežinomas laukas / trūkstami outputs / netinkamas JSON → exit 2 be vaikų ir be domeno, žinutė su keliu.
 frun_composite  — OK-2.7: composite su libvramflow-gfx sluoksniu (gfxgen „synthetic“ — OGraf atvaizdavimo įrankio WSL nėra,
@@ -609,10 +612,18 @@ def frun_source_gap(out):
     sv = F.vsummary(vf, "verify-ingest")
     stop_checks(run, problems)
     a = I.av_stats(sv)
-    # po grįžimo: impulsai (kas 1 s) po didžiausio tarpo tarp jų (= spraga), be pirmų dviejų (perfiksavimas)
+    # po grįžimo: impulsai (kas 1 s) po didžiausio tarpo tarp jų (= spraga). A/V — tinklelio impulsams (žingsnis — prieš
+    # spragą); impulsas ne tinklelyje — pakartotas video kadras (freeze per perfiksavimą: ingest gap_frozen), ne A/V poslinkis;
+    # tokių leidžiama ≤ 2 ir jie rodomi rezultate
     raw = a["raw"]
     jump = max(range(1, len(raw)), key=lambda k: raw[k][0] - raw[k - 1][0], default=None)
-    after = [p[1] / 1000.0 for p in raw[jump + 2:]] if jump is not None else []
+    step = sorted(raw[k][0] - raw[k - 1][0] for k in range(1, jump))[(jump - 1) // 2] if jump and jump > 2 else 25
+    post = raw[jump:] if jump is not None else []
+    on_grid = [p for p in post if (p[0] - post[0][0]) % step == 0]
+    off_grid = [(p[0] - post[0][0], p[1] / 1000.0) for p in post if (p[0] - post[0][0]) % step]
+    after = [p[1] / 1000.0 for p in on_grid]
+    if len(off_grid) > 2:
+        problems.append(f"po grįžimo impulsų ne tinklelyje {len(off_grid)} > 2: {off_grid[:5]}")
     if len(after) < (UP2 - 12) * 0.6:
         problems.append(f"po grįžimo A/V porų {len(after)}")
     if not after or max(abs(x) for x in after) > AV_MS:
@@ -629,7 +640,9 @@ def frun_source_gap(out):
     return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") +
                      f"spraga {GAP} s: didžiausias tarpas tarp išėjimo paketų {max(gap_window, default=0):.3f} s; ingest "
                      f"input_reconnects {fi.get('input_reconnects')} gap_fields {fi.get('gap_fields')}; po grįžimo A/V maks. "
-                     f"{max((abs(x) for x in after), default=None)} ms ({len(after)} impulsų); sustabdymas exit {run.rc}",
+                     f"{max((abs(x) for x in after), default=None)} ms ({len(after)} impulsų, ne tinklelyje {off_grid}); ingest gap_frozen "
+                     f"{fi.get('gap_frozen')} gap_black {fi.get('gap_black')} audio_silent_samples {fi.get('audio_silent_samples')}; "
+                     f"enc missing_frames {F.flow_ctr(run.summary('enc', 'enc'), 0).get('missing_frames', 0)}; sustabdymas exit {run.rc}",
                      av_after_max_ms=max((abs(x) for x in after), default=None))]
 
 
@@ -771,6 +784,45 @@ def frun_udp_srt(out):
                      f"{[x.get('out_bytes') for x in st]}; sustabdymas exit {run.rc}", udp=su, srt=ss, multicast=mc)]
 
 
-for _fn in (frun_logo_udp, frun_multi4, frun_stop, frun_child_kill, frun_source_gap, frun_no_source, frun_bad_config, frun_composite,
+ENC_START_S = 2.0  # enc dalis 5 s biudžete (OK-2.1): nuo Popen iki pirmo TS paketo, kai įėjimo flow'ai jau yra
+
+
+def fenc_startup(out):
+    """OK-2.1 paleidimo laikas (enc): gen (video + garsas) jau veikia → enc --output udp: nuo Popen iki pirmo TS paketo ≤ ENC_START_S
+    (3 pakartojimai, vertinama maks.). Anksčiau enc po prisijungimo laukdavo fiksuotas 1500 ms („kol koderiai atsidarys“)."""
+    tid = "fenc_startup"
+    F.gpu_mode("gpu")
+    d = F.fresh_domain("fenc-start")
+    v = F.vcommon("gpu", "cuda-linear")
+    g = F.FProc(out, f"{tid}/gen", "gen", d, "--flows", 1, "--audio", 1, "--duration", 120, *v)
+    times, problems = [], []
+    try:
+        if not F.wait_flows(d, [F.role_flow_id(1, 0), F.role_flow_id(3, 0)]):
+            return [F.result(tid, "FAIL", why="gen flow'ai neatsirado")]
+        time.sleep(1)
+        for k in range(3):
+            port = F.free_port()
+            sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sk.bind(("127.0.0.2", port))
+            sk.settimeout(15)
+            t0 = time.monotonic()
+            e = F.FProc(out, f"{tid}/enc{k}", "enc", d, "--flows", 1, "--audio", 1, "--output", f"udp://127.0.0.2:{port}", *v)
+            try:
+                sk.recv(2048)
+                times.append(round(time.monotonic() - t0, 3))
+            except socket.timeout:
+                problems.append(f"[{k}] paketų nėra per 15 s")
+            finally:
+                sk.close()
+                e.term()
+    finally:
+        g.term()
+    if times and max(times) > ENC_START_S:
+        problems.append(f"enc iki pirmo paketo maks. {max(times)} s > {ENC_START_S} s")
+    return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") +
+                     f"enc Popen → pirmas TS paketas: {times} s", times_s=times)]
+
+
+for _fn in (fenc_startup, frun_logo_udp, frun_multi4, frun_stop, frun_child_kill, frun_source_gap, frun_no_source, frun_bad_config, frun_composite,
             frun_udp_srt):
     TESTS[_fn.__name__] = _fn
