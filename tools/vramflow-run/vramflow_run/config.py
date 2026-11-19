@@ -12,6 +12,7 @@ Ribos, kurias nulemia vaikų procesai (ne schema):
 * `format` — tik tie, kuriuos priima C++ `parse_format` + `format_supported` (src/common/format.hpp).
 """
 import dataclasses
+import ipaddress
 import json
 import math
 import os
@@ -245,9 +246,46 @@ def _same_secret(items, prefix):
                               "visiems srt adresams)")
 
 
-def _unique_endpoints(items, prefix):
+def _is_multicast(host):
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_multicast
+    except ValueError:
+        return False
+
+
+def _local_ports(url, is_input):
+    """Vietiniai UDP portai, prie kurių adresas prisiriša: udp / rtp įėjimai (rtp — ir RTCP portas + 1), srt listener (įėjimas ar
+    išėjimas; SRT veikia per UDP). Siunčiantys (udp išėjimas, srt caller) ir http — nesiriša ([])."""
+    s, ep = url_scheme(url), _endpoint(url)
+    if ep is None:
+        return []
+    if is_input and s in ("udp", "rtp"):
+        return [ep[2], ep[2] + 1] if s == "rtp" else [ep[2]]
+    if s == "srt" and any(k == "mode" and v == "listener" for k, v in _query_pairs(url)):
+        return [ep[2]]
+    return []
+
+
+def _check_binds(inputs, outputs):
+    """Du prisirišantys adresai tame pačiame vietiniame UDP porte — konfliktas (bind nepavyktų ar duomenys susimaišytų), nebent
+    abu — skirtingos multicast grupės (pvz. config/examples/logo-udp-4.json: 4 grupės porte 5000)."""
+    taken = []  # (portas, host, kelias, url)
+    for prefix, items, is_input in (("inputs", inputs, True), ("outputs", outputs, False)):
+        for k, it in enumerate(items):
+            host = _endpoint(it.url)[1] if _endpoint(it.url) else ""
+            for port in _local_ports(it.url, is_input):
+                for p2, h2, path2, url2 in taken:
+                    if p2 == port and not (_is_multicast(host) and _is_multicast(h2) and host != h2):
+                        raise ConfigError(f"{prefix}[{k}].url", f"vietinis UDP portas {port} jau naudojamas: {path2} ({redact_url(url2)})")
+                taken.append((port, host, f"{prefix}[{k}].url", it.url))
+
+
+def _unique_endpoints(items, prefix, is_input):
+    """Neprisirišantys adresai (siunčiantys išėjimai, srt caller, http): tikslus paskirties dublikatas — klaida."""
     seen = {}
     for k, it in enumerate(items):
+        if _local_ports(it.url, is_input):
+            continue  # prisirišantys — _check_binds
         ep = _endpoint(it.url)
         key = ep if ep is not None else it.url
         if key in seen:
@@ -265,7 +303,7 @@ def _inputs(v):
         _obj(x, p, ("url", "srt_passphrase_from"), ("url",))
         url = _url(x["url"], p + ".url", IN_SCHEMES)
         items.append(Input(url, _secret_ref(x.get("srt_passphrase_from"), p + ".srt_passphrase_from", url)))
-    _unique_endpoints(items, "inputs")
+    _unique_endpoints(items, "inputs", True)
     _same_secret(items, "inputs")
     return tuple(items)
 
@@ -279,7 +317,7 @@ def _outputs(v):
         vb = _int(x.get("vbitrate", DEFAULT_VBITRATE), p + ".vbitrate", *VBITRATE_RANGE)
         ab = _int(x.get("abitrate", DEFAULT_ABITRATE), p + ".abitrate", *ABITRATE_RANGE)
         items.append(Output(url, vb, ab, _secret_ref(x.get("srt_passphrase_from"), p + ".srt_passphrase_from", url)))
-    _unique_endpoints(items, "outputs")
+    _unique_endpoints(items, "outputs", False)
     _same_secret(items, "outputs")
     for k, it in enumerate(items[1:], 1):
         for f in ("vbitrate", "abitrate"):
@@ -395,6 +433,7 @@ def parse(obj, source="") -> Plan:
     inputs = _inputs(obj["inputs"])
     process = _process(obj["process"], frame, interlaced)
     outputs = _outputs(obj["outputs"])
+    _check_binds(inputs, outputs)
     if len(outputs) != len(inputs):
         raise ConfigError("outputs", f"{len(outputs)}, inputs: {len(inputs)} — turi sutapti")
     r = _obj(obj.get("restart", {}), "restart", ("max", "window_s"))

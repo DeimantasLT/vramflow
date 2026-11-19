@@ -141,6 +141,41 @@ class Errors(Base):
         self.assertIn("outputs[0].url", str(e))
         self.assertIn("outputs[1].url", str(e))
 
+    def test_bind_conflicts(self):
+        """Vietinis UDP portas (udp / rtp įėjimai, srt listener įėjimai ir išėjimai — SRT veikia per UDP): tas pats portas — konfliktas,
+        nebent abu adresai — skirtingos multicast grupės."""
+        def two(a, b, outs=None):
+            return minimal(inputs=[{"url": a}, {"url": b}],
+                           outputs=outs or [{"url": "udp://127.0.0.1:5000"}, {"url": "udp://127.0.0.1:5001"}])
+        for a, b in (("udp://0.0.0.0:9000", "udp://127.0.0.1:9000"),
+                     ("srt://0.0.0.0:9000?mode=listener", "udp://0.0.0.0:9000"),
+                     ("srt://0.0.0.0:9000?mode=listener", "srt://127.0.0.1:9000?mode=listener"),
+                     ("udp://localhost:9000", "udp://127.0.0.1:9000"),
+                     ("udp://239.1.1.1:9000", "udp://0.0.0.0:9000"),
+                     ("udp://239.1.1.1:9000", "udp://239.1.1.1:9000?fifo_size=1000")):
+            with self.subTest(a=a, b=b):
+                e = self.err(two(a, b))
+                self.assertEqual(e.path, "inputs[1].url")
+                self.assertIn("inputs[0].url", e.why)
+        # skirtingos multicast grupės tame pačiame porte — leidžiama (config/examples/logo-udp-4.json)
+        config.load(self.write(two("udp://239.1.1.1:9000", "udp://239.1.1.2:9000")))
+        # srt caller nesiriša prie vietinio porto — su udp įėjimu tame pačiame porte nekonfliktuoja
+        config.load(self.write(two("srt://10.0.0.5:9000?mode=caller", "udp://0.0.0.0:9000")))
+        # srt listener išėjimas ir įėjimas tame pačiame vietiniame porte
+        c = two("udp://0.0.0.0:9000", "udp://0.0.0.0:9001", [{"url": "srt://0.0.0.0:9000?mode=listener"}, {"url": "udp://127.0.0.1:5001"}])
+        e = self.err(c)
+        self.assertEqual(e.path, "outputs[0].url")
+        self.assertIn("inputs[0].url", e.why)
+        # du srt listener išėjimai tame pačiame porte skirtingais adresais
+        c = two("udp://0.0.0.0:9000", "udp://0.0.0.0:9001", [{"url": "srt://127.0.0.1:9100?mode=listener"},
+                                                               {"url": "srt://0.0.0.0:9100?mode=listener"}])
+        e = self.err(c)
+        self.assertEqual(e.path, "outputs[1].url")
+        self.assertIn("outputs[0].url", e.why)
+        # siunčiantys išėjimai (udp, srt caller): tik tikslus paskirties dublikatas; skirtingi host'ai tame pačiame porte — gerai
+        config.load(self.write(two("udp://0.0.0.0:9000", "udp://0.0.0.0:9001",
+                                   [{"url": "udp://10.0.0.1:5000"}, {"url": "udp://10.0.0.2:5000"}])))
+
     def test_too_many_inputs(self):
         ins = [{"url": f"udp://127.0.0.1:{9000 + k}"} for k in range(17)]
         outs = [{"url": f"udp://127.0.0.1:{5000 + k}"} for k in range(17)]

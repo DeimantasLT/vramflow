@@ -11,7 +11,7 @@ frun_logo_udp   — OK-2.1: 1 UDP įėjimas, logo builtin, 1 UDP išėjimas (127
                   A/V ≤ 20 ms; logotipo sritis (luma) prieš CPU etaloną (`vramflow-func clip` šaltinio kadras + builtin logotipo
                   blend, ta pati formulė kaip media::ref) PSNR ≥ LOGO_MIN_DB, o be logotipo — bent LOGO_SEP_DB mažesnis; sritis
                   už logotipo prieš šaltinį ≥ LOGO_MIN_DB; enc be savų praradimų; SIGTERM → exit 0 ≤ 5 s.
-frun_multi4     — OK-2.2: 4 įėjimai (siuntėjai nuo 0 / 20 / 40 / 60 s klipo) → 4 išėjimai: kiekviename A/V ≤ 20 ms, ir išėjimas n
+frun_multi4     — OK-2.2 ir OK-2.7 k. 2 ([logo], [composite]): 4 įėjimai (siuntėjai nuo 0 / 20 / 40 / 60 s klipo) → 4 išėjimai: kiekviename A/V ≤ 20 ms, ir išėjimas n
                   neša įėjimo n turinį (pirmos išėjimo žymės skiriasi ~1000 laukų iš eilės).
 frun_stop       — OK-2.4: SIGTERM → prižiūrėtojas ir visi vaikai baigiasi ≤ 5 s, domenas ir jo nuomos katalogas pašalinti, exit 0.
 frun_child_kill — OK-2.5: kill -9 logo → perkrautas, išėjimo spraga (enc stats „gaps“ po nužudymo) ≤ 50 kadrų (2 s) ir > 0
@@ -19,7 +19,7 @@ frun_child_kill — OK-2.5: kill -9 logo → perkrautas, išėjimo spraga (enc s
                   60 s“, vaikų nelieka, domenas pašalintas.
 frun_source_gap — OK-2.6: SRT šaltinis (ffmpeg caller → ingest listener) dingsta 10 s ir grįžta: išėjimo TS nenutrūksta (tarpas tarp
                   paketų < 1 s; ingest / logo --on-loss freeze — paskutinis kadras ≤ 1 s, tada juoda, garsas — tyla), nė vienas
-                  vaikas neperkrautas, po grįžimo A/V ≤ 20 ms (1 s impulsų tinklelis; pakartoti kadrai ne tinklelyje ≤ 2),
+                  vaikas neperkrautas, po grįžimo A/V ≤ 20 ms kiekvienam impulsui (be išimčių),
                   ingest input_reconnects ≥ 1; spraga matoma: ingest gap_fields / gap_frozen / gap_black / audio_silent_samples.
 fenc_startup    — OK-2.1 dalis: gen jau veikia → enc --output: nuo Popen iki pirmo TS paketo ≤ 2 s (be fiksuoto 1,5 s laukimo).
 frun_no_source  — fokusas 4: įėjimas be duomenų → po input_wait_s exit 2, žinutė su redaguotu URL (užklausos reikšmė — „***“).
@@ -404,19 +404,30 @@ def frun_logo_udp(out):
                      av_max_abs_ms=a["max_abs_ms"], stop_s=ch.run.stop_s)]
 
 
+MULTI4_PROCESS = {"logo": {"logo": "builtin"},
+                  "composite": {"composite": {"layers": [{"source": "synthetic", "geom": "logo", "x": LOGO_X, "y": LOGO_Y}]}}}
+
+
 def frun_multi4(out):
-    tid = "frun_multi4"
-    if (r := need_clips(tid)):
+    """OK-2.2 (logo) ir OK-2.7 k. 2 (composite): tas pats 4 → 4 atvejis abiem apdorojimo variantams."""
+    if (r := need_clips("frun_multi4")):
         return r
+    return [x for kind in MULTI4_PROCESS for x in multi4_case(out, kind)]
+
+
+def multi4_case(out, kind):
+    tid = f"frun_multi4[{kind}]"
     import ingest as I
     F.gpu_mode("gpu")
     T, N = 30, 4
     srcs = [F.free_port() for _ in range(N)]
     mids = [F.free_port() for _ in range(N)]
-    cfg = logo_cfg([f"udp://127.0.0.1:{p}" for p in srcs], [f"udp://127.0.0.1:{q}?pkt_size=1316" for q in mids])
-    snd = [(lambda k=k: I.Sender.ts(out, f"{tid}/snd{k}", I.CLIPS / "av_1080i50.ts", srcs[k], "--loop", "--start-s", 20 * k))
+    cfg = logo_cfg([f"udp://127.0.0.1:{p}" for p in srcs], [f"udp://127.0.0.1:{q}?pkt_size=1316" for q in mids],
+                   process=MULTI4_PROCESS[kind])
+    tid_dir = f"frun_multi4-{kind}"
+    snd = [(lambda k=k: I.Sender.ts(out, f"{tid_dir}/snd{k}", I.CLIPS / "av_1080i50.ts", srcs[k], "--loop", "--start-s", 20 * k))
            for k in range(N)]
-    si, sv, ri, ch, dump = closed_loop(out, tid, cfg, snd, mids, T, dumps=1)
+    si, sv, ri, ch, dump = closed_loop(out, tid_dir, cfg, snd, mids, T, dumps=1)
     if ch is None:
         return [F.result(tid, "FAIL", why="grandinė nepaleista")]
     problems, lines = [], []
@@ -434,6 +445,8 @@ def frun_multi4(out):
         marks.append(int(re.search(r"_m(\d+)\.v210$", fs[0].name).group(1)) if fs else None)
     if None in marks or any(abs((marks[n] - marks[0]) - 1000 * n) > 150 for n in range(N)):
         problems.append(f"išėjimų žymės {marks} — ne įėjimų tvarka (laukta ≈ m0 + 1000·n)")
+    if kind == "composite" and ("composite paleistas" not in ch.run.text() or "gfx paleistas" not in ch.run.text()):
+        problems.append("composite / gfx nepaleisti")
     return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") +
                      f"žymės {marks}; " + "; ".join(lines) + f"; sustabdymas {ch.run.stop_s and round(ch.run.stop_s, 2)} s",
                      marks=marks)]
@@ -612,18 +625,12 @@ def frun_source_gap(out):
     sv = F.vsummary(vf, "verify-ingest")
     stop_checks(run, problems)
     a = I.av_stats(sv)
-    # po grįžimo: impulsai (kas 1 s) po didžiausio tarpo tarp jų (= spraga). A/V — tinklelio impulsams (žingsnis — prieš
-    # spragą); impulsas ne tinklelyje — pakartotas video kadras (freeze per perfiksavimą: ingest gap_frozen), ne A/V poslinkis;
-    # tokių leidžiama ≤ 2 ir jie rodomi rezultate
+    # po grįžimo: VISI impulsai po didžiausio tarpo tarp jų (= spraga) — be išimčių (peržiūra: −480 ms impulsas vieną kartą,
+    # 5 paleidimuose nepasikartojo, priežastis neįrodyta — jei pasikartos, testas krenta, o ne slepia)
     raw = a["raw"]
     jump = max(range(1, len(raw)), key=lambda k: raw[k][0] - raw[k - 1][0], default=None)
-    step = sorted(raw[k][0] - raw[k - 1][0] for k in range(1, jump))[(jump - 1) // 2] if jump and jump > 2 else 25
     post = raw[jump:] if jump is not None else []
-    on_grid = [p for p in post if (p[0] - post[0][0]) % step == 0]
-    off_grid = [(p[0] - post[0][0], p[1] / 1000.0) for p in post if (p[0] - post[0][0]) % step]
-    after = [p[1] / 1000.0 for p in on_grid]
-    if len(off_grid) > 2:
-        problems.append(f"po grįžimo impulsų ne tinklelyje {len(off_grid)} > 2: {off_grid[:5]}")
+    after = [p[1] / 1000.0 for p in post]
     if len(after) < (UP2 - 12) * 0.6:
         problems.append(f"po grįžimo A/V porų {len(after)}")
     if not after or max(abs(x) for x in after) > AV_MS:
@@ -640,10 +647,12 @@ def frun_source_gap(out):
     return [F.result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") +
                      f"spraga {GAP} s: didžiausias tarpas tarp išėjimo paketų {max(gap_window, default=0):.3f} s; ingest "
                      f"input_reconnects {fi.get('input_reconnects')} gap_fields {fi.get('gap_fields')}; po grįžimo A/V maks. "
-                     f"{max((abs(x) for x in after), default=None)} ms ({len(after)} impulsų, ne tinklelyje {off_grid}); ingest gap_frozen "
+                     f"{max((abs(x) for x in after), default=None)} ms ({len(after)} impulsų: {[round(x, 1) for x in after[:14]]}…); ingest gap_frozen "
                      f"{fi.get('gap_frozen')} gap_black {fi.get('gap_black')} audio_silent_samples {fi.get('audio_silent_samples')}; "
                      f"enc missing_frames {F.flow_ctr(run.summary('enc', 'enc'), 0).get('missing_frames', 0)}; sustabdymas exit {run.rc}",
-                     av_after_max_ms=max((abs(x) for x in after), default=None))]
+                     av_after_max_ms=max((abs(x) for x in after), default=None),
+                     post_pairs=[(p[0] - post[0][0], p[1]) for p in post] if post else [],
+                     jumps_post=[(j[0] - post[0][0], j[1]) for j in a["jumps"] if post and -60 <= j[0] - post[0][0] <= 150])]
 
 
 def frun_no_source(out):
