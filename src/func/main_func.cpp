@@ -198,7 +198,11 @@ int func_main(int argc, char** argv) {
     e->add_option("--vbitrate", o.vbitrate);
     e->add_option("--abitrate", o.abitrate);
     e->add_option("--muxrate", o.muxrate);
-    e->add_option("--port-base", o.port_base);
+    e->add_option("--port-base", o.port_base, "išvestis be --output: udp://127.0.0.1:<port-base + n>");
+    e->add_option("--output", o.outputs, "srauto išvesties adresas (kartoti: 0 arba tiek, kiek --flows): udp://host:port[?ttl=…] | srt://host:port?mode=listener|caller");
+    e->add_option("--audio-role", o.audio_role, "garso flow'ų vaidmuo: 3 — gen (numatyta), 8 — ingest garsas")->check(CLI::Range(1, 9999));
+    e->add_option("--srt-passphrase-from", o.out_srt_passphrase_from,
+                  "SRT slaptažodis išvestims iš env:VARDAS arba file:/kelias (ne komandinėje eilutėje); naudojamas srt:// išvestims");
     e->add_option("--tap-dir", o.tap_dir);
     e->add_option("--tap-flow", o.tap_flow);
     e->add_option("--tap-every", o.tap_every);

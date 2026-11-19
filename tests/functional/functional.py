@@ -719,6 +719,97 @@ def fcli1(out):
     return res
 
 
+def foutput_args(out):
+    """enc --output (OK-1): argumentų kelias be GPU darbo — adresų skaičius, schema, senas UDP kelias be --output."""
+    import socket
+    res = []
+    # 1. adresų skaičius != --flows → exit 2 ir aiški žinutė, domene nieko neatsiranda
+    d = fresh_domain("foutput-count")
+    r = subprocess.run([FUNC_BIN, "enc", "--domain", str(d), "--out", str(out / "foutput-count"), "--flows", "3", "--output", "udp://127.0.0.1:41001",
+                        "--output", "udp://127.0.0.1:41002", "--duration", "1"], capture_output=True, text=True, timeout=30, env=ENV)
+    ok = r.returncode == 2 and "--output: 2 adresai, srautų 3" in r.stderr and not leftovers(d)
+    res.append(result("foutput_args[kiekis]", "PASS" if ok else "FAIL", why=f"exit {r.returncode}, domene {leftovers(d)}, stderr {r.stderr.strip()[-200:]!r}"))
+    # 2. neleistina schema → exit 2 per < 1 s, domene nėra flow'ų
+    d = fresh_domain("foutput-scheme")
+    t0 = time.monotonic()
+    r = subprocess.run([FUNC_BIN, "enc", "--domain", str(d), "--out", str(out / "foutput-scheme"), "--flows", "1", "--output", "ftp://x", "--duration", "1"],
+                       capture_output=True, text=True, timeout=30, env=ENV)
+    dt = time.monotonic() - t0
+    ok = r.returncode == 2 and dt < 1.0 and "ftp" in r.stderr and not leftovers(d)
+    res.append(result("foutput_args[schema]", "PASS" if ok else "FAIL", why=f"exit {r.returncode}, {dt:.2f} s, domene {leftovers(d)}, stderr {r.stderr.strip()[-200:]!r}"))
+    # 3. slaptažodis URL'e ir blogas --srt-passphrase-from → exit 2
+    for name, extra in (("passphrase_url", ["--output", "srt://127.0.0.1:41003?mode=listener&passphrase=slaptazodis123"]),
+                        ("passphrase_from", ["--output", "srt://127.0.0.1:41003?mode=listener", "--srt-passphrase-from", "env:VRAMFLOW_NERA_TOKIO"])):
+        d = fresh_domain(f"foutput-{name}")
+        r = subprocess.run([FUNC_BIN, "enc", "--domain", str(d), "--out", str(out / f"foutput-{name}"), "--flows", "1", *extra, "--duration", "1"],
+                           capture_output=True, text=True, timeout=30, env=ENV)
+        ok = r.returncode == 2 and "slaptazodis123" not in r.stderr and not leftovers(d)
+        res.append(result(f"foutput_args[{name}]", "PASS" if ok else "FAIL", why=f"exit {r.returncode}, stderr {r.stderr.strip()[-200:]!r}"))
+    # 4. be --output — senas kelias: udp://127.0.0.1:<port-base>, ffprobe mato H.264
+    with socket.socket() as sk:
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+    d = fresh_domain("foutput-old")
+    v = vcommon("gpu", "cuda-linear")
+    g = e = None
+    try:
+        g = FProc(out, "foutput-old", "gen", d, "--flows", 1, "--duration", 40, *v)
+        if not wait_flows(d, [role_flow_id(1, 0)]):
+            return res + [result("foutput_args[senas]", "FAIL", why="gen flow'as neatsirado")]
+        e = FProc(out, "foutput-old", "enc", d, "--flows", 1, "--audio", 0, "--port-base", port, "--duration", 25, "--warmup", 2, *v)
+        time.sleep(2)
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", f"udp://127.0.0.1:{port}?timeout=15000000"],
+                           capture_output=True, text=True, timeout=60)
+        ok = "h264" in r.stdout
+        res.append(result("foutput_args[senas]", "PASS" if ok else "FAIL", why=f"ffprobe exit {r.returncode}, stdout {r.stdout.strip()!r}, stderr {r.stderr.strip()[-120:]!r}"))
+    finally:
+        for pr in (e, g):
+            if pr is not None:
+                pr.term()
+    return res
+
+
+def fenc_ingest_audio(out):
+    """enc --audio-role 8 --output (OK-1): gen-AV klipas → UDP → ingest → enc (garsas iš ingest) → UDP → antras ingest → verify --mode ingest:
+    visi sinchro impulsai, |A/V| ≤ 1 laukas (20 ms)."""
+    import ingest as I
+    if (why := I.ensure_clips()):
+        return [result("fenc_ingest_audio", "FAIL", why=why)]
+    tid = "fenc_ingest_audio"
+    p_src, p_mid = 27100, 27101
+    T = 25
+    d1 = fresh_domain("fenc-ia-src")
+
+    class Chain:
+        def __init__(self):
+            self.snd = I.Sender.ts(out, f"{tid}/snd", I.CLIPS / "av_1080i50.ts", p_src)
+            v = vcommon("gpu", "cuda-linear")
+            self.ing = FProc(out, f"{tid}/src", "ingest", d1, "--input", f"udp://127.0.0.1:{p_src}", "--duration", T + 60, *v)
+            self.enc = None
+            if wait_flows(d1, [role_flow_id(7, 0), role_flow_id(8, 0)], timeout=40):
+                self.enc = FProc(out, f"{tid}/enc", "enc", d1, "--flows", 1, "--in-role", 7, "--audio-role", 8, "--audio", 1,
+                                 "--output", f"udp://127.0.0.1:{p_mid}?pkt_size=1316", "--duration", T + 50, "--warmup", 2, *v)
+
+        def stop(self):
+            for pr in (self.enc, self.ing):
+                if pr is not None:
+                    pr.term()
+            self.snd.stop()
+
+    chain = []
+
+    def start():
+        chain.append(Chain())
+        return chain[0]
+
+    si, sv, ri, err, _ = I.run_case(out, tid, [f"udp://127.0.0.1:{p_mid}"], [start], T)
+    if not chain or chain[0].enc is None:
+        return [result(tid, "FAIL", why="pirmo ingest flow'ai (7 / 8) neatsirado, enc nepaleistas")]
+    problems, a, r = I.base_checks(si, sv, ri, 20.0, T)
+    return [result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") + I.summary_line(si, sv, a, r),
+                   av_mean_ms=a["mean_ms"], av_max_abs_ms=a["max_abs_ms"], ingest=si)]
+
+
 KW_SUMMARY_RE = r"\[keepwarm\] baigta: (\d+) užpildymų po (\d+) MB kas ([\d.]+) ms, ([\d.]+) s"
 
 
@@ -1199,7 +1290,7 @@ def main():
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "f7_teeth": lambda: [f7_teeth(out)], "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
-             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
+             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "foutput_args": lambda: foutput_args(out), "fenc_ingest_audio": lambda: fenc_ingest_audio(out), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
     # Paleidimo / sustabdymo testai (planas §P6) — atskirame modulyje; jis naudoja šį modulį (ne antrą jo kopiją).

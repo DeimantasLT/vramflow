@@ -140,6 +140,10 @@ struct Opts {
     int x264_threads = 2;
     std::uint32_t vbitrate = 7'500'000, abitrate = 192'000, muxrate = 8'500'000;
     int port_base = 20000;
+    // enc: išvesties adresas kiekvienam srautui (--output, kartojamas; 0 arba lygiai --flows); tuščias — senas udp://127.0.0.1:port_base+n
+    std::vector<std::string> outputs;
+    int audio_role = 3;                 // enc --audio-role: garso flow'ų vaidmuo (3 — gen / kRoleAudio, 8 — ingest garsas)
+    std::string out_srt_passphrase_from;  // enc --srt-passphrase-from env:VARDAS | file:/kelias (srt:// išvestims be passphrase=)
     std::string tap_dir;
     int tap_flow = -1;
     std::uint32_t tap_every = 25;
@@ -344,6 +348,8 @@ float gen_audio_sample(std::uint64_t s);  // gen garso mėginys s (48 kHz); bend
 bool parse_xy(const std::string& s, int& x, int& y);                                                // "X,Y"
 
 std::string storage_options(const Opts& o, int dev);  // writer'io opcijos pagal --storage
+// enc: n-ojo srauto išvesties URL — o.outputs[n] (udp be pkt_size= gauna pkt_size=1316) arba senas udp://127.0.0.1:<port_base + n>
+std::string enc_output_url(const Opts& o, std::uint32_t n);
 std::atomic<bool>& stop_flag();
 // Antras SIGINT / SIGTERM (D8, A25): greitas išėjimas — eilių išleidimas (--drain-ms) nutraukiamas, flow'ai atlaisvinami.
 std::atomic<bool>& fast_stop_flag();

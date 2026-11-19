@@ -118,6 +118,54 @@ bool source_url_allowed(const std::string& url, std::string& why) {
     return false;
 }
 
+bool output_url_allowed(const std::string& url, std::string& why) {
+    const std::string s = url_scheme(url);
+    const std::string shown = redact_url(url);
+    if (s != "udp" && s != "srt") {
+        why = (s.empty() ? std::string("vietinis failas / tuščia schema") : s + " protokolas") +
+              " išvesčiai nepalaikomas (leidžiami: udp, srt): " + shown;
+        return false;
+    }
+    if (url.compare(s.size(), 3, "://") != 0) {
+        why = s + " URL turi prasidėti „" + s + "://“: " + shown;
+        return false;
+    }
+    // autoritetas: [vartotojas@]host:portas (IPv6 — [..]:portas); portas privalomas
+    const std::string auth = url_authority(url);
+    const auto colon = auth.rfind(':');
+    const bool port_after_host = colon != std::string::npos && colon > 0 && (auth.back() != ']');
+    bool port_ok = port_after_host && colon + 1 < auth.size() && auth.size() - colon - 1 <= 5;
+    long port = 0;
+    for (std::size_t i = colon + 1; port_ok && i < auth.size(); ++i) {
+        if (auth[i] < '0' || auth[i] > '9') port_ok = false;
+        else port = port * 10 + (auth[i] - '0');
+    }
+    if (!port_ok || port < 1 || port > 65535) {
+        why = s + " išvesties adresas be galiojančio porto (1–65535): " + shown;
+        return false;
+    }
+    const auto q = url.find('?');
+    if (s == "srt" && q != std::string::npos) {
+        std::string query = url.substr(q + 1);
+        if (const auto h = query.find('#'); h != std::string::npos) query.resize(h);
+        std::size_t pos = 0;
+        while (pos <= query.size()) {
+            const std::size_t amp = std::min(query.find('&', pos), query.size());
+            const std::string kv = query.substr(pos, amp - pos);
+            if (starts(kv, "passphrase=")) {
+                why = "srt išvesties URL'e slaptažodžio nėra: naudokite --srt-passphrase-from env:VARDAS arba file:/kelias";
+                return false;
+            }
+            if (starts(kv, "mode=") && kv != "mode=listener" && kv != "mode=caller") {
+                why = "srt išvesties mode — tik listener arba caller: " + shown;
+                return false;
+            }
+            pos = amp + 1;
+        }
+    }
+    return true;
+}
+
 std::string protocol_whitelist_for(const std::string& scheme, bool hls) {
     if (scheme == "udp") return "udp";
     if (scheme == "rtp") return "rtp,udp";

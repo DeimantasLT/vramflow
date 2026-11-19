@@ -23,6 +23,10 @@ std::string url_scheme(const std::string& url);
 // Operatoriaus šaltinio URL: true — leidžiama; kitaip why — „<schema> protokolas nepalaikomas (leidžiami: …): <URL>“.
 bool source_url_allowed(const std::string& url, std::string& why);
 
+// enc išvesties URL: tik udp:// arba srt:// su aiškiu portu 1–65535; srt — mode tik listener | caller (rendezvous nepalaikomas),
+// passphrase= URL'e draudžiamas (slaptažodis — --srt-passphrase-from). false: why — priežastis (URL išvalytas nuo paslapčių).
+bool output_url_allowed(const std::string& url, std::string& why);
+
 // libavformat baltieji sąrašai pagal viršutinio URL schemą (įdėti atidarymai juos paveldi). hls — HTTP(S) šaltinio patikra rado
 // M3U8; false (H1) — tik MPEG-TS per HTTP: HLS demuxeris nepasiekiamas, net jei libav paties atidarymas gautų M3U8 (TOCTOU).
 std::string protocol_whitelist_for(const std::string& scheme, bool hls = true);

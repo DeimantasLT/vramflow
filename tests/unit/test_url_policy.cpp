@@ -582,3 +582,23 @@ TEST_CASE("url_policy: R13-3 — libav grojaraščių daugybiškumas (tas pats U
     CHECK(playlist_multiplicity(base, pi, "http://h/live/i.m3u8") == 1);  // libav jo nekuria — kaip iki šiol, vienas
     CHECK(pi.variants.size() == 6);  // patikra / žinomi URL — kaip iki šiol (ir I-FRAME)
 }
+
+TEST_CASE("url_policy: enc išvesties URL — udp ir srt su aiškiu portu, be slaptažodžio URL'e", "[enc][url]") {
+    std::string why;
+    for (const char* ok : {"udp://10.0.0.5:5000", "udp://239.1.1.1:5000?ttl=4", "srt://h:9000?mode=listener",
+                           "srt://h:9000?mode=caller&latency=200000"}) {
+        INFO(ok);
+        CHECK(output_url_allowed(ok, why));
+    }
+    for (const char* bad : {"ftp://x", "udp://h", "udp://h:0", "udp://h:70000", "srt://h:1?passphrase=x", "/tmp/a.ts", "rtp://h:1",
+                            "srt://h:1?mode=rendezvous"}) {
+        INFO(bad);
+        why.clear();
+        CHECK_FALSE(output_url_allowed(bad, why));
+        CHECK_FALSE(why.empty());
+    }
+    why.clear();
+    CHECK_FALSE(output_url_allowed("srt://h:1?passphrase=x", why));
+    CHECK(why.find("--srt-passphrase-from") != std::string::npos);
+    CHECK(why.find("passphrase=x") == std::string::npos);  // paslaptis neišvedama
+}

@@ -34,6 +34,7 @@ extern "C" {
 #include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
+#include "ingest/url_policy.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
 #include "common/textf.hpp"
@@ -108,6 +109,7 @@ struct Ctx {
     AVBufferRef* hw = nullptr;
     std::vector<AVBufferRef*> frames;  // per srautą (nvenc)
     int w = 1920, h = 1080;
+    std::string srt_pass;  // --srt-passphrase-from reikšmė (tik atmintyje; į FFmpeg — per AVDictionary, ne URL)
     std::size_t nv12_bytes() const { return static_cast<std::size_t>(w) * h * 3 / 2; }
 };
 
@@ -252,7 +254,7 @@ void worker(Ctx& cx, Stream& s) {
     }
     // --- mux
     {
-        const std::string url = strf("udp://127.0.0.1:%d?pkt_size=1316&buffer_size=4194304", o.port_base + s.n);
+        const std::string url = enc_output_url(o, static_cast<std::uint32_t>(s.n));
         if (e = avformat_alloc_output_context2(&oc, nullptr, "mpegts", url.c_str()); e < 0) { fail("mux alloc: " + averr(e)); goto out; }
         AVStream* vs = avformat_new_stream(oc, nullptr);
         avcodec_parameters_from_context(vs->codecpar, vc);
@@ -262,7 +264,14 @@ void worker(Ctx& cx, Stream& s) {
             avcodec_parameters_from_context(as->codecpar, ac);
             as->time_base = {1, 90000};
         }
-        if (e = avio_open2(&oc->pb, url.c_str(), AVIO_FLAG_WRITE, nullptr, nullptr); e < 0) { fail("avio_open2: " + averr(e)); goto out; }
+        {
+            // srt:// slaptažodis — libsrt parinktimi (ne URL'e: URL matomas žurnaluose ir santraukoje)
+            AVDictionary* od = nullptr;
+            if (!cx.srt_pass.empty() && mxlv::ingest::url_scheme(url) == "srt") av_dict_set(&od, "passphrase", cx.srt_pass.c_str(), 0);
+            e = avio_open2(&oc->pb, url.c_str(), AVIO_FLAG_WRITE, nullptr, &od);
+            av_dict_free(&od);
+            if (e < 0) { fail("avio_open2: " + averr(e)); goto out; }
+        }
         AVDictionary* md = nullptr;
         av_dict_set_int(&md, "muxrate", o.muxrate, 0);
         av_dict_set(&md, "pcr_period", "20", 0);
@@ -406,6 +415,22 @@ int run_enc(const Opts& o) {
         std::fprintf(stderr, "[enc] baigta, exit %d %s\n", rc, st.fatal.c_str());
         return rc;
     };
+    // Išvesties argumentai — prieš bet kokį MXL / CUDA darbą: klaida → exit 2, domene flow'ų nesukuriama.
+    if (!o.outputs.empty() && o.outputs.size() != o.flows) {
+        st.fatal = strf("--output: %zu adresai, srautų %u", o.outputs.size(), static_cast<unsigned>(o.flows));
+        return finish(2);
+    }
+    for (const std::string& u : o.outputs) {
+        std::string why;
+        if (!mxlv::ingest::output_url_allowed(u, why)) { st.fatal = "--output: " + why; return finish(2); }
+    }
+    if (!o.out_srt_passphrase_from.empty()) {
+        std::string why;
+        if (!mxlv::ingest::secret_from(o.out_srt_passphrase_from, cx.srt_pass, why) || !mxlv::ingest::srt_passphrase_ok(cx.srt_pass, why)) {
+            st.fatal = "--srt-passphrase-from: " + why;
+            return finish(2);
+        }
+    }
     // Variantas C (--impl cpu): host flow → CPU weave → libx264; CUDA ir FFmpeg hw įrenginys nekuriami.
     const bool cpu = o.impl == "cpu";
     if (cpu && nvenc) { st.fatal = "--impl cpu reikalauja --encoder x264"; return finish(1); }
@@ -448,7 +473,7 @@ int run_enc(const Opts& o) {
     std::string err;
     int rc = attach_inputs(in_ptr, inst, o, "enc", st.fatal);  // 4 — neatsirado per ribą; kStoppedWaiting — sustabdyta (exit 0)
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
-        if (!ain[n].open(inst, flow_id(kRoleAudio, o.flow_base + n), open_policy(o), stop, err)) {
+        if (!ain[n].open(inst, flow_id(o.audio_role, o.flow_base + n), open_policy(o), stop, err)) {
             if (stop.load()) rc = kStoppedWaiting;
             else { st.fatal = err; rc = kExitInputs; }
         }
@@ -463,7 +488,7 @@ int run_enc(const Opts& o) {
     const std::int64_t period = engine::period_ns(o.fmt.grain_rate());
     std::vector<InEdge> vedge, aedge;
     for (std::uint32_t n = 0; n < o.flows; ++n) vedge.push_back(in_edge(inst, flow_id(o.in_role, o.in_base() + n), o, 0));
-    for (std::uint32_t n = 0; n < ain.size(); ++n) aedge.push_back(in_edge(inst, flow_id(kRoleAudio, o.flow_base + n), o, period));
+    for (std::uint32_t n = 0; n < ain.size(); ++n) aedge.push_back(in_edge(inst, flow_id(o.audio_role, o.flow_base + n), o, period));
     const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};  // mėginių skaičius kadrui (be poslinkio)
     std::vector<engine::MxlAudioInput> ports_audio;
     ports_audio.reserve(ain.size());
@@ -479,7 +504,7 @@ int run_enc(const Opts& o) {
         if (al.shift[1] != 0 || al.shift[0] != 0)
             log_line("enc", "rinkinio lygiavimas " + std::to_string(n) + ": video " + std::to_string(al.shift[0]) + " grain'ų, garsas " +
                                 std::to_string(al.shift[1]) + " mėginių (content_delay " + std::to_string(al.align_ns / 1000) + " µs)");
-        ports_audio.emplace_back(inst, flow_id(kRoleAudio, o.flow_base + n), afn, ain[n].r);
+        ports_audio.emplace_back(inst, flow_id(o.audio_role, o.flow_base + n), afn, ain[n].r);
         ain[n].r = nullptr;
     }
 

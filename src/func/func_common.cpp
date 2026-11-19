@@ -19,6 +19,7 @@
 
 #include "common/textf.hpp"
 #include "func/engine_glue.hpp"
+#include "ingest/url_policy.hpp"
 #include "mxlio/common_io.hpp"
 #include "runtime/fail_text.hpp"
 
@@ -60,6 +61,17 @@ void install_signals() {
 }
 
 int cuda_device(const std::string& uuid) { return mxlv::cuda_device_by_uuid(uuid); }
+
+std::string enc_output_url(const Opts& o, std::uint32_t n) {
+    if (n >= o.outputs.size()) return strf("udp://127.0.0.1:%d?pkt_size=1316&buffer_size=4194304", o.port_base + static_cast<int>(n));
+    std::string url = o.outputs[n];
+    if (mxlv::ingest::url_scheme(url) == "udp") {
+        const auto q = url.find('?');
+        const std::string query = q == std::string::npos ? std::string{} : "&" + url.substr(q + 1);
+        if (query.find("&pkt_size=") == std::string::npos) url += (q == std::string::npos ? "?" : "&") + std::string("pkt_size=1316");
+    }
+    return url;
+}
 
 std::string storage_options(const Opts& o, int dev) { return o.storage == "host" ? std::string{} : cuda_options(dev); }
 
