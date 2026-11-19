@@ -431,6 +431,16 @@ int run_enc(const Opts& o) {
             return finish(2);
         }
     }
+    // Argumentai be poveikio — aiški klaida, ne tylus ignoravimas
+    if (!o.out_srt_passphrase_from.empty() &&
+        std::none_of(o.outputs.begin(), o.outputs.end(), [](const std::string& u) { return mxlv::ingest::url_scheme(u) == "srt"; })) {
+        st.fatal = "--srt-passphrase-from reikalauja srt:// --output";
+        return finish(2);
+    }
+    if (!o.audio && o.audio_role != 3) {
+        st.fatal = "--audio-role reikalauja --audio 1";
+        return finish(2);
+    }
     // Variantas C (--impl cpu): host flow → CPU weave → libx264; CUDA ir FFmpeg hw įrenginys nekuriami.
     const bool cpu = o.impl == "cpu";
     if (cpu && nvenc) { st.fatal = "--impl cpu reikalauja --encoder x264"; return finish(1); }
@@ -473,7 +483,7 @@ int run_enc(const Opts& o) {
     std::string err;
     int rc = attach_inputs(in_ptr, inst, o, "enc", st.fatal);  // 4 — neatsirado per ribą; kStoppedWaiting — sustabdyta (exit 0)
     for (std::uint32_t n = 0; n < ain.size() && !rc; ++n)
-        if (!ain[n].open(inst, flow_id(o.audio_role, o.flow_base + n), open_policy(o), stop, err)) {
+        if (!ain[n].open(inst, flow_id(o.audio_role, o.in_base() + n), open_policy(o), stop, err)) {
             if (stop.load()) rc = kStoppedWaiting;
             else { st.fatal = err; rc = kExitInputs; }
         }
@@ -488,7 +498,7 @@ int run_enc(const Opts& o) {
     const std::int64_t period = engine::period_ns(o.fmt.grain_rate());
     std::vector<InEdge> vedge, aedge;
     for (std::uint32_t n = 0; n < o.flows; ++n) vedge.push_back(in_edge(inst, flow_id(o.in_role, o.in_base() + n), o, 0));
-    for (std::uint32_t n = 0; n < ain.size(); ++n) aedge.push_back(in_edge(inst, flow_id(o.audio_role, o.flow_base + n), o, period));
+    for (std::uint32_t n = 0; n < ain.size(); ++n) aedge.push_back(in_edge(inst, flow_id(o.audio_role, o.in_base() + n), o, period));
     const engine::AudioFrames afr{o.fmt.frame_rate, static_cast<std::uint32_t>(gpf)};  // mėginių skaičius kadrui (be poslinkio)
     std::vector<engine::MxlAudioInput> ports_audio;
     ports_audio.reserve(ain.size());
@@ -504,7 +514,7 @@ int run_enc(const Opts& o) {
         if (al.shift[1] != 0 || al.shift[0] != 0)
             log_line("enc", "rinkinio lygiavimas " + std::to_string(n) + ": video " + std::to_string(al.shift[0]) + " grain'ų, garsas " +
                                 std::to_string(al.shift[1]) + " mėginių (content_delay " + std::to_string(al.align_ns / 1000) + " µs)");
-        ports_audio.emplace_back(inst, flow_id(o.audio_role, o.flow_base + n), afn, ain[n].r);
+        ports_audio.emplace_back(inst, flow_id(o.audio_role, o.in_base() + n), afn, ain[n].r);
         ain[n].r = nullptr;
     }
 
