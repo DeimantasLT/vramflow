@@ -55,6 +55,7 @@ def main():
     if (lo, hi, n) != (1, 2, 4):
         bad.append(f"be gap_recent: {(lo, hi, n)}")
     bad += platform_cases()
+    bad += common_rise_cases()
     bad += late_delivery_cases()
     print("PASS" if not bad else f"FAIL: {bad}")
     return 1 if bad else 0
@@ -126,6 +127,56 @@ def platform_cases():
         ev = I.gpu_events(d)
     if ev != [(1795009526012345678, 1795009526012345678 + 16_084_000)]:
         bad.append(f"gpu_events: {ev}")
+    return bad
+
+
+def common_rise_cases():
+    """(b) išplėsta 2026-11-19 (autorius: „Išplėsti (b)“; fiso_stall5 r09, r14). Ribos nekeičiamos. „Bendras pakilimas“
+    sekundę s — VISŲ sveikų flow'ų vėlavimas > atskaita + Wr + ro. (1) Pažeidimo langas apima visą ištisinę bendro pakilimo
+    sekundžių seką (liudininkas bet kurioje jų sekundėje); (2) bendro pakilimo pažeidimas — INFO, net jei ribą peržengė ne
+    visi sveiki. Be bendro pakilimo — kaip anksčiau (visi sveiki turi pažeisti, langas — tik sekundė s)."""
+    bad = []
+    s = FAULT // S + 1
+    healthy = [0, 1, 2]
+    pre = {s - k: 10.0 + 0.1 * k for k in range(4, 9)}  # atskaita 10.8 → riba 17.3, bendro pakilimo slenkstis 16.3
+    base = {"fault_tai": FAULT, "end_tai": END, "start_tai": FAULT - 12 * S, "ready_tai": FAULT - 12 * S}
+
+    def lat(per_flow):
+        return base | {"lat_s": {n: pre | per_flow[n] for n in healthy}}
+
+    # r09: visi sveiki s 23.8 ms (pažeidimas), s+1 17.0 ms (pakilę, po riba); host liudininkas tik s+1 sekundėje
+    r09 = lat({n: {s: 23.8, s + 1: 17.0, s + 2: 10.9} for n in healthy})
+    got = I.max_lateness_bad(r09, "out_lateness")
+    want_w = [(s * S, (s + 2) * S + 23_800_000)]
+    if len(got) != 3 or not all(isinstance(b, I.Timed) and b.wins == want_w and getattr(b, "common", False) for b in got):
+        bad.append(f"r09 langas: {[(str(b), getattr(b, 'wins', None), getattr(b, 'common', None)) for b in got]}")
+    ev_next = [((s + 1) * S + 129_000_000, (s + 1) * S + 138_000_000)]
+    ev_far = [((s + 3) * S + 129_000_000, (s + 3) * S + 138_000_000)]
+    # r14: visi sveiki pakilę s (17.0), ribą peržengė tik #2 (33.8); GPU liudininkas s sekundėje
+    r14 = lat({0: {s: 17.0}, 1: {s: 17.0}, 2: {s: 33.8}})
+    one = I.max_lateness_bad(r14, "out_lateness")
+    # #2 vienas pakilęs (kiti 11.0 — ne bendras pakilimas): kaip anksčiau
+    solo = I.max_lateness_bad(lat({0: {s: 11.0}, 1: {s: 11.0}, 2: {s: 33.8}}), "out_lateness")
+    ev_s = [(s * S + 180_000_000, s * S + 196_000_000)]
+    # vienas flow'as be duomenų sekundę s — bendro pakilimo nėra
+    gap = I.max_lateness_bad(lat({0: {s + 1: 10.9}, 1: {s: 17.0}, 2: {s: 33.8}}), "out_lateness")
+    cases = [
+        ("r09: liudininkas kitoje pakilimo sekundėje", got, ev_next, 0, 3),
+        ("r09: liudininkas už pakilimo sekos", got, ev_far, 3, 0),
+        ("r14: bendras pakilimas, pažeidė 1 iš 3, liudytas", one, ev_s, 0, 1),
+        ("r14: bendras pakilimas, neliudytas", one, ev_far, 1, 0),
+        ("vienas pakilęs (ne bendras), liudytas", solo, ev_s, 1, 0),
+        ("vienas flow'as be duomenų, liudytas", gap, ev_s, 1, 0),
+        ("bendras pakilimas + ne laiko pažeidimas", one + ["sveiko #0 lango p99"], ev_s, 2, 0),
+    ]
+    for name, viol, ev, want_fail, want_info in cases:
+        fail, info = I.platform_split(viol, healthy, ev)
+        ok = (len(fail), len(info)) == (want_fail, want_info)
+        print(f"{'ok ' if ok else 'BAD'} (b+) {name}: FAIL {len(fail)}, INFO {len(info)} (laukta {want_fail}, {want_info})")
+        if not ok:
+            bad.append(f"(b+) {name}")
+    if [b.wins for b in solo] != [[(s * S, (s + 1) * S + 33_800_000)]] or any(getattr(b, "common", False) for b in solo):
+        bad.append(f"ne bendras: langas / common {[(b.wins, getattr(b, 'common', None)) for b in solo]}")
     return bad
 
 

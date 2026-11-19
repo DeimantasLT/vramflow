@@ -309,16 +309,19 @@ def window_loss_wins(r, n):
 # docs/rezultatai/2026-11-12-gpu-ivykiu-trukdziai.md); (2) sveikų flow'ų pažeidimai apima VISUS sveikus flow'us (įvykis —
 # visiems, ne vienam). Bet kas be laiko (p99 mediana, po SIGCONT, mismatch), be liudininko ar ne visiems — FAIL kaip anksčiau.
 # Ribos nekeičiamos. 2026-11-18: liudininkas — ir hostwatch (host'o / VM pauzė; veikia visiems variantams, ir C).
+# 2026-11-19 (autorius: „Išplėsti (b)“): vėlavimo pažeidimas BENDRO PAKILIMO sekundę (visų sveikų vėlavimas > atskaita + Wr + ro)
+# — langas apima visą ištisinę tokių sekundžių seką (liudininkas bet kurioje jų), o (2) netaikoma (ribą gali peržengti ne visi).
 LOSS_SLACK_NS = 100_000_000  # praradimo sekundė + iki 100 ms: E + D + pabudimas visoms funkcijoms < 100 ms
 GPU_EVENT_RE = re.compile(r"GPU įvykis: TAI (\d+) trukmė ([\d.]+) ms")
 
 
 class Timed(str):
-    """Pažeidimo tekstas su laiko langais [(nuo, iki) ns TAI]; flow — sveiko flow'o numeris (None — paveikto)."""
+    """Pažeidimo tekstas su laiko langais [(nuo, iki) ns TAI]; flow — sveiko flow'o numeris (None — paveikto); common — pažeidimas
+    įvyko bendro visų sveikų flow'ų vėlavimo pakilimo metu (max_lateness_bad; (b) išplėsta 2026-11-19)."""
 
-    def __new__(cls, text, wins, flow=None):
+    def __new__(cls, text, wins, flow=None, common=False):
         o = super().__new__(cls, text)
-        o.wins, o.flow = list(wins), flow
+        o.wins, o.flow, o.common = list(wins), flow, common
         return o
 
 
@@ -361,7 +364,8 @@ def platform_split(bad, healthy, events):
     if not all(_hits(w, events) for b in bad for w in b.wins):
         return list(bad), []
     flows = {b.flow for b in bad if b.flow is not None}
-    if flows and not set(healthy) <= flows:
+    # (b) išplėsta 2026-11-19: bendro pakilimo pažeidimai (visi sveiki pakilę virš atskaitos + Wr + ro) — ir kai ribą peržengė ne visi
+    if flows and not set(healthy) <= flows and not all(b.common for b in bad if b.flow is not None):
         return list(bad), []
     return [], list(bad)
 
@@ -688,12 +692,20 @@ def up_delta(r, s):
 
 
 def max_lateness_bad(r, what):
-    """Kiekvieno sveiko flow'o vėlavimas kiekvieną gedimo lango sekundę s ≤ bazė + Δup(s) (lateness_bound)."""
+    """Kiekvieno sveiko flow'o vėlavimas kiekvieną gedimo lango sekundę s ≤ bazė + Δup(s) (lateness_bound).
+    Pažeidimas bendro pakilimo sekundę (VISŲ sveikų vėlavimas > atskaita + Wr + ro; ribos nekeičia) — Timed common=True, o jo
+    langas apima visą ištisinę bendro pakilimo sekundžių seką gedimo lange ((b) išplėsta 2026-11-19, fiso_stall5 r09 / r14)."""
     base, ref, _ = lateness_bound(r)
     if base is None:
         return [f"{what}: {ref}"]
+    lat = r.get("lat_s") or {}
+    rise = ref + WR_MS + RO_MS
+
+    def common_at(k):
+        return all(sec.get(k) is not None and sec[k] > rise for sec in lat.values())
+
     bad = []
-    for n, sec in (r.get("lat_s") or {}).items():
+    for n, sec in lat.items():
         flt = fault_seconds(sec, r["fault_tai"], r["end_tai"])
         if not flt:
             bad.append(f"sveiko #{n} gedimo lange nėra {what} duomenų")
@@ -702,9 +714,19 @@ def max_lateness_bad(r, what):
         s, v = worst
         lim = base + up_delta(r, s)
         if v > lim:  # langas: indekso sekundė s … jos pabaiga + vėlavimas (commit'as galėjo būti kitą sekundę)
-            bad.append(Timed(f"sveiko #{n} maks. vėlavimas gedimo lange {v:.2f} ms (sek. {s}) > {lim:.2f} ms "
-                             f"(atskaita {ref:.2f}, Δup {up_delta(r, s):.2f})",
-                             [(s * 1_000_000_000, (s + 1) * 1_000_000_000 + int(v * 1e6))], flow=n))
+            s0 = s1 = s
+            common = common_at(s)
+            if common:
+                fs = {k for k, _ in flt}
+                while s0 - 1 in fs and common_at(s0 - 1):
+                    s0 -= 1
+                while s1 + 1 in fs and common_at(s1 + 1):
+                    s1 += 1
+                v = max(x[k] for x in lat.values() for k in range(s0, s1 + 1))
+            note = f"; bendras pakilimas sek. {s0}–{s1}" if common else ""
+            bad.append(Timed(f"sveiko #{n} maks. vėlavimas gedimo lange {worst[1]:.2f} ms (sek. {s}) > {lim:.2f} ms "
+                             f"(atskaita {ref:.2f}, Δup {up_delta(r, s):.2f}{note})",
+                             [(s0 * 1_000_000_000, (s1 + 1) * 1_000_000_000 + int(v * 1e6))], flow=n, common=common))
     return bad
 
 
