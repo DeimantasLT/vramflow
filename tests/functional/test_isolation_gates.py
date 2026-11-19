@@ -57,6 +57,8 @@ def main():
     bad += platform_cases()
     bad += common_rise_cases()
     bad += late_delivery_cases()
+    bad += startup_verify_cases()
+    bad += post_sigcont_cases()
     print("PASS" if not bad else f"FAIL: {bad}")
     return 1 if bad else 0
 
@@ -216,6 +218,77 @@ def late_delivery_cases():
         bad.append(f"check_split vėlus commit: {[(str(b), getattr(b, 'wins', None)) for b in got]}")
     if not any(not isinstance(b, I.Timed) and "verify missing + invalid 7" in b for b in got2):
         bad.append(f"check_split +1 nepaaiškintas: {[str(b) for b in got2]}")
+    return bad
+
+
+def startup_verify_cases():
+    """(b) išplėsta 2026-11-19 (autorius: „Abu į (b)“; fiso_stall6 r05). Funkcijos praradimai UŽ gedimo lango (paleidimas) į
+    funkcijos vartus nepatenka (window_losses); verify skaito visą savo gyvenimą — iš jo atimami tie patys funkcijos praradimai,
+    jei jų sekundė visa verify aprėptyje ir visa prieš gedimo langą. Ribos nekeičiamos."""
+    bad = []
+    s0 = FAULT // S - 10  # paleidimo sekundė (prieš gedimo langą)
+    base = {"fault_tai": FAULT, "end_tai": END, "loss_s": {0: {s0: 1}}}
+    cases = [
+        ("paleidimo praradimas verify aprėptyje", base | {"verify_first_tai": (s0 - 1) * S}, {"missing": 0, "invalid": 1}, 0),
+        ("verify prasidėjo toje pačioje sekundėje", base | {"verify_first_tai": s0 * S + 300_000_000},
+         {"missing": 0, "invalid": 1}, 1),
+        ("verify 2, paleidimo 1", base | {"verify_first_tai": (s0 - 1) * S}, {"missing": 1, "invalid": 1}, 1),
+        ("be verify pradžios (sena santrauka)", base, {"missing": 0, "invalid": 1}, 1),
+        ("gedimo lango praradimas neatimamas", base | {"verify_first_tai": (s0 - 1) * S, "loss_s": {0: {FAULT // S: 1}}},
+         {"missing": 0, "invalid": 1}, 1),
+        # r05 tikri duomenys: verify pradėjo 0,16 s, praradimas 0,40 s tos pačios sekundės — tiksliai pagal logo indeksus
+        ("indeksas po verify pradžios (r05)", base | {"verify_first_tai": s0 * S + 160_000_000,
+                                                       "loss_idx": {0: [(s0 * S + 400_000_000) // I.FIELD_NS]}},
+         {"missing": 0, "invalid": 1}, 0),
+        ("indeksas prieš verify pradžią", base | {"verify_first_tai": s0 * S + 500_000_000,
+                                                   "loss_idx": {0: [(s0 * S + 400_000_000) // I.FIELD_NS]}},
+         {"missing": 0, "invalid": 1}, 1),
+        ("indeksas gedimo lange neatimamas", base | {"verify_first_tai": s0 * S, "loss_idx": {0: [FAULT // I.FIELD_NS]}},
+         {"missing": 0, "invalid": 1}, 1),
+    ]
+    for name, r, v, want in cases:
+        got = I.verify_window_lost(r, 0, v)
+        print(f"{'ok ' if got == want else 'BAD'} (b r05) {name}: {got} (laukta {want})")
+        if got != want:
+            bad.append(f"(b r05) {name}")
+    return bad
+
+
+def post_sigcont_cases():
+    """(b) išplėsta 2026-11-19 (autorius: „Abu į (b)“; fiso_stall6 r15). Paveikto flow'o verify po SIGCONT: praradimai, kurių
+    KIEKVIENAS indeksas prarastas ir visų sveikų flow'ų (logo eilutės „praradimas: flow n, indeksas i“), — laiko pažeidimas
+    (langai [T(i), T(i) + LOSS_SLACK_NS]) → (b) liudininkai. Kitaip (ne visiems, mismatch, daugiau nei indeksų) — FAIL."""
+    bad = []
+    i0 = 89753656221
+    t0 = i0 * I.FIELD_NS
+    victim, healthy = 0, [1, 2, 3]
+    post = {"exit": 4, "samples": 495, "present": 495, "missing": 0, "invalid": 2, "mismatch_fields": 0}
+    allf = {n: [i0, i0 + 2] for n in [victim, *healthy]}
+    base = {"victim": victim, "post": post, "post_first_index": i0 - 100, "post_last_index": i0 + 400, "loss_idx": allf}
+    wins = [(t0, t0 + I.LOSS_SLACK_NS), (t0 + 2 * I.FIELD_NS, t0 + 2 * I.FIELD_NS + I.LOSS_SLACK_NS)]
+    ev = [(t0 - 10_000_000, t0 + 26_700_000), (t0 + 2 * I.FIELD_NS + 30_000_000, t0 + 2 * I.FIELD_NS + 37_000_000)]
+    cases = [
+        ("bendri visiems, liudyta", base, ev, 0, 1),
+        ("bendri visiems, neliudyta", base, [], 1, 0),
+        ("#3 neprarado i0+2", base | {"loss_idx": allf | {3: [i0]}}, ev, 1, 0),
+        ("invalid 3 > indeksų 2", base | {"post": post | {"invalid": 3}}, ev, 1, 0),
+        ("mismatch", base | {"post": post | {"mismatch_fields": 1}}, ev, 1, 0),
+        ("paveiktas prarado ir už post lango", base | {"post_first_index": i0 + 1}, ev, 1, 0),
+        ("be loss_idx (sena santrauka)", {k: v for k, v in base.items() if k != "loss_idx"}, ev, 1, 0),
+    ]
+    for name, r, e, want_fail, want_info in cases:
+        got = I.post_sigcont_bad(r, healthy)
+        fail, info = I.platform_split(got, healthy, e)
+        ok = (len(fail), len(info)) == (want_fail, want_info)
+        print(f"{'ok ' if ok else 'BAD'} (b r15) {name}: FAIL {len(fail)}, INFO {len(info)} (laukta {want_fail}, {want_info})")
+        if not ok:
+            bad.append(f"(b r15) {name}")
+    got = I.post_sigcont_bad(base, healthy)
+    if [getattr(b, "wins", None) for b in got] != [wins]:
+        bad.append(f"(b r15) langai: {[getattr(b, 'wins', None) for b in got]}")
+    clean = I.post_sigcont_bad(base | {"post": post | {"exit": 0, "invalid": 0}}, healthy)
+    if clean:
+        bad.append(f"(b r15) švarus po SIGCONT: {clean}")
     return bad
 
 

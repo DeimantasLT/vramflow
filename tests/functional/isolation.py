@@ -311,6 +311,8 @@ def window_loss_wins(r, n):
 # Ribos nekeičiamos. 2026-11-18: liudininkas — ir hostwatch (host'o / VM pauzė; veikia visiems variantams, ir C).
 # 2026-11-19 (autorius: „Išplėsti (b)“): vėlavimo pažeidimas BENDRO PAKILIMO sekundę (visų sveikų vėlavimas > atskaita + Wr + ro)
 # — langas apima visą ištisinę tokių sekundžių seką (liudininkas bet kurioje jų), o (2) netaikoma (ribą gali peržengti ne visi).
+# 2026-11-19 (autorius: „Abu į (b)“): verify sveikiems — be funkcijos praradimų už gedimo lango (verify_window_lost; ta pati
+# atkarpa kaip funkcijos vartų); paveikto po SIGCONT — visiems flow'ams bendri prarasti indeksai yra Timed (post_sigcont_bad).
 LOSS_SLACK_NS = 100_000_000  # praradimo sekundė + iki 100 ms: E + D + pabudimas visoms funkcijoms < 100 ms
 GPU_EVENT_RE = re.compile(r"GPU įvykis: TAI (\d+) trukmė ([\d.]+) ms")
 
@@ -479,10 +481,14 @@ def run_logo(out, tag, impl, storage, fault, pos="last", extra=(), suffix="", po
     if vp is not None:
         sp = F.vsummary(vp, "verify-logo")
         rec["post"] = {"exit": rp, **(flow_view(sp, VER_KEYS, [0]) if sp else {"err": "nėra post santraukos"})}
+        rec["post_first_index"], rec["post_last_index"] = (sp or {}).get("first_index"), (sp or {}).get("last_index")
+    rec["loss_idx"] = F.logo_loss_indices(lg)  # verify_window_lost, post_sigcont_bad: praradimai pagal indeksą
     rec["policy"] = policy or "invalid"
     rec["deadline_us"] = (sl.get("proc") or {}).get("deadline_us")
     rec["expect_us"] = (sl.get("proc") or {}).get("expect_us", 0)  # V24: fazė E (aukštupio gen skelbiama riba)
     rec["verify_last_index"] = sv.get("last_index")
+    if sv.get("first_index") is not None:  # verify_window_lost: paleidimo praradimai verify aprėptyje
+        rec["verify_first_tai"] = sv["first_index"] * FIELD_NS
     vf_ = (sl.get("flows") or [])
     if victim < len(vf_) and "gap_late_recent" in vf_[victim]:  # gedimo lango spragų commit'ų vartams (gap_commits_in_window)
         rec["gap_recent"] = [tuple(x) for x in vf_[victim]["gap_late_recent"]]
@@ -747,6 +753,45 @@ def p99_bad(r, what):
     return bad
 
 
+def verify_window_lost(r, n, v):
+    """Sveiko flow'o n verify missing + invalid be funkcijos praradimų UŽ gedimo lango ((b) išplėsta 2026-11-19, fiso_stall6
+    r05): verify skaito visą savo gyvenimą, funkcijos vartai — tik gedimo langą (window_losses). Atimami funkcijos praradimai
+    verify aprėptyje (nuo verify_first_tai) ir prieš gedimo langą: tiksliai pagal logo indeksus (loss_idx), o be jų — tik loss_s
+    sekundės, visos aprėptyje ir visos prieš langą; be verify_first_tai — nieko neatimama."""
+    lost = v.get("missing", 0) + v.get("invalid", 0)
+    vf = r.get("verify_first_tai")
+    if vf is None:
+        return lost
+    lo_f = r["fault_tai"] - int(LEAD_S * 1e9)
+    if r.get("loss_idx") is not None:
+        pre = sum(1 for i in set(r["loss_idx"].get(n, [])) if vf <= i * FIELD_NS < lo_f)
+    else:
+        pre = sum(c for k, c in ((r.get("loss_s") or {}).get(n) or {}).items()
+                  if k * 1_000_000_000 >= vf and (k + 1) * 1_000_000_000 <= lo_f)
+    return max(0, lost - pre)
+
+
+def post_sigcont_bad(r, healthy):
+    """Paveikto flow'o verify po SIGCONT POST_S s → pažeidimų sąrašas. (b) išplėsta 2026-11-19 (fiso_stall6 r15): kai vienintelis
+    sutrikimas — missing + invalid, o KIEKVIENĄ paveikto prarastą indeksą post lange (logo „praradimas“ eilutės, loss_idx)
+    prarado ir visi sveiki flow'ai, ir praradimų ne daugiau nei tokių indeksų — Timed su langais [T(i), T(i) + LOSS_SLACK_NS]
+    (liudininką tikrina platform_split). Kitaip — paprastas (be laiko) pažeidimas kaip anksčiau."""
+    post = r.get("post") or {}
+    lost = post.get("missing", 0) + post.get("invalid", 0)
+    if not post.get("err") and post.get("samples", 0) > 0 and not post.get("mismatch_fields", 0) and (
+            post.get("exit") == 0 and lost == 0):
+        return []
+    msg = f"po SIGCONT {POST_S} s: {post}"
+    li, lo, hi = r.get("loss_idx"), r.get("post_first_index"), r.get("post_last_index")
+    if post.get("err") or post.get("samples", 0) == 0 or post.get("mismatch_fields", 0) or not lost or \
+            li is None or lo is None or hi is None:
+        return [msg]
+    mine = sorted(i for i in li.get(r["victim"], []) if lo <= i <= hi)
+    if not mine or lost > len(mine) or not all(i in set(li.get(n, [])) for n in healthy for i in mine):
+        return [msg]
+    return [Timed(msg, [(i * FIELD_NS, i * FIELD_NS + LOSS_SLACK_NS) for i in mine])]
+
+
 def healthy_bad(r):
     """Sveikų flow'ų vartai (logo ir composite): funkcijos praradimai (FN_LOSS) ir verify missing + invalid ≤ aukštupio
     biudžetas (upstream_budget; be aukštupio sutrikimų — 0), mismatch == 0 visada; kiekvieno sveiko maks. vėlavimas ir lango
@@ -760,7 +805,7 @@ def healthy_bad(r):
             bad.append(Timed(f"sveiko #{n} funkcijos praradimai gedimo lange {lost} > aukštupio {budget} "
                              f"(viso gyvenimo { {k: f[k] for k in FN_LOSS if f.get(k)} })", window_loss_wins(r, n), flow=n))
     for n, v in zip(hv, r.get("verify_flows") or []):
-        lost = v.get("missing", 0) + v.get("invalid", 0)
+        lost = verify_window_lost(r, n, v)
         if lost > budget:  # verify laikų neturi: langai — to paties flow'o funkcijos praradimų (be jų — neliudijama)
             bad.append(Timed(f"verify sveiko #{n} missing + invalid {lost} > aukštupio {budget}",
                              window_loss_wins(r, n) if lost <= window_losses(r, n) else [], flow=n))
@@ -832,10 +877,7 @@ def logo_gate(fault, r):
                 (t, t + u * 1000) for t, u in r["gap_recent"]
                 if u > cut + DEADLINE_WAKE_US and t >= r["fault_tai"] - int(LEAD_S * 1e9) and t <= r["end_tai"]]
             bad.append(Timed(msg, late) if late else msg)
-        post = r.get("post") or {}
-        if post.get("err") or post.get("exit") != 0 or post.get("samples", 0) == 0 or any(
-                post.get(k, 0) for k in ("missing", "invalid", "mismatch_fields")):
-            bad.append(f"po SIGCONT {POST_S} s: {post}")
+        bad += post_sigcont_bad(r, healthy_of(r["victim"]))
     return bad
 
 
