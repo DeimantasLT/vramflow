@@ -296,6 +296,7 @@ void StatsLines::publish(const engine::Snapshot& s) {
             for (std::size_t c = 0; c < ncnt; ++c) num(j, (*s.counter_names)[c].c_str(), s.fn[u * ncnt + c], c != 0);
             j += "}";
         }
+        if (flow_extra_) flow_extra_(u, j);
         j += "}";
     }
     j += "]";

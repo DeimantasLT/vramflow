@@ -111,6 +111,34 @@ TEST_CASE("stats_lines: be --stats-file eilučių nėra (įvykiai — tik stderr
     CHECK(sink.lines() == 0);
 }
 
+TEST_CASE("stats_lines: funkcijos flow'o laukai (enc out_*) — kiekvieno flow'o objekte", "[func][stats_lines][ts_sender]") {
+    const std::string path = tmp_path("extra");
+    std::filesystem::remove(path);
+    func::Opts o;
+    o.stats_file = path;
+    {
+        func::StatsLines sink(o, "enc");
+        sink.set_flow_extra([](std::size_t n, std::string& j) { j += ",\"out_bytes\":" + std::to_string(1316 * (n + 1)); });
+        engine::StatsHub hub(1.0, &sink);
+        hub.add_unit("flow-a");
+        hub.add_unit("flow-b");
+        hub.prepare();
+        hub.end_tick(1'000'000'000'000'000'000ull);
+        hub.flush(1'000'000'001'000'000'000ull);
+        hub.stop();
+    }
+    const std::vector<std::string> lines = read_lines(path);
+    REQUIRE(lines.size() == 1);
+    INFO(lines[0]);
+    const std::size_t a = lines[0].find("\"id\":\"flow-a\""), b = lines[0].find("\"id\":\"flow-b\"");
+    REQUIRE(a != std::string::npos);
+    REQUIRE(b != std::string::npos);
+    const std::size_t xa = lines[0].find("\"out_bytes\":1316"), xb = lines[0].find("\"out_bytes\":2632");
+    CHECK((xa > a && xa < b));  // flow-a laukas — flow-a objekte
+    CHECK((xb > b && xb != std::string::npos));
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("exit_code_for: sugedęs vienetas → 2 abiem režimais; praradimas → 4 tik griežtai", "[func][exit]") {
     func::Opts o;
     func::Stats st;

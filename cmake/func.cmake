@@ -15,7 +15,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/engine_mxl.cmake)  # variklio MXL prievadai (V
 # gfxgen naudoja TIK viešą libvramflow-gfx (include/vramflow/gfx.h): įrodo, kad biblioteka pakankama.
 add_executable(vramflow-func
   src/func/main_func.cpp src/func/func_common.cpp src/func/engine_glue.cpp src/func/stats_lines.cpp
-  src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/dec.cpp src/func/ingest.cpp src/func/verify_ingest.cpp src/func/keepwarm.cpp src/func/admission_glue.cpp
+  src/func/gen.cpp src/func/gfxgen.cpp src/func/logo.cpp src/func/composite.cpp src/func/verify.cpp src/func/enc.cpp src/func/ts_sender.cpp src/func/dec.cpp src/func/ingest.cpp src/func/verify_ingest.cpp src/func/keepwarm.cpp src/func/admission_glue.cpp
   src/mxlio/common_io.cpp)
 vramflow_warnings(vramflow-func)
 target_link_libraries(vramflow-func PRIVATE mxlv_ingest mxlv_engine_mxl mxlv_runtime mxlv_flows mxlv_threadpool mxlv_media mxlv_media_cpu mxlv_common mxl::mxl vramflow-gfx mxlv_gfx_cpu mxlv_gfx_cuda mxlv_gfx_ref CLI11::CLI11 Threads::Threads PkgConfig::LIBAV CUDA::cudart_static)
@@ -34,12 +34,13 @@ if(MXLV_BUILD_TESTS)
 
   # Gyvos stebėsenos JSON eilutės ir exit kodo politika (B1): StatsLines + engine_glue be likusios funkcijos.
   # V17: spragų politika (parinktys, GapFill host / cuda-linear, žemupio pabudimas nuo spragos) — tests/func/test_gap_policy.cpp.
-  add_executable(vramflow-glue-tests tests/func/test_stats_lines.cpp tests/func/test_gap_policy.cpp src/func/engine_glue.cpp
-                 src/func/stats_lines.cpp src/mxlio/common_io.cpp)
+  # OK-1: TsSender (enc siuntimo gija: eilė, atsijungimai, pakartotinis prisijungimas) — tests/func/test_ts_sender.cpp.
+  add_executable(vramflow-glue-tests tests/func/test_stats_lines.cpp tests/func/test_gap_policy.cpp tests/func/test_ts_sender.cpp
+                 src/func/engine_glue.cpp src/func/stats_lines.cpp src/func/ts_sender.cpp src/mxlio/common_io.cpp)
   vramflow_warnings(vramflow-glue-tests)
   target_include_directories(vramflow-glue-tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(vramflow-glue-tests PRIVATE mxlv_engine_mxl mxlv_runtime mxlv_flows mxlv_common mxl::mxl
-                        CUDA::cudart_static Threads::Threads Catch2::Catch2WithMain)
+                        CUDA::cudart_static Threads::Threads PkgConfig::LIBAV Catch2::Catch2WithMain)
   set_target_properties(vramflow-glue-tests PROPERTIES BUILD_RPATH "${MXL_ROOT}/lib")
   catch_discover_tests(vramflow-glue-tests TEST_SPEC "~[realtime]")
   catch_discover_tests(vramflow-glue-tests TEST_SPEC "[realtime]" PROPERTIES TIMEOUT 60 LABELS realtime RESOURCE_LOCK realtime)

@@ -813,7 +813,248 @@ def fenc_ingest_audio(out, base=0, tid="fenc_ingest_audio", p_src=27100, p_mid=2
                    av_mean_ms=a["mean_ms"], av_max_abs_ms=a["max_abs_ms"], ingest=si)]
 
 
-KW_SUMMARY_RE = r"\[keepwarm\] baigta: (\d+) užpildymų po (\d+) MB kas ([\d.]+) ms, ([\d.]+) s"
+# --- enc siuntimo gija (OK-1 kriterijai 1–3): udp / multicast / SRT listener, imtuvo atsijungimas ir pakartotinis prisijungimas.
+# Visur: gen (video + garsas) → enc --output … ; enc savi praradimai (ENC_LOSS, kaip chain.ENC_LOSS) — 0, nes tinklas kodavimo
+# kelio nebeblokuoja.
+ENC_LOSS = ("late_frames", "missing_frames", "lapped", "too_late", "in_invalid", "frames_dropped_queue", "late_skips_frames",
+            "audio_underrun_frames", "encode_errors", "mux_errors", "frame_alloc_errors")
+FOUT_PASS_ENV = "VRAMFLOW_T2_PASS"
+FOUT_PASS = "vramflow-t2-slaptas"  # tik testo imtuvui ir enc per env: (niekada ne enc URL'e)
+
+
+def free_port(kind="udp"):
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM if kind == "udp" else socket.SOCK_STREAM) as sk:
+        sk.bind(("127.0.0.1", 0))
+        return sk.getsockname()[1]
+
+
+def probe_streams(src, timeout_s=30):
+    """ffprobe → [{codec_name, width, height, sample_rate}, …] (tuščia — nepavyko)."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height,sample_rate", "-of", "json", src],
+                           capture_output=True, text=True, timeout=timeout_s)
+        return json.loads(r.stdout or "{}").get("streams", [])
+    except (subprocess.TimeoutExpired, ValueError):
+        return []
+
+
+def av_ok(streams):
+    """H.264 1920×1080 ir AAC 48 kHz."""
+    v = any(s.get("codec_name") == "h264" and s.get("width") == 1920 and s.get("height") == 1080 for s in streams)
+    a = any(s.get("codec_name") == "aac" and s.get("sample_rate") == "48000" for s in streams)
+    return v and a
+
+
+def srt_receiver(url, path, log):
+    """ffmpeg SRT caller → TS failas (kol siuntėjas uždaro ryšį arba procesas nužudomas)."""
+    return subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", url, "-c", "copy", "-f", "mpegts", str(path)],
+                            stdout=subprocess.DEVNULL, stderr=open(log, "w"))
+
+
+class EncOut:
+    """gen (1 flow + garsas) | enc --output url: paleidimas, santrauka, savi praradimai, out_* laukai."""
+
+    def __init__(self, out, tag, url, T, extra=()):
+        self.d = fresh_domain(tag)
+        v = vcommon("gpu", "cuda-linear")
+        self.stats = pathlib.Path(out) / tag / "stats.jsonl"
+        self.g = FProc(out, f"{tag}/gen", "gen", self.d, "--flows", 1, "--audio", 1, "--duration", T + 40, *v)
+        self.e = None
+        self.rc = None
+        if wait_flows(self.d, [role_flow_id(1, 0), role_flow_id(3, 0)]):
+            self.e = FProc(out, f"{tag}/enc", "enc", self.d, "--flows", 1, "--audio", 1, "--output", url, "--duration", T, "--warmup", 2,
+                           "--stats-file", self.stats, *extra, *v)
+        self.t0 = time.monotonic()
+
+    def wait(self, timeout):
+        if self.e is not None:
+            self.rc = self.e.wait(timeout=timeout)
+        return self.rc
+
+    def stop(self):
+        for pr in (self.e, self.g):
+            if pr is not None:
+                pr.term()
+
+    def summary(self):
+        return vsummary(self.e, "enc") or {}
+
+    def flow(self):
+        return flow_ctr(self.summary(), 0)
+
+    def stream(self):
+        return ((self.summary().get("streams") or [{}]) + [{}])[0]
+
+    def own_losses(self):
+        f = self.flow()
+        return {k: f[k] for k in ENC_LOSS if f.get(k)}
+
+    def last_stats_flow(self):
+        try:
+            lines = [json.loads(x) for x in self.stats.read_text().splitlines() if x.startswith("{") and '"flows"' in x]
+        except (OSError, ValueError):
+            return {}
+        return (lines[-1].get("flows") or [{}])[0] if lines else {}
+
+    def stderr(self):
+        return self.e.err_path.read_text(errors="replace") if self.e is not None and self.e.err_path.exists() else ""
+
+
+def fout_common(eo, problems, want_connected=True):
+    """Bendros patikros: enc exit 0, 0 savų praradimų, out_* santraukoje ir --stats-file eilutėje."""
+    st, sf = eo.stream(), eo.last_stats_flow()
+    if eo.rc != 0:
+        problems.append(f"enc exit {eo.rc} ({eo.summary().get('fatal')!r})")
+    if eo.own_losses():
+        problems.append(f"enc praradimai {eo.own_losses()}")
+    for k in ("out_url", "out_bytes", "out_dropped_packets", "out_reconnects", "out_connected"):
+        if k not in st:
+            problems.append(f"santraukoje nėra {k}")
+        if k not in sf:
+            problems.append(f"--stats-file eilutėje nėra {k}")
+    if not st.get("out_bytes") or st.get("out_bytes", 0) % 188:
+        problems.append(f"out_bytes {st.get('out_bytes')} (turi būti > 0 ir 188 kartotinis)")
+    if want_connected and st.get("out_connected") is not True:
+        problems.append(f"out_connected {st.get('out_connected')}")
+    return st
+
+
+def fout_line(eo, st, extra=""):
+    return (f"enc exit {eo.rc}, frames {eo.flow().get('frames_encoded')}, late {eo.flow().get('late_frames', 0)}, out_bytes {st.get('out_bytes')}, "
+            f"dropped {st.get('out_dropped_packets')}, reconnects {st.get('out_reconnects')}, connected {st.get('out_connected')}{extra}")
+
+
+def foutput_udp(out, tid="foutput_udp", host="127.0.0.2", query=""):
+    """enc --output udp://127.0.0.2:<p> (OK-1 k. 1): ffprobe mato H.264 1920×1080 ir AAC 48 kHz, 0 late_frames, out_* laukai."""
+    T = 15
+    port = free_port()
+    url = f"udp://{host}:{port}{query}"
+    eo = EncOut(out, tid.replace("[", "-").replace("]", ""), url, T)
+    problems, streams = [], []
+    try:
+        if eo.e is None:
+            return [result(tid, "FAIL", why="gen flow'ai neatsirado")]
+        time.sleep(2)
+        streams = probe_streams(f"udp://{host}:{port}?timeout=15000000", timeout_s=40)
+        eo.wait(T + 60)
+    finally:
+        eo.stop()
+    if not av_ok(streams):
+        problems.append(f"ffprobe: {streams}")
+    st = fout_common(eo, problems)
+    if st.get("out_reconnects") or st.get("out_dropped_packets"):
+        problems.append("UDP: neturi būti nei pakartotinių prisijungimų, nei išmestų paketų")
+    if not str(st.get("out_url", "")).startswith(f"udp://{host}:{port}"):  # redact_url: užklausos reikšmės — „***“
+        problems.append(f"out_url {st.get('out_url')!r}")
+    return [result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") + fout_line(eo, st), streams=streams,
+                   stream=st)]
+
+
+def foutput_multicast(out):
+    """udp://239.1.1.1:<p>?ttl=1 — kaip foutput_udp; be multicast maršruto — SKIP."""
+    r = subprocess.run(["ip", "route", "get", "239.1.1.1"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return [result("foutput_multicast", "SKIP", why=f"nėra multicast maršruto: ip route get 239.1.1.1 → {r.stderr.strip()[:120]!r}")]
+    return foutput_udp(out, "foutput_multicast", "239.1.1.1", "?ttl=1")
+
+
+def foutput_srt_listener(out):
+    """enc --output srt://…?mode=listener (OK-1 k. 2): imtuvas (caller) prisijungia po 3 s — gauna TS (H.264 + AAC); enc exit 0,
+    0 late_frames, įėjimo praradimų 0; slaptažodis — per --srt-passphrase-from env:, nei santraukoje, nei žurnale jo nėra."""
+    tid, T = "foutput_srt_listener", 20
+    port = free_port()
+    url = f"srt://127.0.0.1:{port}?mode=listener"
+    ENV[FOUT_PASS_ENV] = FOUT_PASS  # FProc procesų aplinka (pašalinama pabaigoje)
+    eo = EncOut(out, "foutput-srt-listener", url, T, ["--srt-passphrase-from", f"env:{FOUT_PASS_ENV}"])
+    work = pathlib.Path(out) / "foutput-srt-listener"
+    rx = None
+    problems = []
+    try:
+        if eo.e is None:
+            return [result(tid, "FAIL", why="gen flow'ai neatsirado")]
+        time.sleep(3)
+        if eo.last_stats_flow().get("out_connected"):  # gyva būsena — --stats-file eilutė (santrauka — tik pabaigoje)
+            problems.append("out_connected true be imtuvo")
+        rx = srt_receiver(f"srt://127.0.0.1:{port}?mode=caller&passphrase={FOUT_PASS}", work / "rx.ts", work / "rx.err")
+        eo.wait(T + 60)
+        try:
+            rx.wait(timeout=20)  # siuntėjas uždarė ryšį → imtuvas baigia pats
+        except subprocess.TimeoutExpired:
+            problems.append("imtuvas nebaigė po enc pabaigos")
+    finally:
+        if rx is not None and rx.poll() is None:
+            rx.kill()
+        eo.stop()
+        ENV.pop(FOUT_PASS_ENV, None)
+    streams = probe_streams(str(work / "rx.ts"))
+    if not av_ok(streams):
+        problems.append(f"imtuvo TS: {streams}")
+    st = fout_common(eo, problems)
+    if st.get("out_reconnects"):
+        problems.append(f"out_reconnects {st.get('out_reconnects')} (listener laukė imtuvo — ne pakartotinis jungimasis)")
+    leaked = [n for n, t in (("santrauka", json.dumps(eo.summary())), ("stderr", eo.stderr()),
+                             ("stats", eo.stats.read_text() if eo.stats.exists() else "")) if FOUT_PASS in t]
+    if leaked:
+        problems.append(f"slaptažodis matomas: {leaked}")
+    size = (work / "rx.ts").stat().st_size if (work / "rx.ts").exists() else 0
+    return [result(tid, "FAIL" if problems else "PASS", why="; ".join(problems) + (" | " if problems else "") + fout_line(eo, st, f", imtuvo TS {size} B"),
+                   streams=streams, stream=st)]
+
+
+def foutput_srt_reconnect(out):
+    """SRT listener (OK-1 k. 3): imtuvas nužudomas po 10 s, paleidžiamas po 5 s → vėl gauna TS; out_reconnects ≥ 1, enc neužstrigo
+    (baigė per --duration), 0 late_frames."""
+    tid, T = "foutput_srt_reconnect", 40
+    port = free_port()
+    eo = EncOut(out, "foutput-srt-reconnect", f"srt://127.0.0.1:{port}?mode=listener", T)
+    work = pathlib.Path(out) / "foutput-srt-reconnect"
+    rx1 = rx2 = None
+    problems = []
+    t_end = None
+    try:
+        if eo.e is None:
+            return [result(tid, "FAIL", why="gen flow'ai neatsirado")]
+        time.sleep(2)
+        rx1 = srt_receiver(f"srt://127.0.0.1:{port}?mode=caller", work / "rx1.ts", work / "rx1.err")
+        time.sleep(10)
+        rx1.send_signal(signal.SIGKILL)
+        rx1.wait()
+        time.sleep(5)
+        # antras imtuvas: siuntėjas ryšio nutrūkimą pamato po SRT peer idle (~5 s) ir vėl klauso — caller bando iš naujo
+        for attempt in range(10):
+            rx2 = srt_receiver(f"srt://127.0.0.1:{port}?mode=caller", work / "rx2.ts", work / f"rx2-{attempt}.err")
+            time.sleep(3)
+            if rx2.poll() is None:
+                break
+        eo.wait(T + 60)
+        t_end = time.monotonic() - eo.t0
+        try:
+            rx2.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            problems.append("antras imtuvas nebaigė po enc pabaigos")
+    finally:
+        for r in (rx1, rx2):
+            if r is not None and r.poll() is None:
+                r.kill()
+        eo.stop()
+    s1, s2 = probe_streams(str(work / "rx1.ts")), probe_streams(str(work / "rx2.ts"))
+    if not av_ok(s1):
+        problems.append(f"pirmo imtuvo TS: {s1}")
+    if not av_ok(s2):
+        problems.append(f"antro imtuvo TS (po pakartotinio prisijungimo): {s2}")
+    st = fout_common(eo, problems)
+    if (st.get("out_reconnects") or 0) < 1:
+        problems.append(f"out_reconnects {st.get('out_reconnects')} (< 1)")
+    if t_end is None or eo.rc is None or t_end > T + 15:
+        problems.append(f"enc užstrigo: baigė po {t_end} s (riba {T + 15} s)")
+    sizes = [(work / f).stat().st_size if (work / f).exists() else 0 for f in ("rx1.ts", "rx2.ts")]
+    return [result(tid, "FAIL" if problems else "PASS",
+                   why="; ".join(problems) + (" | " if problems else "") + fout_line(eo, st, f", imtuvų TS {sizes} B, enc baigė po {t_end or 0:.1f} s"),
+                   stream=st)]
+
+
+KW_SUMMARY_RE =r"\[keepwarm\] baigta: (\d+) užpildymų po (\d+) MB kas ([\d.]+) ms, ([\d.]+) s"
 
 
 def fkeepwarm(out):
@@ -1293,7 +1534,10 @@ def main():
     tests = {"F5a": lambda: [f5a(out)], "F5b": lambda: [f5b(out)], "F6": lambda: f6(out), "F7": lambda: [f7(out)],
              "f7_teeth": lambda: [f7_teeth(out)], "F8": lambda: [f8(out)], "fgfx1": lambda: fgfx1(out), "fcomp1": lambda: fcomp1(out),
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
-             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "foutput_args": lambda: foutput_args(out), "fenc_ingest_audio": lambda: fenc_ingest_audio(out) + fenc_ingest_audio(out, 2, "fenc_ingest_audio[in-flow-base 2]", 27102, 27103), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
+             "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "foutput_args": lambda: foutput_args(out),
+             "foutput_udp": lambda: foutput_udp(out), "foutput_multicast": lambda: foutput_multicast(out),
+             "foutput_srt_listener": lambda: foutput_srt_listener(out), "foutput_srt_reconnect": lambda: foutput_srt_reconnect(out),
+             "fenc_ingest_audio": lambda: fenc_ingest_audio(out) + fenc_ingest_audio(out, 2, "fenc_ingest_audio[in-flow-base 2]", 27102, 27103), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
     # Paleidimo / sustabdymo testai (planas §P6) — atskirame modulyje; jis naudoja šį modulį (ne antrą jo kopiją).

@@ -7,8 +7,9 @@
 //      NVENC šioje kortoje neturi lauko kodavimo (field_encoding=0, išmatuota) → srautas formaliai progresyvus 1080p25
 //      su interlaced turiniu. Tinka talpos matavimui ir vidinei kontribucijai, NE 1080i50 emisijai.
 //  (b) --encoder x264: tas pats weave → device staging → vienas D2H į pinned buferį → libx264 tikras interlaced (MBAFF, tff).
-// Gijos: 1 tick gija (MXL + batch kernel'is) + po vieną darbininką srautui (kodavimas, AAC, mux, UDP). Darbininkai MXL
-// nekviečia. Eilė ribota: pilna → kadras atmetamas ir SKAIČIUOJAMAS (niekas nedingsta tyliai).
+// Gijos: 1 tick gija (MXL + batch kernel'is) + po vieną darbininką srautui (kodavimas, AAC, mux) + po vieną siuntimo giją
+// srautui (TsSender: udp / srt, atsijungimai, pakartotinis prisijungimas — kodavimas tinklo nelaukia). Darbininkai MXL
+// nekviečia. Eilės ribotos: pilna → kadras (TS paketas) atmetamas ir SKAIČIUOJAMAS (niekas nedingsta tyliai).
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -34,6 +35,8 @@ extern "C" {
 #include "func/engine_glue.hpp"
 #include "func/flows.hpp"
 #include "func/func_common.hpp"
+#include "func/stats_lines.hpp"
+#include "func/ts_sender.hpp"
 #include "ingest/url_policy.hpp"
 #include "media/cpu/cpu_media.hpp"
 #include "media/media_kernels.hpp"
@@ -102,7 +105,31 @@ struct Stream {
     std::vector<std::uint8_t*> pinned;  // laisvi host buferiai
     std::mutex pool_m;
     bool pinned_fallback = false;
+    // tinklo išvestis: muxer'is rašo į sender'io eilę (sukuriamas prieš darbininką, gyvena iki santraukos)
+    std::string out_url;  // redaguotas (be paslapčių)
+    std::unique_ptr<TsSender> sender;
 };
+
+// Muxer'io AVIOContext rašymas → siuntimo eilė (niekada neblokuoja, niekada negrąžina klaidos: tinklo gedimai — sender'io
+// skaitikliuose, ne mux_errors).
+#if FF_API_AVIO_WRITE_NONCONST
+int ts_write(void* opaque, std::uint8_t* buf, int n) {
+#else
+int ts_write(void* opaque, const std::uint8_t* buf, int n) {
+#endif
+    static_cast<TsSender*>(opaque)->push(buf, static_cast<std::size_t>(n));
+    return n;
+}
+
+// out_* laukai (santrauka ir --stats-file flow'o objektas): ,"out_url":…,"out_connected":…
+void out_fields(std::string& j, const Stream& s) {
+    const SenderStats st = s.sender ? s.sender->stats() : SenderStats{};
+    j += ",\"out_url\":";
+    mxlv::json_escape_into(j, s.out_url);
+    j += strf(",\"out_bytes\":%llu,\"out_dropped_packets\":%llu,\"out_reconnects\":%llu,\"out_connected\":%s",
+              static_cast<unsigned long long>(st.bytes_sent), static_cast<unsigned long long>(st.packets_dropped),
+              static_cast<unsigned long long>(st.reconnects), st.connected ? "true" : "false");
+}
 
 struct Ctx {
     const Opts* o = nullptr;
@@ -252,10 +279,9 @@ void worker(Ctx& cx, Stream& s) {
         fifo = av_audio_fifo_alloc(AV_SAMPLE_FMT_FLTP, 2, 48000);
         s.audio_tl = mxlv::timing::AudioTimeline(ac->frame_size, kMaxSilenceSamples);
     }
-    // --- mux
+    // --- mux → savas AVIOContext (1316 B = 7 TS paketai) → TsSender eilė; tinklą atidaro ir rašo siuntimo gija
     {
-        const std::string url = enc_output_url(o, static_cast<std::uint32_t>(s.n));
-        if (e = avformat_alloc_output_context2(&oc, nullptr, "mpegts", url.c_str()); e < 0) { fail("mux alloc: " + averr(e)); goto out; }
+        if (e = avformat_alloc_output_context2(&oc, nullptr, "mpegts", nullptr); e < 0) { fail("mux alloc: " + averr(e)); goto out; }
         AVStream* vs = avformat_new_stream(oc, nullptr);
         avcodec_parameters_from_context(vs->codecpar, vc);
         vs->time_base = {1, 90000};
@@ -265,12 +291,12 @@ void worker(Ctx& cx, Stream& s) {
             as->time_base = {1, 90000};
         }
         {
-            // srt:// slaptažodis — libsrt parinktimi (ne URL'e: URL matomas žurnaluose ir santraukoje)
-            AVDictionary* od = nullptr;
-            if (!cx.srt_pass.empty() && mxlv::ingest::url_scheme(url) == "srt") av_dict_set(&od, "passphrase", cx.srt_pass.c_str(), 0);
-            e = avio_open2(&oc->pb, url.c_str(), AVIO_FLAG_WRITE, nullptr, &od);
-            av_dict_free(&od);
-            if (e < 0) { fail("avio_open2: " + averr(e)); goto out; }
+            auto* buf = static_cast<unsigned char*>(av_malloc(TsSender::kChunk));
+            if (buf) oc->pb = avio_alloc_context(buf, static_cast<int>(TsSender::kChunk), 1, s.sender.get(), nullptr, ts_write, nullptr);
+            if (!oc->pb) { av_free(buf); fail("avio_alloc_context"); goto out; }
+            // flush taškai (po kiekvieno paketo) nerašo nepilno buferio: sender'is gauna pilnus 1316 B gabalus (trailer — likutį)
+            oc->pb->min_packet_size = static_cast<int>(TsSender::kChunk);
+            oc->flags |= AVFMT_FLAG_CUSTOM_IO;
         }
         AVDictionary* md = nullptr;
         av_dict_set_int(&md, "muxrate", o.muxrate, 0);
@@ -363,9 +389,14 @@ out:
         s.q.clear();
     }
     if (oc) {
-        if (oc->pb) avio_closep(&oc->pb);
+        if (oc->pb) {
+            av_freep(static_cast<void*>(&oc->pb->buffer));
+            avio_context_free(&oc->pb);
+        }
         avformat_free_context(oc);
     }
+    // eilės likutis (trailer) išsiunčiamas ne ilgiau kaip 0,5 s; antras signalas — iškart (likutis suskaičiuojamas išmestu)
+    if (s.sender) s.sender->stop(fast_stop_flag().load() ? std::chrono::milliseconds{0} : TsSender::kDrainDefault);
     if (fifo) av_audio_fifo_free(fifo);
     // Antras signalas (greitas išėjimas, ≤ 200 ms): koderių uždarymas (x264 lookahead / gijų sujungimas — dešimtys ms) praleidžiamas,
     // atmintį atlaisvina proceso pabaiga.
@@ -408,6 +439,7 @@ int run_enc(const Opts& o) {
                           static_cast<double>(s.encode_ms.quantile(0.99)) / 1e6);
             // klaidos tekstas — bet kokio ilgio ir su bet kokiais simboliais (libav žurnalo eilutė): ne per fiksuotą buferį
             mxlv::json_escape_into(extra, s.error);
+            out_fields(extra, s);
             extra += "}";
         }
         extra += "]";
@@ -520,9 +552,29 @@ int run_enc(const Opts& o) {
 
     cudaStream_t stream{};
     if (!cpu) cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    // Siuntimo eilės riba — 2 s srauto: 2 s × muxrate / 8 (CBR mux); be muxrate (0) — (video + garsas) × 1,1 (TS / PES
+    // antraštės ~10 %). 8,5 Mbit/s → 2,125 MB srautui. Ilgesnis atsijungimas — seniausi TS paketai išmetami (out_dropped_packets).
+    const std::uint64_t mux_bps = o.muxrate ? o.muxrate : (std::uint64_t{o.vbitrate} + (o.audio ? o.abitrate : 0)) * 11 / 10;
+    const auto max_queue = static_cast<std::size_t>(2 * mux_bps / 8);
     for (std::uint32_t n = 0; n < o.flows && !rc; ++n) {
         auto s = std::make_unique<Stream>();
         s->n = static_cast<int>(n);
+        {
+            const std::string url = enc_output_url(o, n);
+            s->out_url = mxlv::ingest::redact_url(url);
+            // srt:// slaptažodis — libsrt parinktimi (ne URL'e: URL matomas žurnaluose ir santraukoje)
+            const std::string pass = mxlv::ingest::url_scheme(url) == "srt" ? cx.srt_pass : std::string{};
+            s->sender = std::make_unique<TsSender>(
+                s->out_url,
+                [url, pass](AVIOContext** pb, const AVIOInterruptCB& cb) {
+                    AVDictionary* od = nullptr;
+                    if (!pass.empty()) av_dict_set(&od, "passphrase", pass.c_str(), 0);
+                    const int e = avio_open2(pb, url.c_str(), AVIO_FLAG_WRITE, &cb, &od);
+                    av_dict_free(&od);
+                    return e;
+                },
+                max_queue);
+        }
         if (cpu) {  // C: tik sistemos atmintis
             for (int k = 0; k < kQueueMax + 3; ++k) s->pinned.push_back(static_cast<std::uint8_t*>(std::malloc(nv12)));
             s->pinned_fallback = true;
@@ -859,6 +911,10 @@ int run_enc(const Opts& o) {
     for (auto& slot : in) ports_in.emplace_back(slot, inst);
     engine::SystemClock clk;
     EngineStats es(o, "enc");
+    // --stats-file: flow'o objekte — tie patys out_* kaip santraukoje (absoliučios reikšmės; publikavimo gija, stats() saugi)
+    es.lines.set_flow_extra([&streams](std::size_t n, std::string& j) {
+        if (n < streams.size()) out_fields(j, *streams[n]);
+    });
     engine::StatsHub& hub = es.hub;
     // Startas — wait-all (V18): enc MXL išėjimų neturi, įėjimų laukta prieš variklį (attach_inputs)
     engine::EngineConfig ecfg = engine_config(o, EngineTiming::Isolation, o.read_offset_us * 1000);

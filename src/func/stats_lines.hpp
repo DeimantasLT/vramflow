@@ -10,7 +10,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <string>
+#include <utility>
 
 #include "engine/stats.hpp"
 
@@ -48,6 +50,10 @@ public:
     void publish(const engine::Snapshot&) override;
     void event(const engine::Event&, const engine::StatsNames&) override;
     double interval_s() const { return interval_s_; }
+    // Funkcijos flow'o laukai (pvz. enc out_*: absoliučios reikšmės, ne skirtumai), prirašomi flow'o objekto gale („,"k":v“).
+    // Kviečiama publikavimo gijoje — f turi būti saugi tai gijai. Nustatyti prieš StatsHub::prepare (run).
+    using FlowExtra = std::function<void(std::size_t flow, std::string& json)>;
+    void set_flow_extra(FlowExtra f) { flow_extra_ = std::move(f); }
     std::uint64_t lines() const { return lines_.load(std::memory_order_acquire); }
 
 private:
@@ -60,6 +66,7 @@ private:
     bool gpu_tried_ = false, gpu_ok_ = false;
     bool gpu_wanted_ = true;
     std::string buf_;
+    FlowExtra flow_extra_;
 };
 
 // „2026-11-12T10:00:00.123Z“ iš TAI ns (UTC = TAI − 37 s; MXL laikas — TAI).
