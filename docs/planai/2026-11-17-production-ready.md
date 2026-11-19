@@ -519,11 +519,11 @@ failas arba commit.
 | O4 | nepradėta | | |
 | O5 | nepradėta | | |
 | O6 | nepradėta | | |
-| G1 | nepradėta | | |
-| G2 | nepradėta | bazė: chain kelias 11 | `docs/rezultatai/2026-11-17-p8-talpa.md` |
-| G3 | nepradėta | bazė: `gap_policy < 1 ms` — 6 iš 20 krenta | §3 |
-| G4 | nepradėta | | |
-| G5 | nepradėta | | |
+| G1 | vyksta | 0,85 · kelias 3 × 60 s: logo 54 ir enc-nvenc-ll 10 — 3 / 3; dec 18 — 3 / 3 su 0,2 % tol.; composite 27 — 2 / 3; ingest N = 13 — 3 / 3; chain 9 — šaltas 0 / 3, įkaitęs ir pašildytas 3 / 3: GPU galios ribos žingsnis 55 → 42 W ties ~71 °C (platforma) | `docs/rezultatai/2026-11-19-production-ready-faze3.md` §3.3 |
+| G2 | PASS (dokumentuota) | N = 12: 3 / 5 griežtai, 5 / 5 tol.; kritimai — WDDM GPU įvykiai visiems flow'ams vienu metu, ne kodo talpos riba | `docs/rezultatai/2026-11-19-production-ready-faze3.md` §3.2 |
+| G3 | PASS su autoriaus patvirtinta platformos riba | 2 sesijos: fsplit 0 / 100 FAIL; fiso_stall 5 / 240 → 4 išspręsti (b) taisykle, r01 — WSL2 riba; `gap_policy < 1 ms` — WSL2 SKIP; `interop_foreign_writer` 20× dar nepaleistas | `docs/rezultatai/2026-11-19-production-ready-faze3.md` §3.1 |
+| G4 | PASS | p50 / p99 lentelė N = 1 ir 0,85 · kelias; vartai `regress.py` (p99 + 10 %) | `docs/rezultatai/2026-11-19-production-ready-faze3.md` §3.3; `ctest perf_regress` |
+| G5 | PASS | pirmas commit p50 0,367 s (N = 1), 0,601 s (N = 54); po `kill -9` 0,356 / 0,613 s; 5 / 5 | `docs/rezultatai/2026-11-19-production-ready-faze3.md` §3.3; `ctest perf_startup_time` |
 | K1 | nepradėta | bazė: `ctest` 482 / 483; funkcinis 351 / 352. Po 1 fazės (`dad306b`): `ctest` 510 / 510 ir 509 / 510 (krito tik `gap_policy … < 1 ms`); visas funkcinis rinkinys kaip root — 353 iš 353, vienas paleidimas (kriterijui reikia trijų iš eilės, 6.3). Po 2 fazės (`1a26023`): root `ctest` 534 / 534, funkcinis 364 — 3 FAIL; ne root `ctest` 532 / 534, funkcinis 4 FAIL; visi kritę — laiko tvirtinimai po apkrova (izoliuotai praeina), perkelti į 3 fazę | §3; `docs/rezultatai/2026-11-17-production-ready-faze1.md`; `…-faze2.md` §2.6 |
 | K2 | neuždarytas WSL2 (mūsų kode 0) | `compute-sanitizer`: 0 klaidų, 3 paleidimai iš eilės (rado MXL `cuda-linear` lenktynes, `upstream/U7`). ASan + UBSan: 0 atminties klaidų, 0 UBSan, 0 nutekėjimų mūsų kode (vienas testo nutekėjimas pataisytas); 131 nutekėjimas NVIDIA WSL tvarkyklėje — autorius slopinimo sąrašo nenori, todėl etapas `FAIL`. TSan: 12 iš 13 `PASS` (pataisyta `VirtualClock` lenktynė ir nuo tvarkaraščio priklausę `B5` testai), likęs — `libavcodec` vidinės lenktynės. Pakartoti natyviame Linux | `scripts/linux/50-sanitizers.sh cs asan tsan`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.1–2.3 |
 | K3 | PASS | bazė 480 radinių 24 tikrinimuose; 5 tikrinimai išjungti su priežastimi `.clang-tidy` faile (205 radiniai), likę ištaisyti kode; galutinis — 0 radinių, 62 vertimo vienetai, `NOLINT` nėra. Po taisymų `ctest` 534 / 534, funkciniai 89 / 89 | `scripts/linux/55-clang-tidy.sh`; `docs/rezultatai/2026-11-17-production-ready-faze2.md` §2.4 |

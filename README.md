@@ -884,7 +884,9 @@ native Linux rerun will give the authoritative numbers.
 | Full chain: TS → decode → logo → H.264 + AAC → TS | 4 | ≥ 12 (limit not reached) | ~2.0 → ~0.33 |
 
 - Full chain at N=12: CUDA cores ~10 % busy, NVENC 63 %, NVDEC 51 %, ~40 W. Neither engine is saturated; the 2026-11-17
-  rerun below fails N=12 on late frames, cause not yet found (an earlier version of this README wrongly named NVENC).
+  rerun below fails N=12 on late frames. Phase 3 found the cause: every failure is one unit lost by **all** flows at the
+  same moment, coinciding with a WDDM GPU stall seen by an independent witness — a platform event, not a code limit
+  (an earlier version of this README wrongly named NVENC).
 
 **Capacity knee with repeats (2026-11-17, plan P8).** Same machine, driver 596.49, G only, 30 s per level, a level
 counts only if **all 3 repeats** pass; found by `capacity.py --n auto` (doubling, then bisection). VRAM per flow is the
@@ -895,7 +897,7 @@ least-squares slope of ΔVRAM(N) over passing levels.
 | Logo burn-in | ≥ 64 | search limit | 56.0 MB (1.000) | SM ~39 % |
 | NVENC low-latency encode | 12 | **driver NVENC session limit** | 126.2 MB (1.000) | NVENC 64 % |
 | H.264 decode (NVDEC) | 22 | NVDEC throughput | 182.2 MB (0.997) | NVDEC ~91 % |
-| Full chain | 11 | late frames at 12, cause not found | 284.3 MB (0.999) | NVENC 59 %, NVDEC 46 % |
+| Full chain | 11 | late frames at 12: WDDM GPU stalls (phase 3) | 284.3 MB (0.999) | NVENC 59 %, NVDEC 46 % |
 | Compositor, K = 2 | ≥ 32 | search limit | 119.1 MB (1.000) | SM ~37 %, 1.1 GHz |
 
 - The GeForce driver allows 12 concurrent NVENC sessions; the 13th fails with `OpenEncodeSessionEx failed: incompatible
@@ -905,6 +907,27 @@ least-squares slope of ΔVRAM(N) over passing levels.
   (550–1112 MHz): the earlier G failures were the GPU clock, not the code.
 
 Details: [`docs/rezultatai/2026-11-17-p8-talpa.md`](docs/rezultatai/2026-11-17-p8-talpa.md).
+
+**Stability at 0.85 × knee (2026-11-19, plan phase 3).** 3 × 60 s per function, G, `keepwarm` on:
+
+| Function | N | Strict pass | ≤ 0.2 % loss pass | Output lateness p50 / p99 |
+|---|---|---|---|---|
+| Logo burn-in | 54 | 3 / 3 | 3 / 3 | 12.2 / 12.7 ms |
+| NVENC low-latency encode | 10 | 3 / 3 | 3 / 3 | 9.6 / 10.4 ms |
+| H.264 decode (NVDEC) | 18 | 2 / 3 | 3 / 3 | 1.1 / 1.5 ms |
+| Compositor, K = 2 | 27 | 2 / 3 | 2 / 3 | 11.9 / 14.3 ms |
+| Ingest 1080i50, NVDEC | 13 | 3 / 3 | 3 / 3 | — |
+| Full chain | 9 | 0 / 3 cold, 3 / 3 preheated | 0 / 3 cold, 3 / 3 preheated | 18.6 / 19.1 ms |
+
+The dec and compositor failures are one unit lost by all flows at once (platform event). The chain failures are a
+**laptop power-limit step**: when the GPU warms from cold to ~71 °C the platform switches the GPU power limit from ~55 W
+to a fixed 42 W and the whole GPU freezes for 80–160 ms. It reproduces with plain `ffmpeg` (cuvid → nvenc) and no
+VRAMFlow code, and disappears when the GPU is preheated until the limit settles. On-air hardware needs a fixed GPU power
+limit. Start-up to first commit: 0.37 s
+(N = 1), 0.60 s (N = 54); restart after `kill -9` the same. Regression gate: `tests/perf/regress.py` against
+`tests/perf/baseline/` (`ctest perf_regress`). Timing tests now separate platform stalls from isolation bugs with two
+witnesses (`keepwarm --event-ms` for the GPU, `vramflow-func hostwatch` for the host); an unwitnessed violation stays a
+failure. Details: [`docs/rezultatai/2026-11-19-production-ready-faze3.md`](docs/rezultatai/2026-11-19-production-ready-faze3.md).
 - Grain latency p50 1.2 ms on GPU flows vs 2.9 ms on RAM flows. GPU processing with RAM flows (H) collapses at 32 logo
   flows; with GPU flows (G) it does not.
 - **GPU clocks.** When a laptop GPU (WSL2 / WDDM) idles in power state P8 and any process starts a burst of wide GPU work
