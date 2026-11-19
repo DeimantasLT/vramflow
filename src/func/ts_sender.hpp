@@ -27,8 +27,13 @@ extern "C" {
 namespace mxlv::func {
 
 struct SenderStats {
-    std::uint64_t bytes_sent = 0;       // sėkmingai išrašyti baitai (188 kartotinis)
-    std::uint64_t packets_dropped = 0;  // 188 B TS paketai, kurie neišsiųsti: pilna eilė, nepavykęs rašymas, likę sustabdant
+    // Baitai, kuriuos PRIĖMĖ transportas (avio rašymas pavyko; 188 kartotinis) — ne „pristatyti imtuvui“: SRT, kol nepastebi
+    // mirusio imtuvo (peer idle timeout, ~5 s), rašymą priima į savo siuntimo buferį ir prarastus duomenis išmeta pats.
+    std::uint64_t bytes_sent = 0;
+    // 188 B TS paketai, kuriuos išmetė šis sender'is: pilna eilė (atsijungus / laukiant imtuvo), nepavykęs rašymas, likę
+    // sustabdant. Praradimas, kol SRT aptinka mirusį imtuvą, čia NESKAIČIUOJAMAS — atsijungimas matomas iš connected
+    // (false), reconnects ir žurnalo eilutės „ryšys nutrūko“.
+    std::uint64_t packets_dropped = 0;
     std::uint64_t reconnects = 0;       // atidarymo bandymai po pirmojo (nepavykę open ir prisijungimai po atsijungimo)
     bool connected = false;             // išvestis atidaryta (UDP — iškart; SRT listener — kai prisijungė imtuvas); po stop() —
                                         // būsena sustabdymo metu

@@ -122,6 +122,8 @@ int ts_write(void* opaque, const std::uint8_t* buf, int n) {
 }
 
 // out_* laukai (santrauka ir --stats-file flow'o objektas): ,"out_url":…,"out_connected":…
+// out_bytes — transporto priimti baitai (ne pristatyti); out_dropped_packets — sender'io išmesti TS paketai (be SRT vidinių
+// praradimų, kol aptinkamas miręs imtuvas: tai matyti iš out_connected / out_reconnects ir žurnalo; žr. ts_sender.hpp).
 void out_fields(std::string& j, const Stream& s) {
     const SenderStats st = s.sender ? s.sender->stats() : SenderStats{};
     j += ",\"out_url\":";

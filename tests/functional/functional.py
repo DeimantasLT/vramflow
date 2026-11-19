@@ -1002,6 +1002,48 @@ def foutput_srt_listener(out):
                    streams=streams, stream=st)]
 
 
+def foutput_srt_listener_stop(out):
+    """Dažniausia eterio būsena — SRT listener be imtuvo: enc koduoja, SIGTERM → exit 0 per ≤ 1 s (užblokuotas listener open
+    nutraukiamas pertraukimo callback'u), santraukoje out_connected false, out_bytes 0; sustabdžius gen domenas tuščias."""
+    tid = "foutput_srt_listener_stop"
+    port = free_port()
+    eo = EncOut(out, "foutput-srt-listener-stop", f"srt://127.0.0.1:{port}?mode=listener", 60)
+    problems = []
+    rc, dt, running = None, None, {}
+    try:
+        if eo.e is None:
+            return [result(tid, "FAIL", why="gen flow'ai neatsirado")]
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not (running := eo.last_stats_flow()).get("ok"):
+            time.sleep(0.2)
+        time.sleep(2)  # keli sekundės kodavimo be imtuvo (eilė pilnėja, seniausi paketai išmetami)
+        if not running.get("ok"):
+            problems.append("enc nepradėjo koduoti per 30 s")
+        if running.get("out_connected"):
+            problems.append("out_connected true be imtuvo")
+        t1 = time.monotonic()
+        eo.e.p.send_signal(signal.SIGTERM)
+        rc = eo.e.wait(timeout=30)
+        dt = time.monotonic() - t1
+        eo.rc = rc
+    finally:
+        eo.stop()
+    st = eo.stream()
+    if rc != 0:
+        problems.append(f"enc exit {rc} ({eo.summary().get('fatal')!r})")
+    if dt is None or dt > 1.0:
+        problems.append(f"SIGTERM → pabaiga per {dt} s (> 1 s)")
+    if not eo.flow().get("frames_encoded"):
+        problems.append("frames_encoded 0")
+    if st.get("out_connected") is not False or st.get("out_bytes") != 0:
+        problems.append(f"out_connected {st.get('out_connected')}, out_bytes {st.get('out_bytes')} (laukta false, 0)")
+    if leftovers(eo.d):
+        problems.append(f"domene liko {leftovers(eo.d)}")
+    return [result(tid, "FAIL" if problems else "PASS",
+                   why="; ".join(problems) + (" | " if problems else "") + f"SIGTERM → exit {rc} per {dt or 0:.2f} s, frames {eo.flow().get('frames_encoded')}, "
+                   f"dropped {st.get('out_dropped_packets')}, connected {st.get('out_connected')}", stream=st)]
+
+
 def foutput_srt_reconnect(out):
     """SRT listener (OK-1 k. 3): imtuvas nužudomas po 10 s, paleidžiamas po 5 s → vėl gauna TS; out_reconnects ≥ 1, enc neužstrigo
     (baigė per --duration), 0 late_frames."""
@@ -1536,7 +1578,8 @@ def main():
              "fcomp2": lambda: fcomp2(out), "fcomp3": lambda: fcomp3(out), "fcomp4": lambda: fcomp4(out), "fcomp5": lambda: fcomp5(out),
              "fcomp6": lambda: fcomp6(out), "fcli1": lambda: fcli1(out), "foutput_args": lambda: foutput_args(out),
              "foutput_udp": lambda: foutput_udp(out), "foutput_multicast": lambda: foutput_multicast(out),
-             "foutput_srt_listener": lambda: foutput_srt_listener(out), "foutput_srt_reconnect": lambda: foutput_srt_reconnect(out),
+             "foutput_srt_listener": lambda: foutput_srt_listener(out),
+             "foutput_srt_listener_stop": lambda: foutput_srt_listener_stop(out), "foutput_srt_reconnect": lambda: foutput_srt_reconnect(out),
              "fenc_ingest_audio": lambda: fenc_ingest_audio(out) + fenc_ingest_audio(out, 2, "fenc_ingest_audio[in-flow-base 2]", 27102, 27103), "fkeepwarm": lambda: fkeepwarm(out), "ffmt_neg": lambda: ffmt_neg(out),
              "ffmt_logo": lambda: ffmt_logo(out), "ffmt_logo720": lambda: ffmt_logo720(out), "ffmt_comp": lambda: ffmt_comp(out), "ffmt_enc": lambda: ffmt_enc(out),
              "ffmt_dec": lambda: ffmt_dec(out), "ffmt_dec_chroma": lambda: ffmt_dec_chroma(out)}
