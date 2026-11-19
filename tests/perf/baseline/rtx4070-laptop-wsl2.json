@@ -1,0 +1,32 @@
+{
+ "schema": 1,
+ "source": "/root/build/vramflow/p8-knee",
+ "updated_utc": "2026-11-19T06:20:59Z",
+ "functions": {
+  "chain-G": {
+   "knee": 11,
+   "p99_ms": 19.661,
+   "vram_per_flow_mb": 284.27
+  },
+  "composite-k2-G": {
+   "knee": 32,
+   "p99_ms": 14.549,
+   "vram_per_flow_mb": 119.05
+  },
+  "dec-G": {
+   "knee": 22,
+   "p99_ms": 1.524,
+   "vram_per_flow_mb": 182.18
+  },
+  "enc-nvenc-ll-G": {
+   "knee": 12,
+   "p99_ms": 10.617,
+   "vram_per_flow_mb": 126.21
+  },
+  "logo-G": {
+   "knee": 64,
+   "p99_ms": 13.5,
+   "vram_per_flow_mb": 56.0
+  }
+ }
+}

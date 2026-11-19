@@ -108,6 +108,9 @@ if(MXLV_BUILD_TESTS)
   if(Python3_Interpreter_FOUND)
     add_test(NAME perf_knee COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_knee.py)
     add_test(NAME perf_capacity_file COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_capacity_file.py)
+    # Našumo regresijos vartų logika (planas 2026-11-17 §3.3; kampanija prieš tests/perf/baseline/ — regress.py)
+    add_test(NAME perf_regress COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_regress.py)
+    add_test(NAME perf_startup_time COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_startup_time.py)
     # Build grūdinimas (planas 2026-11-17 §1.1, S6): kiekvienas savas vertimo vienetas ir kiekvienas savas ELF failas
     add_test(NAME build_hardening COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/arch/check_hardening.py
              ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
