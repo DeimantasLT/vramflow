@@ -111,6 +111,10 @@ if(MXLV_BUILD_TESTS)
     # Našumo regresijos vartų logika (planas 2026-11-17 §3.3; kampanija prieš tests/perf/baseline/ — regress.py)
     add_test(NAME perf_regress COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_regress.py)
     add_test(NAME perf_startup_time COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/perf/test_startup_time.py)
+    # vramflow-run prižiūrėtojas (OK-2): griežta konfigūracija ir komandų grafas (gryna logika, GPU nereikia)
+    add_test(NAME run_config COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vramflow-run/test_config.py)
+    add_test(NAME run_graph COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vramflow-run/test_graph.py)
+    set_tests_properties(run_config run_graph PROPERTIES TIMEOUT 30)
     # Build grūdinimas (planas 2026-11-17 §1.1, S6): kiekvienas savas vertimo vienetas ir kiekvienas savas ELF failas
     add_test(NAME build_hardening COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/arch/check_hardening.py
              ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
@@ -141,8 +145,14 @@ if(MXLV_BUILD_MEDIA)
   option(MXLV_BUILD_FUNC "vramflow-func vykdomasis" OFF)
   if(MXLV_BUILD_FUNC)
     include(${CMAKE_SOURCE_DIR}/cmake/func.cmake)       # vramflow-func vykdomasis
+    install(TARGETS vramflow-func RUNTIME DESTINATION bin)
   endif()
 endif()
+
+# vramflow-run (OK-2): <prefix>/bin/vramflow-run + <prefix>/lib/vramflow-run/vramflow_run/ (tik Python stdlib); vramflow-func
+# ieško šalia savęs (bin/). Pastaba: įdiegtas vramflow-func RUNPATH dar neturi (MXL biblioteka) — sutvarko Docker atvaizdo darbas.
+install(PROGRAMS tools/vramflow-run/vramflow-run DESTINATION bin)
+install(DIRECTORY tools/vramflow-run/vramflow_run DESTINATION lib/vramflow-run FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)
 
 # Alfa grafika (Raster, v210a, etalonas) — po media bloko, nes etalonas naudoja mxlv_media
 include(${CMAKE_SOURCE_DIR}/cmake/gfx.cmake)

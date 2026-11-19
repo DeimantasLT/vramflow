@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Deimantas Kiršinas
+# SPDX-License-Identifier: Apache-2.0
+"""vramflow-run <config.json> — visa grandinė (ingest → logo | composite → enc) iš vieno konfigūracijos failo (OK-2).
+
+Exit kodai: 0 — sustabdyta SIGTERM / SIGINT (visi vaikai baigėsi, domenas pašalintas); 2 — konfigūracijos klaida (prieš
+paleidžiant vaikus), vaikas nepasileido, įėjimas nepristatė duomenų per input_wait_s arba vaikas krito per dažnai.
+
+vramflow-func ieškoma: --exe, šalia šio failo, ../bin, PATH. Domenas — naujas <šaknis>/vf-run-<8 hex> (šaknis: --domain-root,
+VF_DOMAIN_ROOT, numatyta /dev/shm), pašalinamas baigiant (bet kuriuo exit keliu, išskyrus paties prižiūrėtojo SIGKILL).
+"""
+import argparse
+import os
+import pathlib
+import secrets
+import shutil
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+for _p in (HERE, HERE.parent / "lib" / "vramflow-run"):  # šaltinių medis | install(): bin/ + lib/vramflow-run/
+    if (_p / "vramflow_run").is_dir():
+        sys.path.insert(0, str(_p))
+        break
+
+from vramflow_run import config, graph, supervise  # noqa: E402
+from vramflow_run.supervise import log  # noqa: E402
+
+MAX_DOMAIN_PATH = 48  # cuda-linear payload.sock kelio riba (src/runtime/domain_lease.hpp, tests/perf/domain.py)
+
+
+def find_exe(explicit):
+    if explicit:
+        p = pathlib.Path(explicit)
+        return str(p) if p.is_file() and os.access(p, os.X_OK) else None
+    for c in (HERE / "vramflow-func", HERE.parent / "bin" / "vramflow-func"):
+        if c.is_file() and os.access(c, os.X_OK):
+            return str(c)
+    return shutil.which("vramflow-func")
+
+
+def make_domain(root: pathlib.Path) -> pathlib.Path:
+    while True:
+        d = root / f"vf-run-{secrets.token_hex(4)}"
+        try:
+            d.mkdir(mode=0o755)
+            return d
+        except FileExistsError:
+            continue
+
+
+def remove_domain(d: pathlib.Path) -> None:
+    lease = pathlib.Path(os.path.realpath(d) + ".vramflow")  # runtime::lease_dir
+    shutil.rmtree(d, ignore_errors=True)
+    shutil.rmtree(lease, ignore_errors=True)
+    log(f"domenas {d} {'pašalintas' if not d.exists() else 'NEPAŠALINTAS'}")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="vramflow-run", description="VRAMFlow grandinė iš JSON konfigūracijos")
+    ap.add_argument("config", help="konfigūracijos failas (schema v1; pavyzdžiai — config/examples/)")
+    ap.add_argument("--exe", help="vramflow-func kelias (numatyta: šalia, ../bin, PATH)")
+    ap.add_argument("--out", default=os.environ.get("VRAMFLOW_RUN_OUT", "vramflow-run-out"),
+                    help="vaikų santraukos ir statistika: <out>/<vaikas>/ (numatyta $VRAMFLOW_RUN_OUT arba ./vramflow-run-out)")
+    ap.add_argument("--domain-root", default=os.environ.get("VF_DOMAIN_ROOT", "/dev/shm"), help="MXL domenų šaknis (tmpfs)")
+    a = ap.parse_args(argv)
+    try:
+        plan = config.load(a.config)
+        config.check_secrets(plan)
+    except config.ConfigError as e:
+        log(f"{a.config}: {e}")
+        return 2
+    exe = find_exe(a.exe)
+    if exe is None:
+        log(f"nerastas vramflow-func ({a.exe or 'šalia, ../bin, PATH'}) — nurodykite --exe")
+        return 2
+    root = pathlib.Path(a.domain_root)
+    if len(str(root)) + len("/vf-run-") + 8 > MAX_DOMAIN_PATH or not root.is_dir():
+        log(f"--domain-root {root}: turi būti esamas katalogas, domeno kelias ≤ {MAX_DOMAIN_PATH} simbolių")
+        return 2
+    out = pathlib.Path(a.out).resolve()
+    domain = make_domain(root)
+    try:
+        procs = graph.commands(plan, str(domain), exe, out_dir=str(out))
+        for p in procs:
+            pathlib.Path(out, p.name).mkdir(parents=True, exist_ok=True)
+        return supervise.run(plan, procs, domain=str(domain))
+    finally:
+        remove_domain(domain)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

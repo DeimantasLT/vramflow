@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "format": "1080i50",
+  "storage": "cuda-linear",
+  "inputs": [
+    {"url": "srt://0.0.0.0:9000?mode=listener&latency=200000", "srt_passphrase_from": "env:SRT_IN_PASSPHRASE"}
+  ],
+  "process": {"logo": {"file": "builtin", "x": 1488, "y": 64}},
+  "outputs": [
+    {"url": "srt://0.0.0.0:9100?mode=listener&latency=200000", "vbitrate": 7500000, "abitrate": 192000,
+     "srt_passphrase_from": "env:SRT_OUT_PASSPHRASE"}
+  ],
+  "restart": {"max": 5, "window_s": 60},
+  "input_wait_s": 20
+}

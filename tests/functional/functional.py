@@ -1609,6 +1609,8 @@ def main():
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in overload.TESTS.items()})
     import faults  # klaidų keliai (2.5): fault_vram_exhausted, fault_nvenc_sessions, fault_cuda_midrun, fault_shm_full, fault_domain_readonly (tests/functional/faults.py)
     tests.update({k: (lambda fn=fn: fn(out)) for k, fn in faults.TESTS.items()})
+    import run  # vramflow-run prižiūrėtojas iš konfigūracijos (OK-2): frun_logo_udp, frun_multi4, frun_stop, … (tests/functional/run.py)
+    tests.update({k: (lambda fn=fn: fn(out)) for k, fn in run.TESTS.items()})
     results = []
     try:
         for name, fn in tests.items():
